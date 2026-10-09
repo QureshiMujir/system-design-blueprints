@@ -1,0 +1,418 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Text Editor Buffer — Architecture · Engineering Blueprints</title><meta name="description" content="Text Editor Buffer, hld: §3 overview + §8 domain model. Build a production-grade text-editor buffer subsystem — the mutable text-sequence data structure underlying any code editor, IDE, or text-processing tool — that stores an evolving byte sequence under…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/web-browsers-collaboration/">Web, Browsers &amp; Collaboration</a> </li><li> <a href="/system-design-blueprints/systems/text-editor-buffer/">Text Editor Buffer</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:255"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/web-browsers-collaboration/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Web, Browsers &amp; Collaboration</span></a> </p> <h1>Text Editor Buffer</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~24 weeks</li> <li>1,817 lines</li> <li>blueprint #140</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/text-editor-buffer/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/text-editor-buffer/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/text-editor-buffer/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/text-editor-buffer/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/text-editor-buffer/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/text-editor-buffer/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/text-editor-buffer/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/text-editor-buffer/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/text-editor-buffer/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/text-editor-buffer/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Text Editor Buffer — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌──────────────────────────────────────────────────────────────────────┐
+│ Host Application (editor / IDE / CLI tool)                          │
+│  calls TextBuffer trait: insert / delete / replace / slice / iter   │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                 │ TextBuffer trait (Core Schema §11)
+┌───────────────────────────────▼──────────────────────────────────────┐
+│ Backend (exactly one, chosen at construction; §31 for selection)    │
+│  ┌────────────┐   ┌───────────────┐   ┌─────────────────────────┐   │
+│  │ Gap Buffer │   │ B-Tree Rope   │   │ Piece Table             │   │
+│  │ Phase 2    │   │ Phase 3       │   │ Phase 4                 │   │
+│  └────────────┘   └───────────────┘   └─────────────────────────┘   │
+└───────┬───────────────┬────────────────────────┬─────────────────────┘
+        │ EditOp        │ EditOp                 │ EditOp
+        ▼               ▼                        ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ Line Index Sidecar (Phase 5, §17) — B+-tree, O(log n) line⇄byte      │
+├──────────────────────────────────────────────────────────────────────┤
+│ Position Converters (Phase 1/6, §13) — typed byte/char/utf16/        │
+│ grapheme/line-col, never implicit                                    │
+├──────────────────────────────────────────────────────────────────────┤
+│ Undo / Redo Stack (Phase 6, §18) — EditGroup, coalescing, inverse    │
+├──────────────────────────────────────────────────────────────────────┤
+│ Anchor Store (Phase 7, §19) — sticky offsets, interval-indexed        │
+├──────────────────────────────────────────────────────────────────────┤
+│ Observer Fan-out (Phase 9, §21) — ordered EditEvent, sync/async,     │
+│ per-subscriber back-pressure — trust boundary: host observers must   │
+│ not re-enter the buffer                                              │
+└──────────────────────────────────────────────────────────────────────┘
+        ▲                                              ▲
+        │ load_streaming / save_streaming              │ EditEvent stream
+┌───────┴──────────────────┐                  ┌─────────┴──────────────┐
+│ teb-io (Phase 8, §20)     │                  │ External consumers:    │
+│ persistence boundary:     │                  │ syntax highlighter,    │
+│ file system / mmap        │                  │ LSP synchroniser,      │
+└───────────────────────────┘                  │ CRDT/OT layer (edit    │
+                                                │ log, Phase 9, §21)     │
+                                                └─────────────────────────┘</code></pre>
+<p>Boxes, one paragraph each:</p>
+<p><strong>Host Application.</strong> Owns the <code>Box&lt;dyn TextBuffer&gt;</code>; issues mutations and reads only through the trait (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/design/#sec-11">§11</a>); never reaches into backend internals. Concurrency boundary: the host may run on any thread, but a given buffer instance&#39;s mutation calls are not internally synchronized — the host serializes writers (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#sec-7">§7</a>).</p>
+<p><strong>Backend.</strong> Exactly one of gap buffer, rope, or piece table is live per buffer instance; all three share the <code>TextBuffer</code> trait and are proven behaviourally identical by the differential harness (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/blueprint/#sec-26">§26</a>). Persistence boundary: only the piece table holds a direct relationship to on-disk bytes (the immutable <code>original_buf</code>, possibly mmap&#39;d); the other two fully materialise content in-process.</p>
+<p><strong>Line Index Sidecar.</strong> A B+-tree of cumulative line-feed counts, owned by <code>teb-core</code>, mutated by every backend through one entry point (<code>apply_edit</code>); never mutated directly by a backend reaching into its internals (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-5">P5</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-3">I3</a>).</p>
+<p><strong>Position Converters.</strong> A stateless service layered over <code>&amp;dyn TextBuffer</code>; converts between the five typed coordinate systems; the only place conversion logic lives (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-2">P2</a>).</p>
+<p><strong>Undo/Redo Stack.</strong> Optional, attached by the host; owns <code>EditGroup</code>s with precomputed inverses and explicit coalescing rules (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-7">P7</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/build/#sec-18">§18</a>).</p>
+<p><strong>Anchor Store.</strong> An interval-indexed structure of sticky offsets; updated synchronously on every edit before the edit is considered complete (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-6">P6</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-6">I6</a>).</p>
+<p><strong>Observer Fan-out.</strong> The sole mutation-export mechanism (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-5">P5</a>); a trust boundary — host-supplied observer callbacks must not re-enter the buffer (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#t-4">T4</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#sec-22">§22</a>) — and a concurrency boundary between the mutation thread and async subscriber threads.</p>
+<p><strong>teb-io.</strong> The persistence boundary to the file system; owns encoding detection, BOM handling, streaming chunked reads, and atomic-rename saves (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/build/#sec-20">§20</a>).</p>
+<p><strong>External consumers.</strong> Downstream of the observer protocol; out of this project&#39;s scope, but the edit log&#39;s shape (Phase 9, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/build/#sec-21">§21</a>) is designed so a CRDT/OT layer can consume it without buffer changes.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Backend structural models</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Backend</th>
+<th>Storage shape</th>
+<th>Mutation cost (local)</th>
+<th>Mutation cost (far)</th>
+<th>Immutable region</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Gap buffer (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/build/#sec-14">§14</a>)</td>
+<td>one <code>Vec&lt;u8&gt;</code> + a gap <code>Range</code></td>
+<td>O(1) amortised (<code>memcpy</code> into gap)</td>
+<td>O(n) (<code>move_gap</code>, one <code>copy_within</code>)</td>
+<td>none</td>
+</tr>
+<tr>
+<td>B-tree rope (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/build/#sec-15">§15</a>)</td>
+<td>B-tree, branching 8, leaves 4–8 KiB UTF-8 chunks, <code>Summary{bytes,chars,utf16,lines}</code> per node</td>
+<td>O(log n) always</td>
+<td>O(log n) always</td>
+<td>none (COW spine on snapshot)</td>
+</tr>
+<tr>
+<td>Piece table (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/build/#sec-16">§16</a>)</td>
+<td>immutable <code>original_buf</code> + append-only <code>add_buf</code> + red-black tree of <code>Piece{buf_tag,start,len,line_feeds}</code></td>
+<td>O(log n) tree splice, ≤3 pieces touched</td>
+<td>O(log n), same bound</td>
+<td><code>original_buf</code> (never mutated)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Position / index mapping model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Coordinate</th>
+<th>Backing structure</th>
+<th>Conversion cost</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ByteOffset</code></td>
+<td>native storage offset</td>
+<td>O(1)</td>
+<td>canonical coordinate; all others derive from it</td>
+</tr>
+<tr>
+<td><code>CharOffset</code></td>
+<td>chunked traversal</td>
+<td>O(distance) amortised via cursor</td>
+<td>codepoint count, not byte count</td>
+</tr>
+<tr>
+<td><code>Utf16Offset</code></td>
+<td>chunk <code>utf16</code> summary</td>
+<td>O(log n) via summary, O(1) via cursor</td>
+<td>BMP codepoint = 1 unit, non-BMP = 2 (surrogate pair)</td>
+</tr>
+<tr>
+<td><code>GraphemeOffset</code></td>
+<td>UAX #29 state machine over chunks</td>
+<td>O(distance), not summary-cacheable</td>
+<td>a chunk boundary can split a cluster; caching is unsound (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/blueprint/#sec-13-6">§13.6</a>)</td>
+</tr>
+<tr>
+<td><code>LineCol</code></td>
+<td>line-index B+-tree (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/build/#sec-17">§17</a>)</td>
+<td>O(log n)</td>
+<td>independent of the three coordinates above</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Edit application state machine</h3>
+<p>Every <code>insert</code> / <code>delete</code> / <code>replace</code> transitions through the same ordered steps regardless of backend, gated by the invariants of <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#sec-7">§7</a>:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>State</th>
+<th>Action</th>
+<th>Guard</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Received</td>
+<td>Validate <code>ByteRange</code> within <code>[0, len]</code>; reject if it splits a UTF-8 codepoint</td>
+<td><a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-2">I2</a></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Validated</td>
+<td>Locate the mutation site (move gap / descend B-tree / find pieces to split)</td>
+<td>backend-specific</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Located</td>
+<td>Mutate backend storage</td>
+<td>—</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Mutated</td>
+<td>Recompute node summaries / call <code>LineIndex::apply_edit</code></td>
+<td><a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-9">I9</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-10">I10</a></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Indexed</td>
+<td><code>AnchorStore::apply_edit</code> shifts or collapses anchors in range</td>
+<td><a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-4">I4</a></td>
+</tr>
+<tr>
+<td>6</td>
+<td>Anchored</td>
+<td>If undo attached: append <code>EditGroup</code> with precomputed inverse</td>
+<td><a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-5">I5</a></td>
+</tr>
+<tr>
+<td>7</td>
+<td>Logged</td>
+<td>Allocate the next <code>EditId</code>; fan out <code>EditEvent</code> to observers</td>
+<td><a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-12">I12</a></td>
+</tr>
+<tr>
+<td>8</td>
+<td>Delivered</td>
+<td>Return <code>EditId</code> to the host</td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<p>A failure at step 1 aborts before any mutation (no partial state); a failure at any later step is a debug-build panic (an internal invariant violation, never triggered by host input per <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-14">P14</a>).</p>
+<h3 id="sec-8-4">8.4 Anchors / marks model</h3>
+<p>Stickiness table (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-6">P6</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-4">I4</a>), restated as the transition each flavour undergoes for an edit at <code>[a, b)</code> relative to an anchor at offset <code>o</code>:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Stickiness</th>
+<th><code>o &lt; a</code></th>
+<th><code>o</code> in <code>[a, b)</code>, insert at <code>a</code> (<code>b=a</code>)</th>
+<th><code>o</code> in <code>[a, b)</code>, delete <code>[a,b)</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>StickyLeft</code></td>
+<td>unchanged</td>
+<td>stays at <code>a</code> (insert lands to its right)</td>
+<td>collapses to <code>a</code></td>
+</tr>
+<tr>
+<td><code>StickyRight</code></td>
+<td>unchanged</td>
+<td>shifts to <code>a + len(insert)</code></td>
+<td>collapses to <code>a</code></td>
+</tr>
+<tr>
+<td><code>Surround{start,end}</code></td>
+<td>unchanged</td>
+<td>each endpoint uses its own flavour</td>
+<td>both endpoints inside ⇒ range collapses to empty at <code>a</code></td>
+</tr>
+</tbody></table></div>
+<p>Anchors with <code>o &gt; b</code> always shift by the edit&#39;s net length delta; this row is identical across all three flavours and omitted from the table for density.</p>
+<h3 id="sec-8-5">8.5 Worked example</h3>
+<p>Buffer content (7 codepoints, 8 bytes): <code>&quot;café!\n&quot;</code> → bytes <code>63 61 66 C3 A9 21 0A</code> (é is U+00E9, 2-byte UTF-8, 1 UTF-16 unit, 1 grapheme). Host calls <code>insert(ByteOffset(5), &quot;!!&quot;)</code>(inserting two <code>!</code> right before the existing <code>!</code>):</p>
+<ol>
+<li>Step 1: <code>ByteOffset(5)</code> is a valid codepoint boundary (byte 5 is the start of <code>!</code>, byte 4 was the last byte of é) — passes <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-2">I2</a>.</li>
+<li>Step 2–3 (rope example): descend to the single leaf (buffer fits in one 4 KiB chunk); splice <code>&quot;!!&quot;</code> into the chunk at byte 5.</li>
+<li>Step 4: leaf <code>Summary</code> updates: <code>bytes += 2</code>, <code>chars += 2</code>, <code>utf16 += 2</code>, <code>lines += 0</code>; interior summaries (none here, single leaf) unaffected. <code>LineIndex::apply_edit</code> shifts the recorded line-feed position at byte 7 to byte 9.</li>
+<li>Step 5: no anchors registered in this example — no-op.</li>
+<li>Step 6: if undo attached, <code>EditGroup{ops: [Insert{at:5, content:&quot;!!&quot;}], inverse: [Delete{range:5..7}]}</code> is pushed.</li>
+<li>Step 7: <code>EditId(N+1)</code> allocated; <code>EditEvent{id, op, before_len:8, after_len:10}</code> fanned out.</li>
+<li>Result: <code>&quot;café!!!\n&quot;</code>, 10 bytes, <code>byte_to_line_col(ByteOffset(9)) == LineCol{line:0, col:9}</code>, <code>byte_to_utf16(ByteOffset(9)) == Utf16Offset(9)</code> (all codepoints so far are BMP).</li>
+</ol>
+<h3 id="sec-8-6">8.6 Malformed-input example</h3>
+<p>Host calls <code>delete(ByteRange{start: ByteOffset(3), end: ByteOffset(4)})</code> on the original <code>&quot;café!\n&quot;</code>. Byte 3 is <code>0xC3</code> (the first byte of é&#39;s two-byte encoding) and byte 4 is <code>0xA9</code> (its continuation byte); the requested range removes only the lead byte, which would leave a dangling continuation byte at the new offset 3 — an invalid UTF-8 sequence. Step 1 of <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#sec-8-3">§8.3</a> rejects the call: <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-2">I2</a> fires, the buffer returns <code>EditError::Utf8Boundary{offset: ByteOffset(3)}</code>, no mutation occurs, no <code>EditId</code> is allocated, and no observer is notified. The host is expected to snap the range to the nearest codepoint boundary and retry (documented in <code>docs/runbooks/</code> per <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/blueprint/#sec-24">§24</a>).</p>
+<h3 id="sec-8-7">8.7 Failure-path example</h3>
+<p>A host saves a 200 MB buffer (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-13">P13</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/build/#sec-20">§20</a>). <code>teb-io</code> streams the <code>BufferSnapshot</code> to <code>buffer.tmp</code> in 64 KiB chunks; the process is killed (OOM-killer, power loss) after 150 MB is written, before the atomic rename. On restart: the original <code>buffer.txt</code> is untouched (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-11">I11</a> — the rename never happened, so the original path was never the write target); <code>teb-io</code>&#39;s open path finds the orphaned <code>buffer.tmp</code>, verifies it against a size/checksum recorded in the autosave journal (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/blueprint/#sec-20-10">§20.10</a>), determines it is a partial write, and discards it; if autosave was enabled, the host recovers the last complete autosave checkpoint plus any journalled edits since that checkpoint (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#fm-7">FM-7</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#sec-23">§23</a>), typically losing at most the coalesce window&#39;s worth of unsaved edits (≤1 s of typing, per <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-7">P7</a>&#39;s coalescing default).</p>
+<h3 id="sec-8-8">8.8 Rope worked example (leaf split and summary propagation)</h3>
+<p>Consider a rope (branching factor 8, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/trade-offs/#adr-3">ADR-03</a>) whose root has two leaf children: <code>Leaf A = &quot;The quick brown fox jumps over&quot;</code> (31 bytes, <code>Summary{bytes:31, chars:31, utf16:31, lines:0}</code>) and <code>Leaf B = &quot; the lazy dog.\n&quot;</code> (15 bytes, <code>Summary{bytes:15, chars:15, utf16:15, lines:1}</code>); the root&#39;s own summary is the component-wise sum, <code>Summary{bytes:46, chars:46, utf16:46, lines:1}</code> (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/study/#sec-30">MM3</a> — a summary is a monoid). Host calls <code>insert(ByteOffset(31), &quot; and cat&quot;)</code> — exactly at the leaf boundary. Step 2 of <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#sec-8-3">§8.3</a> descends to <code>Leaf A</code> (the insertion point is at its end); Leaf A grows to 39 bytes, still within <code>[2048, 8192]</code>&#39;s lower bound trivially (small example; in production leaves stay 4–8 KiB), so no split is needed — but if this insert had instead been a 9,000-byte paste, Leaf A would exceed the 8 KiB ceiling (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/blueprint/#sec-15-2">§15.2</a>) and split into two sibling leaves, promoting a new internal node if the root&#39;s child count would otherwise exceed 8 (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/trade-offs/#adr-3">ADR-03</a>). Step 4 recomputes <code>Leaf A</code>&#39;s summary to <code>Summary{bytes:39, chars:39, utf16:39, lines:0}</code> and the root&#39;s summary bottom-up to <code>Summary{bytes:54, chars:54, utf16:54, lines:1}</code> (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-10">I10</a>) — no other leaf is touched, demonstrating the O(log n) locality of the summary-recomputation walk (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/blueprint/#sec-15-2">§15.2</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/study/#sec-30">MM3</a>).</p>
+<h3 id="sec-8-9">8.9 Piece-table worked example (piece split under a mid-string edit)</h3>
+<p><code>original_buf = &quot;The quick brown fox&quot;</code> (20 bytes) loaded as a single piece <code>P0{buf:Original, start:0, len:20, line_feeds:0}</code>; the tree has one node, <code>subtree_bytes = 20</code>. Host calls <code>insert(ByteOffset(4), &quot;very &quot;)</code>. Step 2 of <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#sec-8-3">§8.3</a> locates the split point inside <code>P0</code> at relative offset 4; <code>P0</code> splits into <code>P0a{buf:Original, start:0, len:4}</code> (&quot;The &quot;) and <code>P0b{buf:Original, start:4, len:16}</code> (&quot;quick brown fox&quot;); the inserted text is appended to <code>add_buf</code> at offset 0 and referenced by a new piece <code>P1{buf:Add, start:0, len:5, line_feeds:0}</code> (&quot;very &quot;); the tree becomes <code>P0a → P1 → P0b</code> in-order (three pieces from one, matching <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/blueprint/#sec-16-2">§16.2</a>&#39;s &quot;at most 3 pieces touched&quot; bound for an insert). Step 4 recomputes <code>subtree_bytes</code> bottom-up to <code>25</code> (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-9">I9</a>); <code>original_buf</code> itself is never mutated — only the tree and <code>add_buf</code> grew, matching the &quot;immutable original, append-only delta&quot; property that makes the piece table win the &quot;open huge file, edit small&quot; workload (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/blueprint/#sec-2">§2</a>, VS Code reading <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/study/#sec-5">§5</a>).</p>
+<h3 id="sec-8-10">8.10 Cross-backend equivalence example (the differential harness&#39;s core claim, by hand)</h3>
+<p>Starting from the empty buffer, apply the sequence <code>[insert(0, &quot;café&quot;), insert(4, &quot;!&quot;), delete(0..1)]</code> to a gap buffer, a rope, and a piece table independently. Gap buffer: <code>&quot;café&quot;</code> → <code>&quot;café!&quot;</code> → <code>&quot;afé!&quot;</code> (delete removes the leading <code>&quot;c&quot;</code>, 1 byte). Rope: identical sequence produces the same content via leaf mutation and summary update at each step (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#sec-8-8">§8.8</a>&#39;s mechanism at a smaller scale). Piece table: <code>insert(0,&quot;café&quot;)</code> creates one add-buffer piece; <code>insert(4,&quot;!&quot;)</code> appends to the same add-buffer piece (contiguous append, no split needed since the insertion point is at the piece&#39;s end); <code>delete(0..1)</code> splits the piece to drop its first byte. All three report <code>slice(ByteRange{0, 5}) == &quot;afé!&quot;</code> and <code>len_bytes() == ByteOffset(5)</code> — the byte-for-byte agreement <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-9">P9</a> mandates and the differential harness (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/blueprint/#sec-26">§26</a>) checks mechanically for every fixture, not just this one by-hand trace.</p>
+<h3 id="sec-8-11">8.11 Undo-coalescing worked example</h3>
+<p>A host types <code>&quot;cat&quot;</code> one keystroke at a time with an attached <code>UndoStack</code> (default <code>UndoConfig</code>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/blueprint/#sec-18-2">§18.2</a>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Keystroke</th>
+<th>Elapsed since previous</th>
+<th><code>CoalesceKey</code></th>
+<th>Stack action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>insert(0, &quot;c&quot;)</code></td>
+<td>— (first edit)</td>
+<td><code>{line:0, direction:Right}</code></td>
+<td>opens <code>EditGroup#1</code></td>
+</tr>
+<tr>
+<td><code>insert(1, &quot;a&quot;)</code></td>
+<td>0.2 s</td>
+<td><code>{line:0, direction:Right}</code></td>
+<td>matches <code>#1</code>&#39;s key, within 1 s window → coalesces into <code>#1</code></td>
+</tr>
+<tr>
+<td><code>insert(2, &quot;t&quot;)</code></td>
+<td>0.3 s</td>
+<td><code>{line:0, direction:Right}</code></td>
+<td>coalesces into <code>#1</code></td>
+</tr>
+</tbody></table></div>
+<p>After the third keystroke, <code>EditGroup#1.ops = [Insert{0,&quot;c&quot;}, Insert{1,&quot;a&quot;}, Insert{2,&quot;t&quot;}]</code> and <code>EditGroup#1.inverse = [Delete{0..1}, Delete{1..2}, Delete{2..3}]</code> computed at each step (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-5">I5</a>). A single <code>undo()</code> call applies the inverse ops in reverse, removing <code>&quot;t&quot;</code>, then <code>&quot;a&quot;</code>, then <code>&quot;c&quot;</code> — restoring the empty buffer in <strong>one</strong> host-visible undo step, not three, which is exactly <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-7">P7</a>&#39;s &quot;undo is structural, not character-by-character&quot; principle made concrete.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Typed positions, never bare integers (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-1">P1</a>).</strong> A position is one of <code>ByteOffset</code>, <code>CharOffset</code>, <code>Utf16Offset</code>, <code>GraphemeOffset</code>, <code>LineCol</code>; implicit coercion across types is a compile-time error. <em>Tradeoff:</em> wider API surface, more conversion call-sites. <em>Operational implication:</em> position-confusion, historically the largest editor bug class, becomes structurally unrepresentable. <em>Violation breaks:</em> an LSP synchroniser silently drifts on every non-ASCII line.</li><li id="p-2"><strong>UTF-8 internal, UTF-16 only at the LSP boundary (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-2">P2</a>).</strong> The buffer never stores UTF-16 or Latin-1 internally; conversion happens at <code>teb-positions</code>. <em>Tradeoff:</em> every LSP round-trip pays a conversion. <em>Operational implication:</em> one conversion path to audit, not N. <em>Violation breaks:</em> silent double-encoding on save.</li><li id="p-3"><strong>No silent denormalization (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-3">P3</a>).</strong> Bytes that go in come out bit-identical on save; no BOM stripping, no line-ending conversion, unless the host opts in via <code>BufferConfig</code>. <em>Tradeoff:</em> the buffer cannot &quot;clean up&quot; a file automatically. <em>Operational implication:</em> diffs against the on-disk file are always faithful. <em>Violation breaks:</em> an editor that silently rewrites a vendored file&#39;s line endings on open, corrupting a checked-in diff.</li><li id="p-4"><strong>All operations O(log n) or better, one documented exception (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-4">P4</a>).</strong> The gap buffer&#39;s amortized-O(1)-at-the-gap guarantee is published and bounded; every other operation on every backend is O(log n) worst case. <em>Tradeoff:</em> the rope/piece backends pay a constant-factor tax the gap buffer does not. <em>Operational implication:</em> a host can reason about worst-case latency without backend-specific caveats except the one documented gap-buffer case. <em>Violation breaks:</em> an unbounded backend turns a 200 MB refactor into a multi-second stall.</li><li id="p-5"><strong>The observer protocol is the only mutation export (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-5">P5</a>).</strong> Backends never expose internal handles; downstream consumers reconstruct state from <code>EditEvent</code>s. <em>Tradeoff:</em> consumers cannot cheaply peek at backend internals for debugging. <em>Operational implication:</em> every consumer sees the same edit stream, so there is one source of truth for &quot;what changed.&quot; <em>Violation breaks:</em> a highlighter that reads backend internals directly desyncs the moment the backend is swapped.</li><li id="p-6"><strong>Anchors are sticky, not stable (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-6">P6</a>).</strong> An anchor&#39;s byte offset changes as edits land; stickiness (<code>StickyLeft</code>/<code>StickyRight</code>/<code>Surround</code>) is chosen per anchor at creation. <em>Tradeoff:</em> three flavours to implement and test instead of one. <em>Operational implication:</em> every editor&#39;s anchor semantics (cursor, selection, bookmark) is expressible without a special case. <em>Violation breaks:</em> a bookmark that silently points at the wrong line after an edit upstream of it.</li><li id="p-7"><strong>Undo is structural, not character-by-character (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-7">P7</a>).</strong> <code>EditGroup</code> is the atom of undo; coalescing rules are explicit (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/build/#sec-18">§18</a>). <em>Tradeoff:</em> coalescing logic is another surface to get right. <em>Operational implication:</em> undo feels like a human edit, not a keystroke replay. <em>Violation breaks:</em> undoing a paste requires N keystrokes-worth of undo presses.</li><li id="p-8"><strong>Streaming load and save (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-8">P8</a>).</strong> A large file is usable for reads while it loads and editable while it saves, via a snapshot taken at save-start. <em>Tradeoff:</em> the IO layer is stateful and more complex than &quot;read the whole file.&quot; <em>Operational implication:</em> a 200 MB file does not freeze the editor UI thread. <em>Violation breaks:</em> opening a large log file blocks the user for the full read duration.</li><li id="p-9"><strong>Differential testing is the specification (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-9">P9</a>).</strong> Every behavioural test runs against all three backends; disagreement is a failing test, not a documented quirk. <em>Tradeoff:</em> triples test execution time. <em>Operational implication:</em> &quot;the backends disagree&quot; becomes structurally impossible in a shipped release. <em>Violation breaks:</em> silent behavioural drift between backends that a host relies on being interchangeable.</li><li id="p-10"><strong>Reproducibility is a feature (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-10">P10</a>).</strong> Every fuzz and bench harness records its random seed; every run is replayable. <em>Tradeoff:</em> seed-capture plumbing in every harness entry point. <em>Operational implication:</em> a CI-only failure is always locally reproducible. <em>Violation breaks:</em> an unreproducible fuzz finding that cannot be triaged.</li><li id="p-11"><strong>One mutation entry point per aggregate (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-11">P11</a>).</strong> The line index has exactly one mutator, <code>apply_edit</code>; no backend recomputes or duplicates line-counting logic. <em>Tradeoff:</em> every backend must funnel through the shared sidecar rather than optimizing its own count. <em>Operational implication:</em> a line-index bug has one place to look. <em>Violation breaks:</em> two backends silently disagree on line numbers after the same edit sequence.</li><li id="p-12"><strong>Backpressure over silent drop (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-12">P12</a>).</strong> An async observer that falls behind either blocks the bounded channel or explicitly increments a drop counter; it never silently loses events. <em>Tradeoff:</em> a slow observer can throttle the whole edit path if configured to block. <em>Operational implication:</em> &quot;the highlighter missed an edit&quot; is observable via telemetry, never silent. <em>Violation breaks:</em> a syntax highlighter that renders stale code with no indication anything is wrong.</li><li id="p-13"><strong>Crash safety over save throughput (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-13">P13</a>).</strong> Autosave and atomic-rename-on-save take precedence over raw write speed. <em>Tradeoff:</em> a save is at least one extra fsync and rename versus a naive overwrite. <em>Operational implication:</em> a crash mid-save never corrupts the on-disk file. <em>Violation breaks:</em> a power loss during save truncates the user&#39;s file.</li><li id="p-14"><strong>Typed, non-panicking errors on host input (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-14">P14</a>).</strong> Every public enum is <code>#[non_exhaustive]</code>; every fallible operation returns a typed error; the buffer never panics on host-supplied input, only on internal invariant violation in debug builds. <em>Tradeoff:</em> every call site must handle a <code>Result</code>. <em>Operational implication:</em> a malformed host call degrades gracefully instead of crashing the process. <em>Violation breaks:</em> one bad LSP request from a misbehaving client crashes the whole editor process.</li><li id="p-15"><strong>Save atomicity via rename, never via careful write ordering (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-15">P15</a>).</strong> A save always writes to a temp path and renames over the target; the original file is never a direct write target (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-15">I15</a>). <em>Tradeoff:</em> one extra fsync/rename per save. <em>Operational implication:</em> a crash at any point during save leaves either the old file intact or the new one complete — never a hybrid. <em>Violation breaks:</em> a power-loss event during save truncates or corrupts the user&#39;s file irrecoverably (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/study/#sec-30">MM8</a>).</li><li id="p-16"><strong>Bounded integer fields with explicit rejection, never silent wraparound (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/architecture/#p-16">P16</a>).</strong> Every length/offset field with a fixed integer width (<code>u32</code> piece lengths, gap sizes) is checked at construction and growth; an operation that would overflow is rejected with a typed error rather than silently wrapping (<a class="cite" href="/system-design-blueprints/systems/text-editor-buffer/reliability/#inv-16">I16</a>). <em>Tradeoff:</em> an extra bounds check on every growth path. <em>Operational implication:</em> a pathological paste is rejected cleanly instead of corrupting offset arithmetic. <em>Violation breaks:</em> a length overflow silently aliases two unrelated pieces of content, a corruption class with no error signal at the moment it occurs.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

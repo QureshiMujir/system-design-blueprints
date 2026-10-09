@@ -1,0 +1,304 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>KV-Cache + Speculative Decoding — Architecture · Engineering Blueprints</title><meta name="description" content="KV-Cache + Speculative Decoding, hld: §3 overview + §8 domain model. Build a high-throughput LLM inference engine — in the vLLM / TensorRT-LLM / llama.cpp lineage — that serves an open-weights decoder-only transformer (Llama-3-8B, Qwen-2-7B, Mistral-7B family; GQA…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/kv-cache-speculative/">KV-Cache + Speculative Decoding</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>KV-Cache + Speculative Decoding</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Python</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>10 phases</li> <li>~26 weeks</li> <li>2,538 lines</li> <li>blueprint #117</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/kv-cache-speculative/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/kv-cache-speculative/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/kv-cache-speculative/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/kv-cache-speculative/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/kv-cache-speculative/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/kv-cache-speculative/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/kv-cache-speculative/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/kv-cache-speculative/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/kv-cache-speculative/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:KV-Cache + Speculative Decoding — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                              requests in (HTTP / gRPC, OpenAI-compat)
+                                          |
+                                +---------v---------+
+                                |   request router  |   tokenize, sampling params,
+                                |                    |   speculative_method select
+                                +---------+---------+
+                                          |
+                                +---------v---------+
+                                |     scheduler      |   continuous batching (§15)
+                                |  Waiting / Running |   Waiting/Running/Swapped/Aborted
+                                |  Swapped / Aborted |   admission + preemption (§15.2)
+                                +---+----------+----+
+                                    |          |
+                     admit/preempt |          | schedule_step -&gt; BatchPlan
+                                    |          |
+                            +-------v----------v-------+
+                            |    KV-cache manager       |   block pool (§14)
+                            |  block table per seq      |   prefix cache (§16)
+                            |  prefix-share refs (CoW)  |   copy-on-write (§16.4)
+                            |  eviction / swap policy    |   swap to host mem (§15.6)
+                            +-----------+--------------+
+                                        |
+                            block tables, slot mapping (BatchPlan, §11.5)
+                                        |
+                            +-----------v--------------+
+                            |     model forward         |   paged attention (§13)
+                            |  prefill OR decode         |   Kwon et al. 2023
+                            |  fused RMSNorm/RoPE        |   Dao et al. 2022/2023
+                            |  logits -&gt; sampler         |
+                            +-----------+--------------+
+                                        |
+                            +-----------v--------------+
+                            |   speculative decoder      |   draft (§17) | Medusa (§18)
+                            |  propose K tokens          |   | lookahead (§19)
+                            |  verify in ONE forward     |   rejection sampling (I9)
+                            |  accept/reject prefix      |
+                            +-----------+--------------+
+                                        |
+                            +-----------v--------------+
+                            |  detokenizer + stream      |   per-request SSE channel
+                            |  usage accounting          |   Prometheus/OTel (§24)
+                            +--------------------------+</code></pre>
+<p><strong>Request router.</strong> Terminates HTTP/gRPC, tokenizes, validates <code>SamplingParams</code>/
+<code>SpeculativeParams</code> (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-11-4">§11.4</a>), assigns a <code>SequenceId</code>, hands the <code>Sequence</code> to the
+scheduler. Trust boundary: the only place untrusted client input is parsed.</p>
+<p><strong>Scheduler.</strong> Owns four named sequence sets (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#inv-3">I3</a>) and the fairness policy (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-7">P7</a>); the sole
+concurrency boundary between request arrival and GPU execution — one <code>schedule_step()</code>
+call per tick, never re-entrant.</p>
+<p><strong>KV-cache manager.</strong> Owns the physical block pool, the per-sequence block tables, the
+hash-keyed prefix cache, and copy-on-write; the sole authority on GPU-memory admission
+(<code>can_allocate</code>) — the persistence boundary for anything that must survive a preemption
+(swap to host memory, <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-15-6">§15.6</a>).</p>
+<p><strong>Model forward.</strong> Pure function of <code>BatchPlan → BatchOutput</code> (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#inv-5">I5</a>); the protocol boundary
+between scheduler-owned bookkeeping and kernel-owned tensor math; never mutates
+scheduler or cache-manager state directly.</p>
+<p><strong>Speculative decoder.</strong> Wraps the model forward with a propose/verify/accept loop;
+scheduler-visible (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-4">P4</a>) — the scheduler, not the model, decides whether a step is
+speculative and how many slots to reserve.</p>
+<p><strong>Detokenizer + stream.</strong> Per-request incremental detokenization and the external
+streaming interface (SSE); the only component touching a <code>str</code> — everything upstream is
+token ids.</p>
+<p>All later sections stay consistent with this diagram; a component not shown here does not
+exist in the runtime path.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 KV-cache layout</h3>
+<p>Per-layer, per-head K and V tensors are stored in a single physical pool tensor of shape
+<code>(2, num_layers, num_blocks, block_size, num_kv_heads, head_dim)</code>. A <strong>block</strong> holds
+<code>block_size</code> (16) contiguous token positions&#39; K and V for <strong>every layer</strong> — one block
+allocation serves the whole model depth, avoiding per-layer fragmentation.</p>
+<pre class="diagram"><code>Physical pool tensor (conceptual layout):
+
+  axis 0: {K=0, V=1}
+  axis 1: layer   0 .. L-1
+  axis 2: block   0 .. num_blocks-1      &lt;- BlockId indexes here
+  axis 3: slot    0 .. block_size-1      &lt;- offset_within_block
+  axis 4: kv_head 0 .. num_kv_heads-1
+  axis 5: dim     0 .. head_dim-1
+
+  addressing: physical_slot(seq, position) =
+      block_table[seq].physical[position // block_size]   -&gt; BlockId
+      offset = position % block_size                       -&gt; slot index</code></pre>
+<h3 id="sec-8-2">8.2 Paged-block state machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Meaning</th>
+<th>Entered from</th>
+<th>Exits to</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Free</code></td>
+<td>Not owned by any sequence</td>
+<td>init, <code>free_block</code></td>
+<td><code>Allocated</code></td>
+</tr>
+<tr>
+<td><code>Allocated</code> (writable)</td>
+<td>Owned by one sequence, <code>ref_count = 1</code>, not full</td>
+<td><code>Free</code> (alloc)</td>
+<td><code>Sealed</code>, <code>Free</code></td>
+</tr>
+<tr>
+<td><code>Sealed</code> (immutable)</td>
+<td><code>is_full = true</code>, <code>content_hash</code> set</td>
+<td><code>Allocated</code> (block fills)</td>
+<td><code>Shared</code></td>
+</tr>
+<tr>
+<td><code>Shared</code></td>
+<td><code>ref_count &gt; 1</code>, multiple sequences reference it</td>
+<td><code>Sealed</code> (prefix hit / CoW source)</td>
+<td><code>Allocated</code> (via <code>cow_block</code>, new copy)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Draft/target speculative verification — worked example</h3>
+<p>K = 3 proposed tokens, draft distribution <code>q</code>, target distribution <code>p</code>, per Leviathan et
+al. 2023 <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-2">§2</a>:</p>
+<pre class="diagram"><code>step   draft token   q(token)   p(token)   accept prob = min(1, p/q)   outcome
+1      &quot;the&quot;         0.60       0.55       0.917                       accept (r=0.40)
+2      &quot;cat&quot;         0.45       0.20       0.444                       reject (r=0.70)
+       -&gt; resample from  max(0, p - q) normalized over full vocab
+       -&gt; resampled token: &quot;dog&quot;                                       (I9 holds: distribution = p)
+(step 3 not reached; verification stops at first reject + 1 bonus token)</code></pre>
+<p>Accepted prefix = <code>[&quot;the&quot;, &quot;dog&quot;]</code> (2 tokens from 1 forward pass of the target model,
+vs. 2 sequential target forwards without speculation). The accept/reject decision uses a
+single uniform draw <code>r ~ U(0,1)</code> per proposed token, compared against <code>min(1, p(x)/q(x))</code>
+— this is the entire correctness-critical logic of <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#inv-9">I9</a>.</p>
+<h3 id="sec-8-4">8.4 Malformed-input examples</h3>
+<ul>
+<li><strong>Prefix-cache hash collision:</strong> two distinct token sequences hash to the same
+<code>content_hash</code> (xxHash3, <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/trade-offs/#adr-19">ADR-19</a>). Detection: <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-16-5">§16.5</a> verify step re-compares the actual
+token ids on a candidate cache hit before serving it; a mismatch is logged as
+<code>prefix_cache_hash_collision_total</code> and treated as a cache miss (never served as a
+false hit).</li>
+<li><strong>Draft/target vocab mismatch:</strong> a draft model with a different tokenizer or vocab
+size than the target. Detection: a startup-time check (<code>SpeculativeParams</code> validation,
+Phase 5) compares <code>vocab_size</code> and a fixed set of special-token ids; mismatch is a
+<strong>startup error</strong>, never a runtime crash (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-4">P4</a>, <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#fm-7">FM-7</a>).</li>
+<li><strong><code>num_speculative_tokens</code> exceeding remaining <code>max_seq_len</code> budget:</strong> the admission
+check (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#inv-8">I8</a>) clamps the speculative window to <code>max_seq_len - current_len</code> before
+allocating speculative blocks; an unclamped request would over-allocate blocks that
+are immediately freed, wasting a <code>can_allocate</code> cycle.</li>
+</ul>
+<h3 id="sec-8-5">8.5 Failure-path example</h3>
+<p>A <code>Running</code> sequence mid-speculation loses its draft-model forward (draft-model worker
+OOM). Recovery path: the speculative decoder catches the draft failure, falls back to
+<code>speculative_method = off</code> <strong>for that sequence only</strong> (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-4">P4</a>), logs
+<code>spec_draft_failure_total</code>, and the scheduler continues the sequence in plain decode
+mode for the remainder of its lifetime — the sequence is never aborted for a draft
+failure (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#inv-8">I8</a>&#39;s abort path is reserved for <code>max_seq_len</code> and explicit operator kill only).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-1">P1</a> — Block-as-allocation-unit.</strong> KV memory is allocated/freed/shared/evicted as fixed-size blocks (B = 16 tokens default). Tradeoff: internal fragmentation ≤ B−1 tokens/sequence vs. the unbounded external fragmentation of contiguous allocation. Violating it (falling back to per-sequence contiguous buffers) reintroduces the 30–60% fragmentation loss the vLLM paper measured — see <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/trade-offs/#adr-2">ADR-02</a>.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-2">P2</a> — Prefix-sharing by default.</strong> Sequences with a common prompt prefix share blocks by reference (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/build/#sec-16">§16</a>); no opt-in flag required. Tradeoff: a refcounted block is immutable once shared (forces copy-on-write, <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-3">P3</a>). Violating it (per-sample copies) costs O(n) memory for n-way parallel sampling instead of O(1) extra.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-3">P3</a> — Copy-on-write on divergence.</strong> The first writer to a shared block forks a new physical block (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-16-4">§16.4</a>). Tradeoff: one extra block-copy per divergence point vs. correctness under concurrent mutation. Violating it silently corrupts a sibling sequence&#39;s cache (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#inv-6">I6</a>).</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-4">P4</a> — Speculative-as-config.</strong> <code>speculative_method ∈ {off, draft, medusa, lookahead}</code> is a per-request or per-deployment toggle; scheduler and cache manager are speculation-agnostic below <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/build/#sec-17">§17</a>. Tradeoff: extra indirection (<code>SpeculativePlan</code>, <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-11-6">§11.6</a>) vs. the ability to disable speculation in production with zero code change when acceptance collapses (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#fm-6">FM-6</a>).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-5">P5</a> — Never-recompute-prefix.</strong> A cache hit on a hashed prefix (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-16-3">§16.3</a>) is a lookup, never a re-forward. Tradeoff: hashing cost (~50 ns/block, xxHash3) vs. skipping an entire prefill forward (milliseconds). Violating it defeats the entire purpose of the prefix cache.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-6">P6</a> — KV-quant orthogonal.</strong> The dtype of a KV block (FP16/INT8/INT4) is a per-pool configuration invisible to the scheduler, prefix cache, and speculative loop (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/build/#sec-20">§20</a>). Tradeoff: an extra dequant step in the attention kernel vs. keeping every upstream component dtype-agnostic. Violating it (hardcoding FP16 assumptions) blocks quantization from ever shipping without a scheduler rewrite.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-7">P7</a> — Fairness policy is named and singular.</strong> Exactly one <code>SchedulingPolicy</code> (FCFS, priority, or fair-share) is active per deployment, implemented once (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-15-3">§15.3</a>). Tradeoff: less per-request flexibility vs. a debuggable, single code path. Violating it (heuristics scattered across three files) is the #1 documented root cause of scheduler bugs in production serving stacks (TGI issue history, <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/compare/#sec-31">§31</a>).</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-8">P8</a> — Preemption, not panic.</strong> A sequence that cannot fit a new block is swapped to host memory or aborted (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#inv-8">I8</a>); out-of-memory in the cache manager is a scheduled state transition, never an unhandled exception. Tradeoff: swap bandwidth cost (~PCIe Gen5 ~50 GB/s) vs. never crash-looping the worker under load.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-9">P9</a> — One model forward per scheduler step.</strong> Prefill, decode, and speculative verification for every admitted sequence share one <code>forward(BatchPlan)</code> call (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#inv-5">I5</a>). Tradeoff: a more complex ragged-batch kernel vs. avoiding per-step Python/kernel-launch overhead doubling. Violating it (separate prefill/decode passes) costs the ~200 µs per-step launch overhead twice, dominating at small batch sizes.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-10">P10</a> — Tokenizer/detokenizer in-process.</strong> No network round-trip for tokenization; the CPU-side incremental detokenizer runs on the same host as the GPU worker. Tradeoff: CPU core contention with NCCL/driver threads vs. removing a network hop from the token-emission critical path.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-11">P11</a> — Numerics tested against a reference, always.</strong> Every kernel (paged attention, fused RMSNorm/RoPE, sampler) is unit-tested against a PyTorch-eager reference at a stated per-element tolerance (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#inv-11">I11</a>). Tradeoff: a slower CI numerics suite (~10 min) vs. catching silent precision drift before it reaches production (the single hardest class of bug to diagnose post-hoc).</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-12">P12</a> — Benchmarks are reproducible artifacts.</strong> Every benchmark run pins CUDA toolkit, driver, model-weight hash, prompt corpus, and RNG seed, and is invoked by one <code>make bench</code> target (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-27">§27</a>). Tradeoff: benchmark-harness maintenance cost vs. a number nobody can dispute in a regression review.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-13">P13</a> — Output-distribution equivalence is non-negotiable.</strong> Any speculative method must produce token distributions statistically indistinguishable from the target model run without speculation (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/reliability/#inv-9">I9</a>). Tradeoff: rejecting faster-but-approximate accept rules (e.g. always-accept top-1) in favor of the proven rejection-sampling construction (Leviathan et al. 2023, Chen et al. 2023).</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/architecture/#p-14">P14</a> — Every accelerant is independently toggleable and independently measured.</strong> Paging, prefix caching, speculation, and quantization each have a benchmark and a kill-switch (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/numbers/#sec-28">§28</a> M-series, <a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-11-4">§11.4</a> config flags). Tradeoff: a combinatorial benchmark matrix (<a class="cite" href="/system-design-blueprints/systems/kv-cache-speculative/blueprint/#sec-27">§27</a>) vs. being able to attribute a regression to exactly one subsystem.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

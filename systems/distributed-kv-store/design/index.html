@@ -1,0 +1,613 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Key-Value Store — Design · Engineering Blueprints</title><meta name="description" content="Distributed Key-Value Store, lld: core types, repo tree, file inventory. Build a production-grade, strongly-consistent, replicated key-value store — an etcd/Consul-class coordination substrate — in Go: gRPC + JSON-HTTP-gateway APIs, MVCC with per-key revision history…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/distributed-kv-store/">Distributed Key-Value Store</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Distributed Key-Value Store</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Go</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~37 weeks</li> <li>3,029 lines</li> <li>blueprint #38</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-kv-store/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-kv-store/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-kv-store/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-kv-store/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-kv-store/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-kv-store/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-kv-store/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-kv-store/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-kv-store/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Key-Value Store — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/distributed-kv-store/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>type Revision struct { Main uint64; Sub uint64 }
+func (r Revision) GreaterThan(o Revision) bool
+
+type generation struct {
+    Ver       uint64
+    Created   Revision
+    Tombstone Revision   // zero value = not deleted
+    Revisions []Revision
+}
+
+type KeyIndex struct {
+    Key         []byte
+    Modified    Revision
+    Generations []generation
+}
+func (k *KeyIndex) Put(rev Revision) (ver uint64)
+func (k *KeyIndex) Get(atRev Revision) (rev Revision, created Revision, ver uint64, ok bool)
+func (k *KeyIndex) Tombstone(rev Revision)</code></pre><pre class="code"><code>type PutRequest struct {
+    Key, Value  []byte
+    Lease       LeaseID
+    PrevKv      bool
+    IgnoreValue bool
+    IgnoreLease bool
+}
+
+type RangeRequest struct {
+    Key, RangeEnd     []byte
+    Limit             int64
+    Revision          int64     // 0 = current
+    SortOrder         SortOrder
+    SortTarget        SortTarget
+    Serializable      bool      // true skips ReadIndex (P1)
+    KeysOnly, CountOnly bool
+    MinModRevision, MaxModRevision       int64
+    MinCreateRevision, MaxCreateRevision int64
+}
+
+type KeyValue struct {
+    Key, Value      []byte
+    CreateRevision  int64
+    ModRevision     int64
+    Version         int64
+    Lease           LeaseID
+}</code></pre><pre class="code"><code>type WatchRequest struct {
+    Key, RangeEnd  []byte
+    StartRevision  int64
+    ProgressNotify bool
+    Filters        []EventType
+    PrevKv         bool
+}
+
+type Event struct { Type EventType; Kv KeyValue; PrevKv *KeyValue }
+
+type LeaseID uint64
+
+type Lease struct {
+    ID        LeaseID
+    TTL       time.Duration
+    Granted   time.Time
+    Keys      [][]byte
+    LastTouch time.Time
+}
+
+type Hub struct {
+    // Own: one instance per server process (P3).
+    // Mut: watcher set mutated under mu; event delivery is non-blocking (tryEnqueue).
+    // Conc: RWMutex-guarded range index; per-watcher bounded channel outbox.
+    // Pers: none — rebuilt from client re-subscription on restart.
+}
+func (h *Hub) Watch(rng KeyRange, start Revision, opts WatchOptions) (Iterator, error)
+func (h *Hub) Notify(ev Event)
+
+type Manager struct {
+    // Own: one instance per server; follower-replicated map (P4, I5).
+    // Mut: writes flow only through Raft-applied LeaseGrant/LeaseRevoke; expiry scan is
+    //      leader-only and itself proposes LeaseRevoke rather than mutating locally.
+    // Conc: guarded by mu; expiryQ is a min-heap keyed by deadline.
+    // Pers: lease bucket + lease-key bucket (§8.4).
+}
+func (m *Manager) Grant(ttl time.Duration) (LeaseID, error)
+func (m *Manager) Attach(id LeaseID, key []byte) error
+func (m *Manager) Revoke(id LeaseID) error</code></pre><pre class="code"><code>type TxnRequest struct { Compare []Compare; Then []Op; Else []Op }
+
+type Compare struct {
+    Result      CompareResult   // EQUAL, GREATER, LESS, NOT_EQUAL
+    Target      CompareTarget   // VERSION, CREATE, MOD, VALUE, LEASE
+    Key, RangeEnd []byte
+    TargetUnion CompareTargetValue
+}
+
+type Apply struct {
+    // Own: one instance per node; the StateMachine the Raft library calls into.
+    // Mut: rev (atomic.Uint64) is the only field mutated outside the single apply goroutine
+    //      (read via atomic load for local reads); backend/keyIdx/watcher/leases mutated only
+    //      from Apply().
+    // Conc: single-writer discipline (I1); reads take a backend.ReadTx snapshot.
+    // Pers: delegates to backend.Backend (§11.6).
+}
+func (a *Apply) Apply(idx, term uint64, env *ApplyEnvelope) (*ApplyResult, error)
+func (a *Apply) ApplyPut(idx uint64, op *ApplyEnvelope_Put) (*ApplyResult, error)
+func (a *Apply) ApplyDelete(idx uint64, op *ApplyEnvelope_Delete) (*ApplyResult, error)
+func (a *Apply) ApplyTxn(idx uint64, op *ApplyEnvelope_Txn) (*ApplyResult, error)</code></pre><pre class="code"><code>type StateMachineAdapter struct {
+    // Own: one per node; implements rank-39&#39;s StateMachine trait.
+    // Mut: stateless wrapper — delegates all mutation to mvcc.Apply.
+    // Conc: Apply() is called by the Raft library on its own apply goroutine; must not block.
+    // Pers: none directly (delegates to mvcc.Apply -&gt; backend.Backend).
+}
+func (a *StateMachineAdapter) Apply(idx, term uint64, payload []byte) ([]byte, error)
+
+type Node struct {
+    // Own: one per node; the proposer (§16).
+    // Mut: pending map keyed by proposal id, guarded by mu; entries removed on Apply callback
+    //      or context cancellation (I13 dedup lives one layer down in mvcc.Apply).
+    // Conc: Propose() may be called concurrently by many request-handler goroutines; onApply()
+    //      is called by the Raft library&#39;s own goroutine — pending map access must be synchronized.
+    // Pers: none (in-memory correlation only; durable state is in Raft&#39;s log/stable store).
+}
+func (n *Node) Propose(ctx context.Context, env *ApplyEnvelope) (ApplyResult, error)
+func (n *Node) ChangeMembership(ctx context.Context, change ConfigChange) (MembershipResult, error)
+
+type SnapshotterAdapter struct{}
+func (s *SnapshotterAdapter) Capture(meta SnapshotMeta) (io.ReadCloser, error)
+func (s *SnapshotterAdapter) Restore(r io.Reader) error
+
+type TransportAdapter struct{} // implements rank-39&#39;s Transport trait over RaftBridgeService</code></pre><pre class="code"><code>type Backend interface {
+    BatchTx() BatchTx
+    ReadTx() ReadTx
+    Snapshot() Snapshot
+    Defrag() error
+    Close() error
+    SizeInUse() int64
+    OpenSnapshot(r io.Reader) error
+}
+
+type BatchTx interface {
+    UnsafePut(bucket Bucket, key, value []byte)
+    UnsafeDelete(bucket Bucket, key []byte)
+    Commit() error   // fsync inside; single-writer (P10)
+}
+
+type ReadTx interface {
+    UnsafeRange(bucket Bucket, key, end []byte, limit int64) ([][]byte, [][]byte)
+}</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>Distributed-KV-Store/
+  README.md                        # project overview, quickstart pointer
+  FINAL_BLUEPRINT.md                # this document
+  BLUEPRINT_LOG.md                  # revision history of this blueprint
+  BUILD_PLAN.md                     # phase-by-phase execution tracker
+  CHANGELOG.md                      # semver-tagged release notes
+  CONTRIBUTING.md                   # dev setup, PR process, DCO
+  CODE_OF_CONDUCT.md                # community standard
+  SECURITY.md                       # vuln disclosure process
+  LICENSES/
+    Apache-2.0.txt                  # core license text
+    LicenseRef-Allvest-Commercial.txt  # add-on license text
+  go.work                           # workspace: cmd/*, pkg/sdk/go, internal
+  go.work.sum
+  Makefile                          # bootstrap/build/test/lint/proto/conformance/bench targets
+  Dockerfile                        # multi-stage: builder -&gt; distroless
+  docker-compose.yml                # 3-node dev cluster
+  .dockerignore
+  .gitignore
+  .env.example
+  api/
+    proto/
+      kv/v1/
+        kv.proto                    # KV service: Get, Put, Delete, Range, Txn
+        watch.proto                 # Watch service
+        lease.proto                 # Lease service
+        cluster.proto               # Cluster admin service
+        auth.proto                  # Auth service
+      raftbridge/v1/
+        raftbridge.proto            # internal: server &lt;-&gt; rank-39 Raft library transport
+    openapi/
+      kv.yaml                       # grpc-gateway-generated OpenAPI spec
+  cmd/
+    kvd/                            # the server binary
+      main.go                       # entrypoint: load config, build Server, run
+      flags.go                      # CLI flag definitions (Appendix-C-equivalent knobs, §28)
+      bootstrap.go                  # new/existing/restore bootstrap mode dispatch
+    kvctl/                          # operator CLI (P9)
+      main.go
+      cmd/
+        get.go
+        put.go
+        del.go
+        range.go
+        watch.go
+        lease.go
+        txn.go
+        member.go
+        snapshot.go</code></pre><pre class="diagram"><code>        backup.go
+        restore.go
+        auth.go
+        endpoint.go
+        compact.go
+        defrag.go
+    kvbench/                        # benchmark driver (§23 Phase 11)
+      main.go
+  internal/
+    server/
+      server.go                    # top-level Server type; owns lifecycle
+      grpc.go                      # gRPC service registration
+      http.go                      # grpc-gateway wiring
+      pipeline.go                  # request pipeline: id, authn, authz, route
+      health.go                    # /healthz, /livez, gRPC health service
+      shutdown.go                  # graceful drain
+    api/
+      kv/
+        get.go
+        put.go
+        del.go
+        range.go
+        txn.go
+        types.go                   # PutRequest/PutResponse/RangeRequest etc. (§11.2)
+      watch/
+        watcher.go
+        hub.go                     # api/watch.Hub (§11.3, I4)
+        ranges.go                  # interval-tree range filtering
+        types.go                   # WatchRequest/Event (§11.3)
+      lease/
+        lease.go                   # api/lease.Manager (§11.3, I5)
+        timer.go                   # expiry-scan loop (leader-only)
+        index.go                   # lease-key index
+      cluster/
+        member.go                  # MemberAdd/Remove/Promote handlers
+        bootstrap.go
+        promote.go
+      auth/
+        rbac.go                    # Authz (§11 signature)
+        roles.go
+        users.go
+        tokens.go
+    mvcc/
+      revision.go                  # Revision, KeyIndex, generation (§11.1)
+      key_index.go
+      tree.go                      # in-memory btree over KeyIndex
+      apply.go                     # mvcc.Apply — the StateMachine&#39;s core (§11.4, §8.5)
+      compactor.go                 # I7
+      reader.go</code></pre><pre class="diagram"><code>    backend/
+      backend.go                   # Backend interface (§11.6, P10)
+      bbolt.go                     # default
+      pebble.go                    # alternate (build tag)
+      btree67.go                   # alternate (rank-67 storage engine)
+    raftnode/
+      adapter.go                   # raftnode.Node — the proposer (§11.5, §16)
+      transport.go                 # Transport trait impl
+      state_machine.go             # StateMachine trait impl (StateMachineAdapter)
+      log_storage.go                # LogStorage trait configuration
+      stable_store.go               # StableStore trait configuration
+      snapshotter.go                # Snapshotter trait impl
+    transport/
+      grpc.go
+      tls.go                        # mTLS config (ADR-10)
+    rate/
+      tokenbucket.go
+      quota.go
+    obs/
+      tracing.go                    # OpenTelemetry (ADR-16)
+      metrics.go                    # Prometheus (ADR-16)
+      log.go                        # structured logging
+    util/
+      retry.go
+      ctxutil.go
+  pkg/
+    sdk/
+      go/
+        client.go
+        watch.go
+        lease.go
+        txn.go
+      ts/                          # TypeScript SDK
+        src/
+        package.json
+  conformance/
+    cmd/
+      conformance/
+        main.go                    # runner entrypoint (§24 Phase 12)
+    fixtures/
+      kv/
+      watch/
+      lease/
+      txn/
+      cluster/
+      auth/
+    expected/
+      ...
+  fuzz/</code></pre><pre class="diagram"><code>    kv_fuzz_test.go                # go-fuzz corpus driver over every proto message (ADR-22)
+    corpus/
+  benchmarks/
+    bench.go
+    profiles/
+    REPORT.md                       # updated per release (§23 Phase 11)
+  examples/
+    leader-election/
+    feature-flags/
+    service-registry/
+  scripts/
+    upload-to-github.sh
+    gen-proto.sh
+    release-check.sh
+  tools/
+    protoc-gen-kv/                  # codegen helpers, if any
+  templates/
+    adr-template.md
+    rfc-template.md
+    postmortem-template.md
+  notes/
+    etcd-mvcc-walkthrough.md
+    consul-state-walkthrough.md
+    zookeeper-design-notes.md
+  papers/
+    whitepaper/
+      whitepaper-v1.0.md
+  legal/
+    terms.md
+    privacy.md
+    aup.md
+  brand/
+    palette.md
+    typography.md
+    voice.md
+  docs/
+    adr/
+      ADR-01-language.md
+      ADR-02-raft-library.md
+      ADR-03-grpc.md
+      ADR-04-grpc-gateway.md
+      ADR-05-bbolt.md
+      ADR-06-mvcc-revision.md
+      ADR-07-watch-streaming.md
+      ADR-08-leases.md
+      ADR-09-mini-transactions.md
+      ADR-10-mtls.md
+      ADR-11-rbac.md
+      ADR-12-tokens.md</code></pre><pre class="diagram"><code>      ADR-13-snapshot-format.md
+      ADR-14-backups.md
+      ADR-15-concurrency-cap.md
+      ADR-16-observability.md
+      ADR-17-kvctl.md
+      ADR-18-dashboard.md
+      ADR-19-license-split.md
+      ADR-20-go-work.md
+      ADR-21-raft-trait-surface.md
+      ADR-22-fuzzing.md
+    runbooks/
+      bring-up-cluster.md
+      add-member.md
+      remove-member.md
+      replace-failed-member.md
+      promote-learner.md
+      rotate-tls.md
+      rotate-rbac.md
+      take-snapshot.md
+      restore-from-snapshot.md
+      compact-history.md
+      diagnose-watch-lag.md
+      tune-throughput.md
+    threat-model/
+      overview.md                   # mirrors §26
+    performance/
+      methodology.md                # mirrors §32
+    failure-analysis/
+      postmortem-template-notes.md  # mirrors §27
+    cross-project/
+      raft-trait-surface.md         # the contract with rank-39 (§11.7)
+    glossary.md                     # mirrors §40
+    operator-guide.md
+    api-reference.md
+    quickstart.md
+  dashboard/                        # embedded UI (React + Vite)
+    package.json
+    src/
+  .github/
+    workflows/
+      ci.yml
+      conformance.yml
+      release.yml
+      security.yml
+      bench.yml
+    ISSUE_TEMPLATE/
+      bug.yml
+      feature.yml
+    PULL_REQUEST_TEMPLATE.md</code></pre> </section><section class="prose"><h2 id="sec-41">41. Appendix A — File Inventory</h2>
+<p>Every leaf file from <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/design/#sec-10">§10</a>&#39;s Repository Layout, one-line purpose, names matching <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/design/#sec-10">§10</a>/<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/design/#sec-11">§11</a> exactly.</p>
+<p><strong>Root:</strong> <code>README.md</code> — overview + quickstart pointer. <code>FINAL_BLUEPRINT.md</code> — this document.
+<code>BLUEPRINT_LOG.md</code> — blueprint revision history. <code>BUILD_PLAN.md</code> — phase-by-phase tracker.
+<code>CHANGELOG.md</code> — semver release notes. <code>CONTRIBUTING.md</code> — dev setup/PR/DCO process.
+<code>CODE_OF_CONDUCT.md</code> — community standard. <code>SECURITY.md</code> — vulnerability disclosure process.
+<code>go.work</code> / <code>go.work.sum</code> — Go workspace definition (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/#adr-20">ADR-20</a>). <code>Makefile</code> — build/test/lint/proto/
+conformance/bench targets. <code>Dockerfile</code> — multi-stage builder→distroless image. <code>docker-compose.yml</code>
+— 3-node dev cluster. <code>.dockerignore</code>, <code>.gitignore</code>, <code>.env.example</code> — build/VCS/config hygiene.</p>
+<p><strong>LICENSES/:</strong> <code>Apache-2.0.txt</code> — core license. <code>LicenseRef-Allvest-Commercial.txt</code> — add-on license
+(<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/#adr-19">ADR-19</a>).</p>
+<p><strong>api/proto/kv/v1/:</strong> <code>kv.proto</code> — KV service (Get/Put/Delete/Range/Txn). <code>watch.proto</code> — Watch
+service. <code>lease.proto</code> — Lease service. <code>cluster.proto</code> — Cluster admin service. <code>auth.proto</code> — Auth
+service. <strong>api/proto/raftbridge/v1/:</strong> <code>raftbridge.proto</code> — internal server↔rank-39-library
+transport (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-7">§11.7</a>). <strong>api/openapi/:</strong> <code>kv.yaml</code> — grpc-gateway-generated OpenAPI spec.</p>
+<p><strong>cmd/kvd/:</strong> <code>main.go</code> — entrypoint. <code>flags.go</code> — CLI flags. <code>bootstrap.go</code> — new/existing/restore
+dispatch (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-17-2">§17.2</a>). <strong>cmd/kvctl/:</strong> <code>main.go</code> — CLI entrypoint. <code>cmd/get.go</code>, <code>put.go</code>, <code>del.go</code>,
+<code>range.go</code>, <code>watch.go</code>, <code>lease.go</code>, <code>txn.go</code>, <code>member.go</code>, <code>snapshot.go</code>, <code>backup.go</code>, <code>restore.go</code>,
+<code>auth.go</code>, <code>endpoint.go</code>, <code>compact.go</code>, <code>defrag.go</code> — one file per subcommand (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-22-2">§22.2</a>). <strong>cmd/kvbench/:</strong>
+<code>main.go</code> — benchmark driver (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-23-2">§23.2</a>).</p>
+<p><strong>internal/server/:</strong> <code>server.go</code> — top-level <code>Server</code> type. <code>grpc.go</code> — gRPC registration. <code>http.go</code>
+— gateway wiring. <code>pipeline.go</code> — request pipeline. <code>health.go</code> — health/liveness endpoints.
+<code>shutdown.go</code> — graceful drain.</p>
+<p><strong>internal/api/kv/:</strong> <code>get.go</code>, <code>put.go</code>, <code>del.go</code>, <code>range.go</code>, <code>txn.go</code> — one handler per RPC.
+<code>types.go</code> — <code>PutRequest</code>/<code>RangeRequest</code>/<code>KeyValue</code> etc. (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-2">§11.2</a>). <strong>internal/api/watch/:</strong>
+<code>watcher.go</code> — per-watcher state. <code>hub.go</code> — <code>Hub</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-3">§11.3</a>). <code>ranges.go</code> — interval-tree filtering.
+<code>types.go</code> — <code>WatchRequest</code>/<code>Event</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-3">§11.3</a>). <strong>internal/api/lease/:</strong> <code>lease.go</code> — <code>Manager</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-3">§11.3</a>).
+<code>timer.go</code> — expiry-scan loop. <code>index.go</code> — lease-key index. <strong>internal/api/cluster/:</strong> <code>member.go</code> —
+member add/remove/promote handlers. <code>bootstrap.go</code> — bootstrap-mode handling. <code>promote.go</code> —
+learner-promotion logic. <strong>internal/api/auth/:</strong> <code>rbac.go</code> — <code>Authz</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-6">§11.6</a> note, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-21">§21</a>). <code>roles.go</code> —
+role definitions. <code>users.go</code> — user store. <code>tokens.go</code> — token store (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/#adr-12">ADR-12</a>).</p>
+<p><strong>internal/mvcc/:</strong> <code>revision.go</code> — <code>Revision</code>/<code>KeyIndex</code>/<code>generation</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-1">§11.1</a>). <code>key_index.go</code> —
+key-index operations. <code>tree.go</code> — in-memory btree wrapper. <code>apply.go</code> — <code>Apply</code> core (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-4">§11.4</a>).
+<code>compactor.go</code> — compaction (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-7">I7</a>). <code>reader.go</code> — read-path resolution.</p>
+<p><strong>internal/backend/:</strong> <code>backend.go</code> — <code>Backend</code> interface (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-6">§11.6</a>). <code>bbolt.go</code> — default backend
+(<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/#adr-5">ADR-05</a>). <code>pebble.go</code> — LSM alternate (build tag). <code>btree67.go</code> — rank-67 B-Tree alternate.</p>
+<p><strong>internal/raftnode/:</strong> <code>adapter.go</code> — <code>Node</code> proposer (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-5">§11.5</a>). <code>transport.go</code> — <code>TransportAdapter</code>.
+<code>state_machine.go</code> — <code>StateMachineAdapter</code>. <code>log_storage.go</code> — <code>LogStorage</code> configuration.
+<code>stable_store.go</code> — <code>StableStore</code> configuration. <code>snapshotter.go</code> — <code>SnapshotterAdapter</code>.</p>
+<p><strong>internal/transport/:</strong> <code>grpc.go</code> — gRPC transport plumbing. <code>tls.go</code> — mTLS configuration
+(<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/#adr-10">ADR-10</a>). <strong>internal/rate/:</strong> <code>tokenbucket.go</code> — token-bucket limiter. <code>quota.go</code> — quota
+enforcement. <strong>internal/obs/:</strong> <code>tracing.go</code> — OpenTelemetry spans. <code>metrics.go</code> — Prometheus
+metrics. <code>log.go</code> — structured logging. <strong>internal/util/:</strong> <code>retry.go</code> — retry helpers.
+<code>ctxutil.go</code> — context helpers.</p>
+<p><strong>pkg/sdk/go/:</strong> <code>client.go</code> — base client. <code>watch.go</code> — watch-stream SDK. <code>lease.go</code> — lease SDK.
+<code>txn.go</code> — transaction-builder SDK. <strong>pkg/sdk/ts/:</strong> <code>src/</code> — TypeScript SDK source. <code>package.json</code>
+— npm package manifest.</p>
+<p><strong>conformance/cmd/conformance/:</strong> <code>main.go</code> — conformance runner entrypoint (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-24">§24</a>). <strong>conformance/
+fixtures/{kv,watch,lease,txn,cluster,auth}/</strong> — the ~200 fixture files, one per named <code>fixtures/...</code>
+reference across <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-12">§12</a>–<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-25">§25</a>. <strong>conformance/expected/</strong> — expected-output golden files.</p>
+<p><strong>fuzz/:</strong> <code>kv_fuzz_test.go</code> — fuzz driver over every proto message (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/#adr-22">ADR-22</a>). <code>corpus/</code> — persisted
+fuzz corpus.</p>
+<p><strong>benchmarks/:</strong> <code>bench.go</code> — shared benchmark helpers. <code>profiles/</code> — pprof profile archives.
+<code>REPORT.md</code> — per-release performance report (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-23-3">§23.3</a>).</p>
+<p><strong>examples/:</strong> <code>leader-election/</code>, <code>feature-flags/</code>, <code>service-registry/</code> — worked primitive
+compositions (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-19-3">§19.3</a>).</p>
+<p><strong>scripts/:</strong> <code>upload-to-github.sh</code> — release-publish helper. <code>gen-proto.sh</code> — protobuf codegen
+wrapper. <code>release-check.sh</code> — reproducible-build verification (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-31">§31</a>).</p>
+<p><strong>tools/protoc-gen-kv/:</strong> codegen helper plugin, if required by the proto toolchain.</p>
+<p><strong>templates/:</strong> <code>adr-template.md</code>, <code>rfc-template.md</code>, <code>postmortem-template.md</code> — authoring templates.</p>
+<p><strong>notes/:</strong> <code>etcd-mvcc-walkthrough.md</code>, <code>consul-state-walkthrough.md</code>, <code>zookeeper-design-notes.md</code> —
+research notes backing <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/study/#sec-5">§5</a>.</p>
+<p><strong>papers/whitepaper/:</strong> <code>whitepaper-v1.0.md</code> — the project&#39;s own public whitepaper.</p>
+<p><strong>legal/:</strong> <code>terms.md</code>, <code>privacy.md</code>, <code>aup.md</code> — legal boilerplate for a hosted offering.</p>
+<p><strong>brand/:</strong> <code>palette.md</code>, <code>typography.md</code>, <code>voice.md</code> — dashboard/docs visual identity.</p>
+<p><strong>docs/adr/:</strong> <code>ADR-01-language.md</code> through <code>ADR-22-fuzzing.md</code> — one file per <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/#sec-9">§9</a> ADR row, exact
+numbering match.</p>
+<p><strong>docs/runbooks/:</strong> <code>bring-up-cluster.md</code>, <code>add-member.md</code>, <code>remove-member.md</code>,
+<code>replace-failed-member.md</code>, <code>promote-learner.md</code>, <code>rotate-tls.md</code>, <code>rotate-rbac.md</code>,
+<code>take-snapshot.md</code>, <code>restore-from-snapshot.md</code>, <code>compact-history.md</code>, <code>diagnose-watch-lag.md</code>,
+<code>tune-throughput.md</code> — one per named runbook across <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-17">§17</a>–<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-28">§28</a>.</p>
+<p><strong>docs/threat-model/:</strong> <code>overview.md</code> — mirrors <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#sec-26">§26</a>. <strong>docs/performance/:</strong> <code>methodology.md</code> —
+mirrors <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/numbers/#sec-32">§32</a>. <strong>docs/failure-analysis/:</strong> <code>postmortem-template-notes.md</code> — mirrors <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#sec-27">§27</a>. <strong>docs/
+cross-project/:</strong> <code>raft-trait-surface.md</code> — the rank-39 boundary contract (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-7">§11.7</a>). <strong>docs/:</strong>
+<code>glossary.md</code> — mirrors <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/study/#sec-40">§40</a>. <code>operator-guide.md</code> — consolidated operator documentation.
+<code>api-reference.md</code> — RPC/JSON schema reference including <code>report.json</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-24-10">§24.10</a>). <code>quickstart.md</code> —
+first-cluster walkthrough.</p>
+<p><strong>dashboard/:</strong> <code>package.json</code> — npm manifest. <code>src/</code> — React + Vite source (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-22-2">§22.2</a>).</p>
+<p><strong>.github/workflows/:</strong> <code>ci.yml</code>, <code>conformance.yml</code>, <code>release.yml</code>, <code>security.yml</code>, <code>bench.yml</code> —
+one per named CI pipeline (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-31">§31</a>). <strong>.github/ISSUE_TEMPLATE/:</strong> <code>bug.yml</code>, <code>feature.yml</code>. <strong>.github/:</strong>
+<code>PULL_REQUEST_TEMPLATE.md</code>.</p>
+<hr>
+</section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

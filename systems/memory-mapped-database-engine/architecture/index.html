@@ -1,0 +1,398 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Memory-Mapped Database Engine from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Memory-Mapped Database Engine from Scratch, hld: §3 overview + §8 domain model. An embedded, single-file, memory-mapped key-value storage engine in the LMDB lineage. The database file is the address space: mmap the whole file once, let the OS page cache serve as the buffer pool…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/memory-mapped-database-engine/">Memory-Mapped Database Engine from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Memory-Mapped Database Engine from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~27 weeks</li> <li>1,928 lines</li> <li>blueprint #319</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/memory-mapped-database-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/memory-mapped-database-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/memory-mapped-database-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/memory-mapped-database-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/memory-mapped-database-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/memory-mapped-database-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/memory-mapped-database-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/memory-mapped-database-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/memory-mapped-database-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/memory-mapped-database-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Memory-Mapped Database Engine from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                       Host process (single env open)
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Public API  (Phase 6/9)                                                    │
+│  Env::open(path, geom, flags) · env.begin_read() · env.begin_write()       │
+│  txn.get(db,k)-&gt;&amp;[u8](zero-copy) · txn.put/del · txn.open_db(name,flags)    │
+│  cur=txn.cursor(db); cur.seek/next/prev/first/last; dup navigation         │
+│  wtxn.commit() / wtxn.abort() · rtxn drop = unpin snapshot                 │
+└───────────────┬───────────────────────────────────────────┬───────────────┘
+                │ write path (1 writer)                       │ read path (N readers, lock-free)
+┌───────────────▼─────────────────────┐        ┌─────────────▼───────────────┐
+│ WriteTxn coordinator (Phase 6)      │        │ ReadTxn / snapshot (Phase 7) │
+│  • holds WRITE MUTEX (lock module)  │        │  • pins meta@open (root,txid)│
+│  • dirty-page map (pgno-&gt;frame)     │        │  • slot in READER TABLE      │
+│  • COW: copy touched path root-ward │        │  • never blocks writer       │
+│  • allocs from FREELIST or grows map│        │  • values = ptrs into map    │
+└───────┬───────────────────┬─────────┘        └─────────────┬───────────────┘
+        │                   │                                │
+┌───────▼─────────┐  ┌──────▼──────────────────────────┐     │
+│ Freelist (Ph 8) │  │ COW B+tree (Phase 3–5)          │     │
+│  • free[txid]   │  │  • search descend (branch-&gt;leaf)│◄────┘ (reader descends
+│  • pending(this)│  │  • insert+split / del+merge     │        immutable snapshot)
+│  • reclaim iff  │  │  • COW path copy → new root     │
+│    txid&lt;oldest  │  │  • cursor traversal, DUPSORT     │
+│    live reader  │  └──────┬──────────────────────────┘
+└───────┬─────────┘         │
+        │            ┌──────▼──────────────────────────┐
+        └───────────►│ Page codec (Phase 2)            │
+                     │  • PageHeader{pgno,flags,lo,hi,  │
+                     │    overflow}  16B                │
+                     │  • leaf/branch node layout (slot │
+                     │    dir + nodes), meta page,      │
+                     │    freelist page, overflow page  │
+                     │  • CRC/xxh checksum (torn detect)│
+                     └──────┬──────────────────────────┘</code></pre>
+<p><strong>Architecture diagram continued — storage layers</strong></p>
+<pre class="diagram"><code>                            │
+        ┌───────────────────▼───────────────────────────────────┐
+        │ Dual Meta (Phase 2/6)  page0 / page1 (alternating)     │
+        │  {magic,fmt_ver,pagesize,flags,maxpg,                   │
+        │   main_db_root,free_db_root,last_pgno,txid,checksum}    │
+        │  commit: write data pages → DURABLE → write meta(txid+1)│
+        │  open/recover: pick valid meta w/ HIGHER txid           │
+        └───────────────────┬───────────────────────────────────┘
+                            │
+        ┌───────────────────▼───────────────────────────────────┐
+        │ mmap single-level store (Phase 1)                       │
+        │  • mmap(file, len) once; base ptr; OS page cache = pool │
+        │  • read = page fault (lazy); madvise(RANDOM/WILLNEED)   │
+        │  • write: WRITEMAP(store) or pwrite(file) + msync/fsync │
+        │  • remap on grow (base may MOVE → offsets vs raw ptrs)  │
+        └───────────────────┬───────────────────────────────────┘
+                            │ syscalls
+        ┌───────────────────▼───────────────────────────────────┐
+        │ OS: VM/page cache · writeback · fsync/msync · file lock │
+        └─────────────────────────────────────────────────────────┘
+
+Lock file (sibling): WRITE MUTEX (1) + READER TABLE (slots: pid,tid,txid)</code></pre>
+<p><strong>Box-by-box (one dense paragraph each).</strong></p>
+<ul>
+<li><strong>Public API.</strong> Thin handle layer. <code>Env</code> = open mmap + meta + locks. <code>Txn</code> borrow lifetime bounds returned value pointers (Rust enforces no use-after-commit/remap). Read values are <code>&amp;[u8]</code> directly into the map — zero copy. Single concurrent write txn; many read txns.</li>
+<li><strong>WriteTxn coordinator.</strong> Acquires the process write mutex (serializes writers). Tracks dirty pages in an in-memory map (<code>pgno -&gt; owned frame</code>) until commit. Implements COW: any page on a touched root→leaf path is <em>copied</em> (new pgno from freelist or appended), parents rewritten to point at copies, yielding a fresh root. Commit publishes via meta flip.</li>
+<li><strong>ReadTxn / snapshot.</strong> On open, reads the <em>current</em> meta, records <code>(root, txid)</code>, registers a slot in the reader table. Descends an immutable tree; never takes page latches; never blocks the writer; the writer never blocks it. Drop unpins the snapshot (clears reader slot), allowing reclamation to advance.</li>
+<li><strong>Freelist.</strong> Two structures: <code>pending</code> (pages freed by the in-flight write txn, not yet committed) and <code>free[txid]</code> (pages freed by committed txn <code>txid</code>). A free page may be <em>reused</em> only when <code>txid &lt; oldest-live-reader-txid</code>. Otherwise held → map growth. This reader-aware rule is the source of &quot;freelist starvation&quot; / bloat.</li>
+<li><strong>COW B+tree.</strong> Branch pages route by key; leaf pages hold key→value (or key→[values] under DUPSORT). Search is pointer-chase through the map. Insert may split (propagating COW upward); delete may merge/rebalance. Every structural change copies pages, never mutates live ones.</li>
+<li><strong>Page codec.</strong> Fixed page size (4 KiB default). Header (16 B) + slotted directory + nodes growing toward the middle. Meta, leaf, branch, freelist, overflow page variants. Optional per-page checksum to detect torn writes on read.</li>
+<li><strong>Dual Meta.</strong> Pages 0 and 1. Each holds geometry + main-DB root + freelist-DB root + <code>last_pgno</code> + monotonic <code>txid</code> + checksum. Commit always writes the <em>other</em> meta with <code>txid+1</code>. Recovery/open picks the meta with the higher <em>valid</em> (checksum-passing) txid. This is the entire crash-consistency mechanism.</li>
+<li><strong>mmap single-level store.</strong> One <code>mmap</code> of the file; <code>base</code> pointer; <code>pgno → base + pgno*pagesize</code>. Reads fault pages in lazily; <code>madvise</code> is the only prefetch knob. Writes go either through the writable map (WRITEMAP) or via <code>pwrite</code> to the fd; durability via <code>msync(MS_SYNC)</code> or <code>fsync</code>/<code>fdatasync</code>. Growth requires remap; the base address may move, so internal references are <strong>page numbers/offsets</strong>, not raw pointers held across grow.</li>
+<li><strong>OS layer.</strong> Owns the actual cache, writeback timing, and <code>fsync</code> semantics. Trust boundary for the sector-atomicity assumption (a single page/meta write ≤ device atomic-write granularity).</li>
+<li><strong>Lock file.</strong> Sibling file holding a single write-mutex region + a fixed array of reader slots (<code>pid,tid,txid</code>). Enables multi-process sharing and the oldest-live-reader computation.</li>
+</ul>
+<p>All later sections reference these box names verbatim.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Page taxonomy &amp; geometry</h3>
+<ul>
+<li>Page size <code>P</code> (default 4096). <code>pgno → file offset = pgno * P</code>. Page 0/1 = meta. Page 2 = first usable.</li>
+<li>Page kinds (flags bitfield): <code>META</code>, <code>BRANCH</code>, <code>LEAF</code>, <code>OVERFLOW</code>, <code>FREELIST</code> (a.k.a. free-DB leaf), <code>LEAF2</code>/<code>DUPFIXED</code> (fixed-size dup data), <code>SUBP</code> (embedded sub-page for small dup sets).</li>
+</ul>
+<h3 id="sec-8-2">8.2 Page header (16 B, little-endian, <code>repr(C)</code>)</h3>
+<pre class="diagram"><code>offset size field        meaning
+0      8    pgno         page number (also self-id; redundancy aids verify)
+8      2    flags        kind bitfield (META/BRANCH/LEAF/OVERFLOW/FREELIST/...)
+10     2    lower        end of slot directory (bytes from page start)
+12     2    upper        start of node heap (grows down toward lower)
+14     2    overflow_ct  # of overflow pages (when this is an OVERFLOW head) / pad</code></pre>
+<p>Free space within a page = <code>upper - lower</code>. Slot dir (u16 offsets) grows up from 16; node heap grows down from <code>P</code>. Optional checksum: last 8 B of page (xxh3/CRC64) — excluded from <code>upper</code> accounting.</p>
+<h3 id="sec-8-3">8.3 Meta page (page 0/1)</h3>
+<pre class="diagram"><code>magic:u32  fmt_ver:u32  pagesize:u32  flags:u32
+maxpg:u64                  (geometry ceiling)
+main_db:DbInfo             (root pgno, depth, entries, leaf/branch/overflow counts)
+free_db:DbInfo             (the freelist&#39;s own B+tree root)
+last_pgno:u64              (high-water mark of allocated pages)
+txid:u64                   (monotonic; parity selects meta slot)
+checksum:u64               (over the meta page minus this field)</code></pre>
+<p><code>DbInfo</code> = <code>{ root: pgno, depth: u16, branch_pages, leaf_pages, overflow_pages, entries }</code>.</p>
+<h3 id="sec-8-4">8.4 B+tree node layout (slotted)</h3>
+<ul>
+<li><strong>Branch node entry:</strong> <code>{ key_len:u16, child_pgno:u64, key_bytes[key_len] }</code> (separator key + child pointer; leftmost child implied by node[0]).</li>
+<li><strong>Leaf node entry (normal):</strong> <code>{ flags:u8, key_len:u16, val_len:u32, key_bytes, val_bytes }</code>. <code>flags</code>: <code>BIGDATA</code> (val stored in overflow chain → val_bytes = overflow head pgno), <code>DUPDATA</code> (val region is a sub-tree/sub-page), <code>SUBDB</code> (val = <code>DbInfo</code> of a named sub-DB).</li>
+<li><strong>Overflow page:</strong> header + raw value bytes; chained by <code>overflow_ct</code>/next-pgno; used when <code>val_len</code> exceeds page-fit threshold.</li>
+<li>Keys compared as byte strings (memcmp) by default; pluggable comparator per DB.</li>
+</ul>
+<h3 id="sec-8-5">8.5 Freelist record schema</h3>
+<ul>
+<li>The freelist is itself a B+tree (<code>free_db</code>) keyed by <strong>txid</strong>, value = <strong>page-number list (PNL)</strong>: <code>{ count:u32, pgno[count]:u64 }</code> sorted descending.</li>
+<li>In-RAM during a write txn: <code>pending</code> (PNL of pages this txn frees) + working free cache. On commit, <code>pending</code> is written under key = committing txid.</li>
+<li><code>oldest_reader_txid()</code> from reader table; all <code>free_db</code> entries with key <code>&lt; oldest_reader_txid</code> are eligible to satisfy allocations.</li>
+</ul>
+<h3 id="sec-8-6">8.6 Transaction / snapshot model</h3>
+<ul>
+<li><strong>ReadTxn:</strong> <code>{ txid, root: pgno, free_root: pgno, reader_slot }</code>. Immutable view. Drop frees slot.</li>
+<li><strong>WriteTxn:</strong> <code>{ parent_txid, txid = parent+1, dirty: Map&lt;pgno,Frame&gt;, freed: PNL, next_pgno, root, free_root, write_guard }</code>.</li>
+</ul>
+<h3 id="sec-8-7">8.7 Write-txn commit state machine</h3>
+<pre class="diagram"><code>        begin_write
+            │  acquire write mutex; read current meta; txid=meta.txid+1
+            ▼
+        ACTIVE  ── put/del/cursor ──► (COW: copy path, alloc pages, record dirty/freed)
+            │ commit()
+            ▼
+   SPILL? (optional) ─ if dirty set large: write some dirty pages early (NOSYNC)
+            │
+            ▼
+        WRITE-DATA: persist all dirty pages (WRITEMAP store OR pwrite)
+            │
+            ▼
+        SYNC-DATA: msync(MS_SYNC)/fsync data  ── INV-META-DURABLE-ORDER ──┐
+            │                                                            │ (omitted in NOSYNC)
+            ▼                                                            │
+        WRITE-FREELIST: store `freed` under key txid in free_db          │
+            │  (this itself COWs free_db; its pages also flushed above)   │
+            ▼                                                            │
+        WRITE-META: write meta[txid &amp; 1] {root,free_root,last_pgno,txid}  │
+            │                                                            │
+            ▼                                                            │
+        SYNC-META: msync/fsync the single meta page (atomic)  ◄───────────┘
+            │
+            ▼
+        COMMITTED (release write mutex; readers opening now see new txid)
+   abort() at any pre-COMMITTED point: discard dirty/freed; release mutex; file unchanged.</code></pre>
+<h3 id="sec-8-8">8.8 Worked example — insert causing leaf split + COW</h3>
+<pre class="diagram"><code>Initial (txid=7): root=Leaf@5 [a,b,c,d] (full). Insert &quot;bb&quot;.
+1. Search root→leaf, find Leaf@5 full.
+2. COW: alloc Leaf@9 (copy of @5). Split @9 → @9[a,b,bb], new Leaf@10[c,d].
+   (Leaf@5 stays live for any reader pinned at txid≤7; @5 added to `freed`.)
+3. Root was a leaf → create Branch@11 with separators: [&lt;c -&gt; @9], [&gt;=c -&gt; @10].
+4. New root = @11. WriteTxn.root = 11; freed={5}.
+5. Commit: flush @9,@10,@11 → SYNC → write meta[8&amp;1=0]{root=11,txid=8} → SYNC.
+6. Reader opening at txid=8 sees @11; reader still on txid=7 sees @5 until it drops,
+   after which @5 (freed at txid=8) becomes reclaimable once oldest_reader&gt;=8.</code></pre>
+<p><strong>Worked example — reader-aware reclamation (the bloat-vs-reuse decision).</strong> Continues the tree above; shows why the <em>oldest reader</em>, not the current txid, gates reuse (INV-READER-PIN, MM6).</p>
+<pre class="diagram"><code>State: free_db holds {txid 8 -&gt; PNL[5]} (page 5 was freed by the txn 8 above).
+Case A — no live readers, writer begins txn 9:
+  oldest = current = 9.  free_db keys &lt; 9 → {8} eligible → pop pgno 5 from PNL[8].
+  alloc_page() returns 5 (reused).  File does NOT grow.  PNL[8] now empty → key 8 dropped.
+Case B — a reader is pinned at txid 7, writer begins txn 9:
+  oldest = reader_table.oldest_txid() = 7.  free_db keys &lt; 7 → {} (8 is NOT &lt; 7).
+  Page 5 is NOT reclaimable (the txid-7 reader can still reach old roots that referenced it).
+  alloc_page() must APPEND (bump next_pgno, grow if needed).  File grows by one page.
+Case C — the reader drops; writer begins txn 10:
+  oldest = current = 10.  free_db keys &lt; 10 → {8} eligible → page 5 reusable again.
+  The space &quot;held&quot; during Case B is reclaimed only now — lag = (reader lifetime) of growth.</code></pre>
+<p><strong>Worked example — DUPSORT sub-page → sub-tree promotion.</strong> A key with many duplicate values starts as an embedded sub-page and is promoted to its own B+tree when it outgrows one page (Phase 9.2; transparent to the API; INV-DUP-COMPARATOR-STABLE).</p>
+<pre class="diagram"><code>Key &quot;color&quot; with values {red, green, blue} (small set):
+  Leaf node for &quot;color&quot; stores flags=DUPDATA, val region = embedded SUBP (sub-page):
+  one packed mini-page of sorted dup values — no separate pgno, lives inside the leaf.
+Insert 400 more distinct values under &quot;color&quot; until SUBP exceeds the leaf&#39;s free space:
+  PROMOTE: alloc a real sub-tree (DUPDATA root pgno); bulk-insert the existing SUBP
+  values + new ones into it; rewrite the &quot;color&quot; leaf node&#39;s val region to hold the
+  sub-tree&#39;s DbInfo (root pgno, depth, entries) instead of the inline SUBP.
+  Dup count MUST be identical before/after (asserted, Phase 9.4) — promotion loses nothing.
+Read path is uniform: cursor.first_dup/next_dup walks SUBP entries OR descends the
+  sub-tree, dispatched on the leaf node&#39;s flags — the caller never sees the boundary.
+COW cost: this mutation COWs the dup sub-tree root → the &quot;color&quot; leaf → the main-DB
+  path → a new env root (MM4: nested DUPSORT multiplies the path-copy).</code></pre>
+<h3 id="sec-8-9">8.9 Malformed / failure-path examples</h3>
+<ul>
+<li><strong>Torn meta:</strong> crash during SYNC-META → meta[0] checksum fails. Open: meta[0] invalid → select meta[1] (txid=7). Result: txn 8 <em>atomically did not happen</em>; @9/@10/@11 become unreferenced garbage reclaimable as the file tail / by verify.</li>
+<li><strong>Torn data page (no checksum):</strong> undetected → tree dereferences partial node → SIGBUS or wrong bytes. With checksum: <code>page::load</code> fails → <code>Error::Corrupt</code>, txn fails, operator runs <code>verify</code>/<code>copy</code>.</li>
+<li><strong>Both metas invalid:</strong> <code>Error::Corrupt(meta)</code> → refuse open. Forensics: hexdump pages 0/1.</li>
+<li><strong>Reader pinned forever (leaked txn):</strong> <code>oldest_reader_txid</code> frozen → freelist can&#39;t reclaim → file grows unbounded. Detect via <code>oldest_reader_txid</code> lag metric + reader-table dump (stale pid).</li>
+</ul>
+<h3 id="sec-8-10">8.10 State-transition table (env/txn)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Event</th>
+<th>Next</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>EnvClosed</td>
+<td>open</td>
+<td>EnvOpen</td>
+<td>mmap, attach lock, read metas, select</td>
+</tr>
+<tr>
+<td>EnvOpen</td>
+<td>begin_read</td>
+<td>ReadActive</td>
+<td>pin meta, claim reader slot</td>
+</tr>
+<tr>
+<td>EnvOpen</td>
+<td>begin_write</td>
+<td>WriteActive</td>
+<td>take write mutex, txid+1</td>
+</tr>
+<tr>
+<td>WriteActive</td>
+<td>put/del</td>
+<td>WriteActive</td>
+<td>COW dirty/freed</td>
+</tr>
+<tr>
+<td>WriteActive</td>
+<td>commit</td>
+<td>EnvOpen</td>
+<td>flush→sync→meta→sync; publish txid</td>
+</tr>
+<tr>
+<td>WriteActive</td>
+<td>abort</td>
+<td>EnvOpen</td>
+<td>discard; release mutex</td>
+</tr>
+<tr>
+<td>ReadActive</td>
+<td>drop</td>
+<td>EnvOpen</td>
+<td>release reader slot</td>
+</tr>
+<tr>
+<td>EnvOpen</td>
+<td>grow needed (in write)</td>
+<td>EnvOpen</td>
+<td>remap up to maxpg; re-derive base</td>
+</tr>
+<tr>
+<td>any</td>
+<td>meta-both-invalid (open)</td>
+<td>EnvClosed</td>
+<td>refuse, Error::Corrupt</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>The file is the address space (single-level store).</strong> No user buffer pool; OS page cache is the cache. <em>Tradeoff:</em> lose fine-grained cache control + cross-platform uniformity; gain radical simplicity + zero-copy reads. <em>Violation:</em> reintroducing a buffer pool duplicates the page cache → double-caching, wasted RAM, lost zero-copy.</li><li id="p-2"><strong>Never mutate a live page (COW).</strong> Touched pages are copied; old pages stay valid for live readers. <em>Tradeoff:</em> write amplification (path copy). <em>Violation:</em> in-place mutation races a concurrent reader → reader observes a half-modified node → corruption.</li><li id="p-3"><strong>One write at a time (single writer).</strong> Writers serialized by a process mutex. <em>Tradeoff:</em> write concurrency ceiling. <em>Violation:</em> two writers racing the meta flip → lost update / dual roots / corruption.</li><li id="p-4"><strong>Readers never block, never lock pages, never copy.</strong> A reader pins a meta and walks an immutable snapshot. <em>Violation:</em> taking latches reintroduces reader↔writer contention and defeats the design&#39;s headline property.</li><li id="p-5"><strong>Durability ordering is sacred.</strong> All data/branch/leaf pages of a commit must be <em>durable</em> before the meta that publishes them. <em>Tradeoff:</em> extra sync/barrier per commit. <em>Violation:</em> meta points at a page not yet on disk → post-crash dereference of garbage.</li><li id="p-6"><strong>Single-page meta write is atomic (sector-atomicity assumption).</strong> Recovery correctness rests on a meta page being written all-or-nothing. <em>Violation:</em> torn meta → ambiguous root → must detect via checksum and fall back to the other meta.</li><li id="p-7"><strong>Recovery is selection, not replay.</strong> Open = read both metas, pick higher valid txid. <em>Tradeoff:</em> none vs WAL; <em>gain:</em> O(1) startup, no log. <em>Violation:</em> adding replay logic implies we trust in-place writes — contradicts the model.</li><li id="p-8"><strong>References are page numbers, not raw pointers across grow.</strong> Anything persisted or held across a potential remap uses <code>pgno</code>/offset. <em>Violation:</em> caching a raw <code>*const u8</code> then growing the map → dangling pointer (base moved).</li><li id="p-9"><strong>Reclamation is reader-aware.</strong> A freed page returns to use only after the oldest live reader has advanced past the freeing txid. <em>Tradeoff:</em> long readers bloat the file. <em>Violation:</em> early reuse overwrites a page a reader still references → reader corruption.</li><li id="p-10"><strong>Checksums detect, they don&#39;t repair.</strong> Per-page checksum flags torn/bit-rot pages; the response is <em>fail-stop</em> (or meta fallback), never silent best-effort. <em>Violation:</em> trusting a bad page propagates corruption upward.</li><li id="p-11"><strong>Bounded, explicit geometry.</strong> <code>pagesize</code>, <code>maxpg</code>, reader-slot count fixed at create; growth is explicit remap up to <code>maxpg</code>. <em>Violation:</em> unbounded auto-grow without address-space accounting → SIGBUS/ENOMEM surprises.</li><li id="p-12"><strong>Crash-only.</strong> No clean-shutdown step is required for correctness; killing the process at any instant leaves a recoverable file. <em>Violation:</em> relying on a flush-on-close path makes <code>kill -9</code> lossy.</li><li id="p-13"><strong>Fail-stop on invariant breach.</strong> Detected impossible states (bad magic, version mismatch, both metas invalid) abort the open rather than limp on. <em>Violation:</em> &quot;best effort&quot; continues silently corrupting.</li><li id="p-14"><strong>Zero-copy by contract, lifetime-enforced.</strong> Returned values are borrows tied to the txn; Rust forbids escaping them past commit/abort/remap. <em>Violation:</em> copying defeats the perf story; escaping borrows → UB.</li><li id="p-15"><strong>Format stability via versioned meta.</strong> <code>fmt_ver</code> in meta gates layout; readers reject unknown major versions. <em>Violation:</em> silent format drift → cross-version corruption.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

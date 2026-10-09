@@ -1,0 +1,306 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Static Analyzer / Linter — Architecture · Engineering Blueprints</title><meta name="description" content="Static Analyzer / Linter, hld: §3 overview + §8 domain model. Build a production-grade static analyzer / linter for a small, realistic, typed expression-oriented language, mini (grammar frozen in §8, owned by docs/language.md), covering the full pipeline from…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/static-analyzer/">Static Analyzer / Linter</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Static Analyzer / Linter</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~17 weeks</li> <li>2,865 lines</li> <li>blueprint #138</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/static-analyzer/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/static-analyzer/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/static-analyzer/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/static-analyzer/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/static-analyzer/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/static-analyzer/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/static-analyzer/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/static-analyzer/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/static-analyzer/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/static-analyzer/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Static Analyzer / Linter — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<p>The pipeline is a one-way flow from source bytes to diagnostics; the
+incremental cache (Phase 13) is a horizontal substrate every stage queries
+rather than a pipeline stage of its own.</p>
+<pre class="diagram"><code>CLI / LSP (driver) --src,file_id--&gt; [1 Lexer] --tokens--&gt; [2 Parser: CST]
+   --cst--&gt; [3 AST/HIR: resolve+desugar] --hir--&gt; [4 Types: HM infer]
+   --typed hir--&gt; [5 CFG build] --cfg--&gt; [6 SSA: Cytron+dominance]
+   --ssa--&gt; [7 Dataflow framework (Lattice/Transfer, worklist)]
+       branches to:
+       [8 Points-to: Andersen]      --pts--&gt;\
+       [9 Taint: IFDS]              --taint--&gt;  [11 Rule engine: DSL + facts]
+       [10 AbsInt: interval/const]  --absint--&gt;/      --diagnostics--&gt;
+   [12 Autofix: EditPlan]  &lt;--diagnostics--  [11 Rule engine]
+   [13 Reporters: LSP/SARIF/JSON/human] &lt;--diagnostics-- [11 Rule engine]
+
+   Horizontal substrate (queried by every numbered box above):
+   [AnalysisDb] source_text|tokens|cst|hir|typed_hir|cfg|ssa|
+                pts_summary|taint_summary|diagnostics  (content-hashed, Phase 13)</code></pre>
+<p>Box-by-box: the <strong>Lexer</strong> (Phase 1) turns UTF-8 bytes into <code>Token</code>s with
+UAX#31 identifiers and preserved error tokens — it never panics and never
+loses bytes (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-13">I13</a>). The <strong>Parser</strong> (Phase 2) is hand-written recursive descent
+plus Pratt for expressions, producing an immutable green tree with a lazy red
+view (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-2">I2</a>); error recovery via synchronization tokens keeps the tree usable on
+bad input, which the LSP server depends on. <strong>AST/HIR</strong> (Phase 3) resolves
+names in two passes and desugars sugar (<code>for</code>, <code>?</code>, string interpolation) into
+a small core, with a <code>HirSourceMap</code> back to spans for autofix. <strong>Type
+inference</strong> (Phase 4) is Hindley-Milner with level-based let-generalization
+over a constraint solver (Algorithm J/HM(X), not Algorithm W directly).
+<strong>CFG</strong> (Phase 5) makes control flow explicit with typed edges and a
+Lengauer-Tarjan dominator tree; <strong>SSA</strong> (Phase 6) applies Cytron&#39;s
+construction over that tree, pruned to live variables. The <strong>dataflow
+framework</strong> (Phase 7) is domain-agnostic: a <code>Lattice</code>/<code>Transfer</code> pair and a
+worklist solver with widening/narrowing hooks, instantiated three times.
+<strong>Points-to</strong> (Phase 8, Andersen inclusion-based, field-sensitive) produces
+alias facts; <strong>Taint</strong> (Phase 9, IFDS/Reps-Horwitz-Sagiv) produces
+source-to-sink facts, consulting points-to for pointer-induced flow;
+<strong>abstract interpretation</strong> (Phase 10, intervals + constants) produces
+per-value ranges. The <strong>Rule engine</strong> (Phase 11) combines all three fact
+sets plus syntactic pattern-matching over typed-HIR into <code>Diagnostic</code>s,
+honoring <code>#[allow]</code> suppression. The <strong>Autofix engine</strong> (Phase 12) composes
+<code>Fix</code>es from diagnostics into a conflict-free <code>EditPlan</code>, applied atomically.
+<strong>Reporters</strong> (Phase 13, alongside the cache) render the same <code>Diagnostic</code> to
+LSP, SARIF v2.1.0, JSON, or a human-readable snippet.</p>
+<p>Three properties hold everywhere and are cited throughout: (1) <strong>the IR
+pipeline is one-way</strong> — no analysis writes back into an earlier IR (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-1">I1</a>);
+(2) <strong>analyses produce facts, not edits</strong> — the rule engine is the only
+consumer of facts, the autofix engine is the only consumer of diagnostics
+(<a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-2">P2</a>); (3) <strong>the cache is ground truth, not an optimization</strong> — there is no
+&quot;fresh run&quot; mode that bypasses <code>AnalysisDb</code>; a cold run and a warm run must
+be byte-identical (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-7">I7</a>, enforced in <a class="cite" href="/system-design-blueprints/systems/static-analyzer/blueprint/#sec-30">§30</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 <code>mini</code> grammar (EBNF fragment, frozen by <code>docs/language.md</code>)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>item      = fn_decl | struct_decl | enum_decl | use_decl | mod_decl ;
+fn_decl   = &quot;fn&quot; ident &quot;(&quot; params? &quot;)&quot; &quot;-&gt;&quot; type block ;
+block     = &quot;{&quot; stmt* expr? &quot;}&quot; ;
+stmt      = let_stmt | expr &quot;;&quot; ;
+let_stmt  = &quot;let&quot; &quot;mut&quot;? pattern (&quot;:&quot; type)? &quot;=&quot; expr &quot;;&quot; ;
+expr      = literal | path | unary | binary | call | if_expr
+          | match_expr | block | loop_expr | &quot;for&quot; pattern &quot;in&quot; expr block ;
+if_expr   = &quot;if&quot; expr block (&quot;else&quot; (if_expr | block))? ;
+match_expr= &quot;match&quot; expr &quot;{&quot; (pattern &quot;=&gt;&quot; expr &quot;,&quot;)+ &quot;}&quot; ;
+pattern   = ident | literal | &quot;_&quot; | ident &quot;(&quot; pattern,* &quot;)&quot; ;
+type      = &quot;Int&quot; | &quot;Bool&quot; | &quot;String&quot; | ident | &quot;fn&quot; &quot;(&quot; type,* &quot;)&quot; &quot;-&gt;&quot; type ;</code></pre>
+<h3 id="sec-8-2">8.2 CST → AST → HIR state (edge kinds and node kinds)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Node identity</th>
+<th>Owns spans?</th>
+<th>Owns trivia?</th>
+<th>Consumed by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>CST (green/red)</td>
+<td><code>SyntaxKind</code> + byte range</td>
+<td>yes (canonical)</td>
+<td>yes</td>
+<td>AST (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/blueprint/#sec-11-4">§11.4</a>), autofix (Phase 12)</td>
+</tr>
+<tr>
+<td>AST</td>
+<td>thin wrapper over <code>RedNode</code></td>
+<td>derived from CST</td>
+<td>no</td>
+<td>HIR lowering (Phase 3)</td>
+</tr>
+<tr>
+<td>HIR</td>
+<td><code>(BodyId, ExprId|PatId|LocalId)</code></td>
+<td>via <code>HirSourceMap</code></td>
+<td>no</td>
+<td>Types (Phase 4), CFG (Phase 5)</td>
+</tr>
+<tr>
+<td>CFG</td>
+<td><code>BlockId</code>, <code>EdgeKind</code> (Fall/BranchTrue/BranchFalse/SwitchArm/Exceptional/Return)</td>
+<td>inherits HIR spans</td>
+<td>no</td>
+<td>SSA (Phase 6)</td>
+</tr>
+<tr>
+<td>SSA</td>
+<td><code>SsaValue</code> (one static def each)</td>
+<td>inherits HIR spans</td>
+<td>no</td>
+<td>dataflow (Phase 7-10)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Dataflow lattice / abstract-interpretation contract</h3>
+<p>Every instantiation of Phase 7&#39;s framework supplies a <code>Lattice</code> (bottom, top,
+join, <code>leq</code>, widen, narrow — signatures in <a class="cite" href="/system-design-blueprints/systems/static-analyzer/blueprint/#sec-11-8">§11.8</a>) and a <code>Transfer</code>. The
+worklist algorithm (Kildall 1973, applied Phase 7) is domain-agnostic:
+process blocks in reverse-postorder (forward) or postorder (backward), apply
+transfer functions, re-enqueue successors on change, apply <code>widen</code> at loop
+headers after <code>K=5</code> iterations, then a narrowing pass. Phase 8 instantiates
+it over a powerset-of-<code>AbsLoc</code> lattice (points-to); Phase 9 over
+<code>Powerset&lt;TaintFact&gt;</code> via the IFDS exploded-graph reduction (Reps-Horwitz-
+Sagiv 1995); Phase 10 over the interval lattice <code>[lo,hi] , lo,hi ∈ ℤ∪{±∞}</code>.</p>
+<h3 id="sec-8-4">8.4 Rule/checker model</h3>
+<p>A <code>Rule</code> (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/blueprint/#sec-11-9">§11.9</a>) is a predicate over <code>(typed-HIR, PtsSummary, TaintSummary, IntervalState)</code> plus the query DSL&#39;s pattern grammar (<code>is_path</code>,
+<code>is_literal</code>, <code>flows_from</code>, <code>points_to_null</code>, <code>in_loop</code>). Rules are id-sorted
+and run independently — <a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-8">I8</a> forbids any rule reading another rule&#39;s output.
+Suppression resolution walks from the diagnostic&#39;s span up to the nearest
+enclosing <code>#[allow(rule_id)]</code> or a matching <code>analyzer.toml</code> glob (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-9">I9</a>).</p>
+<h3 id="sec-8-5">8.5 Worked example: taint reaching a sink</h3>
+<p><code>examples/webapp.mini</code> (abridged): <code>fn handle(req: Request) -&gt; Response { let q = req.param(&quot;id&quot;); let sql = concat(&quot;SELECT * FROM t WHERE id=&quot;, q); db::query(sql) }</code>. Trace: Phase 1-3 produce HIR with <code>req.param</code> typed as
+<code>String</code> tainted-source (per <code>taint/policy.rs</code>, matching
+<code>http::Request::param</code>); Phase 8 computes <code>pts(sql)</code> is a fresh heap loc from
+<code>concat</code>; Phase 9&#39;s IFDS tabulation propagates the taint fact
+<code>{sql: tainted}</code> across the <code>concat</code> flow function and finds <code>db::query(sql)</code>
+matches the <code>sql_query</code> sink pattern with no sanitizer on the path; Phase 11
+fires rule <code>tainted_sink</code> with a <code>Fix</code> suggesting <code>escape_sql(q)</code>. This is
+Conformance Fixture <code>taint/sqli_via_concat.mini</code> (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/blueprint/#sec-21-5">§21.5</a>).</p>
+<h3 id="sec-8-6">8.6 Malformed-input example</h3>
+<p>Input: <code>let x = &quot;unterminated</code> (no closing quote, no trailing newline).
+Phase 1 lexes an <code>Error</code> token spanning from the opening <code>&quot;</code> to EOF and
+emits <code>LexError::UnterminatedString</code>; Phase 2&#39;s parser treats the <code>Error</code>
+token as a <code>LiteralExpr</code> placeholder, synchronizes on the statement boundary
+(none found ⇒ EOF), and still produces a <code>SourceFile</code> CST node whose
+<code>green.text()</code> round-trips the original bytes exactly (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-2">I2</a>) — this is what
+lets the LSP server still show <em>a</em> tree (with one squiggle) instead of
+nothing. Fixture: <code>conformance/golden/recovery/unclosed_string.mini</code>.</p>
+<h3 id="sec-8-7">8.7 Failure-path example</h3>
+<p>Input: a pathological interval-lattice loop with a non-linear induction
+variable feeding Phase 10&#39;s solver past its widening threshold without
+converging within the 10,000,000-pop default budget (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-6">I6</a>). The solver
+returns <code>Err(FixpointError::BudgetExhausted(pops))</code>; Phase 10 catches this
+per-body (not per-program — <a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-6">I6</a> is scoped to one <code>Body</code>), substitutes <code>⊤</code> for
+that body&#39;s interval state, emits diagnostic <code>analysis_degraded</code> naming the
+body and the analysis, and every rule downstream that depends on intervals
+for that body runs in its documented degraded/conservative mode (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-8">P8</a>) rather
+than silently omitting checks. Fixture:
+<code>conformance/golden/budget/nonlinear_induction.mini</code>.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-1">P1</a> — The IR pipeline is one-way and lossless.</strong> Source → tokens → CST → AST → HIR → TypedHIR → CFG → SSA; no analysis writes back into an earlier IR. Tradeoff: more memory (every IR retained, at least logically, via the cache) for correctness and debuggability. Violating it (an analysis &quot;patching&quot; the HIR in place) breaks cache invalidation (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-1">I1</a>) silently.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-2">P2</a> — One parser, one type checker, one CFG builder.</strong> Every analysis consumes the same SSA. Tradeoff: a bug in shared infrastructure blocks every analysis at once (a &quot;flag day&quot;), but bugs never diverge across analyses. Violating it (a bespoke mini-parser inside a rule) creates silent semantic drift between rules.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-3">P3</a> — Name the point on the soundness–completeness curve, per analysis.</strong> Every analysis states sound / sound-modulo-named-unsoundness / unsound (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/blueprint/#sec-2-1">§2.1</a>). Tradeoff: an explicit unsoundness statement is a permanent liability line item, not a one-time apology. Violating it means users cannot reason about what the tool promises.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-4">P4</a> — False positives are a defect on the rule, not the corpus.</strong> Any diagnostic firing on <code>fp_corpus/</code> blocks release (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/blueprint/#sec-23-4">§23.4</a>). Tradeoff: slower rule rollout (every new rule ships <code>Experimental</code> first). Violating it erodes trust irreversibly (Bessey et al. 2010).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-5">P5</a> — Suppressions are first-class and structured.</strong> Only <code>#[allow(rule_id)]</code> and <code>analyzer.toml</code> globs; no blanket &quot;ignore this file.&quot; Tradeoff: slightly more typing for the user. Violating it (a magic disable-everything comment) makes suppression unauditable (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-9">I9</a>).</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-6">P6</a> — Incremental is the default; full-rebuild is opt-in.</strong> Every CLI command routes through <code>AnalysisDb</code>; <code>--no-cache</code> exists for debugging and must match warm output byte-for-byte (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-7">I7</a>). Violating determinism here is the single most-reported class of &quot;flaky CI&quot; bug in real incremental systems.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-7">P7</a> — Autofixes are diff-previewable before applied.</strong> <code>fix --check</code> never touches the working tree. Tradeoff: two code paths (preview vs. apply) to keep in sync. Violating it removes the user&#39;s last chance to catch a bad fix before it lands.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-8">P8</a> — The analyzer never silently downgrades.</strong> A fix conflict emits a diagnostic and applies neither side (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-10">I10</a>); a fixpoint budget exhaustion emits a diagnostic and falls back to <code>⊤</code> (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-6">I6</a>). Violating it produces analyses that are silently wrong with no operator signal.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-9">P9</a> — LSP is a peer of the CLI, not a wrapper.</strong> Both are thin shells over <code>AnalysisDb</code>; the same diagnostic at the same span from either surface. Violating it (LSP-only fixes, or CLI-only rules) fragments the rule catalogue.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-10">P10</a> — No analysis allocates per AST node.</strong> Phase 4 onward, everything is an interned id from an arena; scratch state is a per-body arena reset between bodies. Violating it turns a 100 kLOC benchmark (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/numbers/#sec-4">§4</a>) into a GC- pressure benchmark.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-11">P11</a> — Determinism is the default.</strong> <code>(workspace_snapshot, config)</code> → byte-identical SARIF across builds, hosts, and worker counts (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-11">I11</a>). Violating it under Phase 13&#39;s parallel scheduler is a released defect, not a known limitation.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-12">P12</a> — The rule query DSL is a real (small) language.</strong> Not a <code>match</code> on <code>Hir::Call</code>; a declarative surface compiled into a query plan. Tradeoff: an extra compilation stage. Violating it (rules as raw Rust only) blocks the stretch Datalog frontend (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/trade-offs/#sec-39">§39</a>) and third-party rules.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-13">P13</a> — No surprises in error reporting.</strong> Every diagnostic carries a concrete span, a rule id, and a one-line &quot;actor, action, reason, suggestion&quot; message (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/blueprint/#sec-23-6">§23.6</a>). Violating it produces the &quot;cryptic linter output&quot; failure mode users cite most often when disabling a tool.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-14">P14</a> — Fixpoint solvers are budget-bounded.</strong> Default 10,000,000 worklist pops/body, hard ceiling 100,000,000 (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/numbers/#sec-4">§4</a>); exhaustion is a diagnosed fallback to <code>⊤</code>, never an infinite loop. Violating it is a denial-of-service vector on adversarial input (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#t-4">T4</a>, <a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#sec-26">§26</a>).</li><li id="p-15"><strong><a class="cite" href="/system-design-blueprints/systems/static-analyzer/architecture/#p-15">P15</a> — The cache is content-addressed; invalidation is automatic.</strong> <code>AnalysisDb</code> re-runs a query iff a transitive input hash changed; there is no &quot;forgot to invalidate&quot; failure mode by construction (<a class="cite" href="/system-design-blueprints/systems/static-analyzer/reliability/#inv-7">I7</a>). Violating it (manual cache-busting) is exactly the class of bug Salsa was built to eliminate (Matsakis, 2018).</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

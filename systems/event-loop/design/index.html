@@ -1,0 +1,395 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Event Loop — Design · Engineering Blueprints</title><meta name="description" content="Event Loop, lld: core types, repo tree, file inventory. Event Loop (crate family elr-*, &#34;Event-Loop Runtime&#34;) is a production-grade asynchronous I/O runtime — the substrate between the operating system's poller and a user's async fn — in the lineage of…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <a href="/system-design-blueprints/systems/event-loop/">Event Loop</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Event Loop</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux</li> <li>13 phases</li> <li>~17 weeks</li> <li>3,028 lines</li> <li>blueprint #189</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/event-loop/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/event-loop/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/event-loop/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/event-loop/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/event-loop/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/event-loop/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/event-loop/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/event-loop/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/event-loop/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/event-loop/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Event Loop — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/event-loop/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>struct Token(NonZeroU64)                    // non-zero: fits kernel epoll_data/udata; 0 reserved
+enum Direction { Read, Write }
+struct Interest(u8)                          // bits: READABLE=0b01 WRITABLE=0b10 BOTH=0b11
+struct Readiness(u8)                         // bits: READABLE WRITABLE READ_CLOSED WRITE_CLOSED</code></pre><pre class="code"><code>type RawHandle = RawFd (unix) | RawWindowsHandle (windows)
+struct OwnedHandle { raw: RawHandle }         // Drop closes the handle</code></pre><pre class="code"><code>trait Poller: Send + Sync {
+    fn add(handle, token: Token, interest: Interest) -&gt; io::Result&lt;()&gt;
+    fn modify(handle, token: Token, interest: Interest) -&gt; io::Result&lt;()&gt;
+    fn remove(handle) -&gt; io::Result&lt;()&gt;
+    fn poll(out: &amp;mut Vec&lt;Event&gt;, timeout: Option&lt;Duration&gt;) -&gt; io::Result&lt;()&gt;
+    fn wake() -&gt; io::Result&lt;()&gt;               // signal-safe, idempotent, cross-thread
+}
+struct Event { token: Token, readiness: Readiness }</code></pre><pre class="code"><code>struct Source {
+    token: Token
+    handle: RawHandle
+    interest: Mutex&lt;Interest&gt;
+    readers: Mutex&lt;Option&lt;Waker&gt;&gt;             // at most one waker per direction (I2)
+    writers: Mutex&lt;Option&lt;Waker&gt;&gt;
+    last_seen: Mutex&lt;Readiness&gt;
+}</code></pre><pre class="code"><code>struct Reactor {
+    poller: Arc&lt;dyn Poller&gt;
+    sources: RwLock&lt;HashMap&lt;Token, Arc&lt;Source&gt;&gt;&gt;
+    events: Mutex&lt;Vec&lt;Event&gt;&gt;                 // reused scratch space, no per-turn allocation (P10)
+    next_token: AtomicU64
+}
+fn Reactor::new(poller: Arc&lt;dyn Poller&gt;) -&gt; Reactor
+fn Reactor::register(handle, interest: Interest) -&gt; io::Result&lt;Arc&lt;Source&gt;&gt;
+fn Reactor::deregister(source: &amp;Source) -&gt; io::Result&lt;()&gt;
+fn Reactor::turn(timeout: Option&lt;Duration&gt;) -&gt; io::Result&lt;()&gt;</code></pre><pre class="code"><code>#[repr(C)]
+struct Header { state: AtomicU32, refcnt: AtomicU32, vtable: &amp;&#39;static Vtable }
+struct Vtable {
+    poll: unsafe fn(*const ())
+    drop_join_handle_slow: unsafe fn(*const ())
+    drop_abort: unsafe fn(*const ())
+    try_take_output: unsafe fn(*const (), *mut ()) -&gt; bool
+}
+struct JoinHandle&lt;T&gt; { raw: *const Header, _t: PhantomData&lt;T&gt; }
+enum JoinError { Cancelled, Panic(Box&lt;dyn Any + Send&gt;) }</code></pre><pre class="code"><code>struct Builder {
+    flavor: Flavor                            // CurrentThread | MultiThread
+    worker_threads: Option&lt;usize&gt;
+    max_blocking_threads: usize
+    thread_keep_alive: Duration
+    poller: PollerKind                        // Auto | Epoll | Kqueue | Iocp
+    uring: bool
+    timer_slot: Duration
+    trace_console: Option&lt;SocketAddr&gt;
+    task_budget: u32
+    max_tasks: Option&lt;usize&gt;                  // T5 mitigation
+}
+fn Builder::new() -&gt; Builder
+fn Builder::current_thread() -&gt; Builder
+fn Builder::multi_thread() -&gt; Builder
+fn Builder::worker_threads(n: usize) -&gt; Builder
+fn Builder::enable_io_uring() -&gt; Builder
+fn Builder::build(self) -&gt; io::Result&lt;Runtime&gt;
+fn Runtime::block_on&lt;F: Future&gt;(fut: F) -&gt; F::Output
+fn Runtime::spawn&lt;F: Future + Send&gt;(fut: F) -&gt; JoinHandle&lt;F::Output&gt;
+fn Runtime::spawn_blocking&lt;T: Send&gt;(f: impl FnOnce() -&gt; T + Send) -&gt; JoinHandle&lt;T&gt;
+fn Runtime::shutdown(self)
+fn Runtime::shutdown_timeout(self, d: Duration)
+fn Runtime::metrics() -&gt; &amp;Metrics</code></pre><pre class="code"><code>struct TcpListener { /* fields: inner std listener, Arc&lt;Source&gt; */ }
+fn TcpListener::bind&lt;A: ToSocketAddrs&gt;(addr: A) -&gt; io::Result&lt;TcpListener&gt;       // async
+fn TcpListener::accept() -&gt; io::Result&lt;(TcpStream, SocketAddr)&gt;                  // async
+struct TcpStream { inner: std::net::TcpStream, source: Arc&lt;Source&gt;, runtime: RuntimeHandle }
+fn TcpStream::connect&lt;A: ToSocketAddrs&gt;(addr: A) -&gt; io::Result&lt;TcpStream&gt;        // async
+fn TcpStream::read(buf: &amp;mut [u8]) -&gt; io::Result&lt;usize&gt;                         // async, I1
+fn TcpStream::write_all(buf: &amp;[u8]) -&gt; io::Result&lt;()&gt;                           // async, I1
+struct UdpSocket { /* symmetric to TcpStream, no backpressure at the OS layer */ }
+struct UnixStream { /* AF_UNIX, SOCK_STREAM; unix-only, §21.3 */ }</code></pre><pre class="code"><code>struct TimerHandle { /* opaque; Drop unlinks in O(1) (I4) */ }
+struct TimerWheel { wheels: [Wheel; 8], base: Instant, cursor_ms: u64 }
+struct Wheel { slots: [Slot; 256] }
+struct Slot { head: Option&lt;Box&lt;TimerEntry&gt;&gt; }
+struct TimerEntry { deadline_ms: u64, waker: Waker, next: Option&lt;Box&lt;TimerEntry&gt;&gt;, prev: *mut TimerEntry }
+fn TimerWheel::insert(deadline: Instant, waker: Waker) -&gt; TimerHandle
+fn TimerWheel::next_deadline() -&gt; Option&lt;Instant&gt;
+fn TimerWheel::advance_to(now: Instant)</code></pre><pre class="code"><code>struct Sender&lt;T&gt; { /* opaque */ }
+struct Receiver&lt;T&gt; { /* opaque */ }
+fn channel&lt;T&gt;(capacity: usize) -&gt; (Sender&lt;T&gt;, Receiver&lt;T&gt;)
+fn Sender::send(value: T) -&gt; Result&lt;(), SendError&lt;T&gt;&gt;                           // async, yields on full
+fn Sender::try_send(value: T) -&gt; Result&lt;(), TrySendError&lt;T&gt;&gt;
+fn Receiver::recv() -&gt; Option&lt;T&gt;                                                // async, yields on empty
+fn Sender::with_watermarks(low: usize, high: usize) -&gt; Sender&lt;T&gt;
+struct Inner&lt;T&gt; { ring: ArrayQueue&lt;T&gt;, senders: Mutex&lt;VecDeque&lt;Waker&gt;&gt;, receivers: Mutex&lt;Option&lt;Waker&gt;&gt;, closed: AtomicBool }</code></pre><pre class="code"><code>trait Submitter: Send + Sync {
+    fn submit(sqe: &amp;squeue::Entry) -&gt; io::Result&lt;SubmissionToken&gt;
+    fn drain_completions(out: &amp;mut Vec&lt;Completion&gt;) -&gt; io::Result&lt;()&gt;
+    fn wait(timeout: Option&lt;Duration&gt;) -&gt; io::Result&lt;usize&gt;
+}
+struct IoUringRing {
+    ring: io_uring::IoUring
+    pending: Mutex&lt;HashMap&lt;SubmissionToken, Waker&gt;&gt;
+    buffers: FixedBufferPool                  // pre-registered, §35 #8
+    next_token: AtomicU64
+}
+struct IoUringFeatures { accept_multishot: bool, recv_multishot: bool, nodrop: bool, register_files: bool }
+fn probe() -&gt; IoUringFeatures</code></pre><pre class="code"><code>opaque elr_runtime; opaque elr_handle; typedef int64_t elr_task_id
+enum elr_status { OK=0, ERR_AGAIN=-1, ERR_INVAL=-2, ERR_NOMEM=-3, ERR_CLOSED=-4 }
+fn elr_runtime_new(worker_threads: c_int) -&gt; *mut elr_runtime
+fn elr_runtime_free(*mut elr_runtime)
+fn elr_spawn(*mut elr_runtime, fn(*mut c_void), *mut c_void) -&gt; elr_task_id
+fn elr_tcp_listen(*mut elr_runtime, host: *const c_char, port: u16) -&gt; *mut elr_handle
+fn elr_tcp_accept(*mut elr_handle) -&gt; *mut elr_handle
+fn elr_tcp_read(*mut elr_handle, buf: *mut c_void, len: usize) -&gt; ssize_t
+fn elr_tcp_write(*mut elr_handle, buf: *const c_void, len: usize) -&gt; ssize_t
+fn elr_handle_close(*mut elr_handle)</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>Event-Loop/
+├── README.md
+├── FINAL_BLUEPRINT.md
+├── BUILD_PLAN.md
+├── CHANGELOG.md
+├── BLUEPRINT_LOG.md
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+├── SECURITY.md
+├── LICENSE                    # dual Apache-2.0/MIT summary, points at LICENSES/
+├── LICENSES/
+│   ├── Apache-2.0.txt
+│   ├── MIT.txt
+│   └── ELv2.txt               # reserved: hosted control plane, Phase-2+
+├── Cargo.toml                  # workspace root
+├── Cargo.lock
+├── rust-toolchain.toml
+├── Makefile
+├── Dockerfile
+├── docker-compose.yml
+├── .dockerignore
+├── .env.example
+├── .gitignore
+└── .github/
+    └── workflows/
+        ├── ci.yml
+        ├── conformance.yml
+        ├── miri.yml           # undefined-behaviour gate
+        ├── loom.yml            # concurrency model gate
+        ├── soak.yml            # long-running stability gate
+        ├── kernels.yml         # io_uring opcode coverage matrix
+        ├── security.yml        # cargo-audit / cargo-deny
+        └── release.yml</code></pre><pre class="diagram"><code>crates/
+├── elr-core/
+│   ├── Cargo.toml
+│   └── src/{lib.rs, error.rs, version.rs, handle.rs, interest.rs}
+├── elr-poller/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── trait_def.rs
+│       ├── linux/{mod.rs, epoll.rs}
+│       ├── bsd/{mod.rs, kqueue.rs}
+│       ├── windows/{mod.rs, iocp.rs}
+│       └── waker.rs
+├── elr-reactor/
+│   ├── Cargo.toml
+│   └── src/{lib.rs, source.rs, reactor.rs, parker.rs}
+└── elr-timer/
+    ├── Cargo.toml
+    └── src/{lib.rs, wheel.rs, entry.rs, handle.rs}</code></pre><pre class="diagram"><code>crates/
+├── elr-runtime/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── builder.rs
+│       ├── runtime.rs
+│       ├── executor/{mod.rs, single_thread.rs, multi_thread.rs, worker.rs, inject.rs, steal.rs}
+│       ├── task/{mod.rs, header.rs, raw.rs, join.rs, budget.rs}
+│       ├── waker/{mod.rs, raw.rs}
+│       ├── group/{mod.rs, select.rs}
+│       └── blocking/{mod.rs, pool.rs}
+├── elr-uring/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── submitter.rs
+│       ├── ring.rs
+│       ├── ops/{accept.rs, read.rs, write.rs, timeout.rs}
+│       └── feature_probe.rs
+└── elr-channel/
+    ├── Cargo.toml
+    └── src/{lib.rs, mpsc.rs, broadcast.rs, oneshot.rs, watermark.rs}</code></pre><pre class="diagram"><code>crates/
+├── elr-net/
+│   ├── Cargo.toml
+│   └── src/{lib.rs, tcp.rs, udp.rs, unix.rs, stdio.rs, signal.rs, process.rs, file.rs}
+├── elr-dns/
+│   ├── Cargo.toml
+│   └── src/{lib.rs, resolver.rs, cares_stub.rs}
+├── elr-trace/
+│   ├── Cargo.toml
+│   └── src/{lib.rs, span.rs, console.rs, idle.rs}
+├── elr-c-abi/
+│   ├── Cargo.toml
+│   ├── cbindgen.toml
+│   ├── include/elr.h
+│   └── src/lib.rs
+└── elr-bench/
+    ├── Cargo.toml
+    └── benches/{echo_throughput.rs, timer_p99.rs, connection_storm.rs, allocation_audit.rs}</code></pre><pre class="diagram"><code>examples/
+├── echo-server.rs             # 100k req/s single-core target (M1)
+├── tinyhttp.rs                # toy HTTP/1.1 atop elr-net
+├── chat-room.rs               # broadcast channel + tcp
+├── shell-ish.rs                # stdin / child-process pipeline
+├── file-cat.rs                # offload vs io_uring side-by-side
+├── tls-handshake-driver.rs    # consumes TLS-SSL-Handshake (rank 50)
+├── http2-server.rs            # consumes HTTP2-HTTP3 (rank 64)
+└── ws-server.rs               # consumes WebSocket (rank 81)
+conformance/
+├── README.md
+├── runner.rs
+├── report_schema.json
+└── corpora/{poller,reactor,waker,timer,scheduler,cancel,channel,uring,net,dns,trace,integration}/
+benchmarks/
+├── README.md
+├── echo_throughput/
+├── million_connections/
+├── timer_p99/
+├── work_stealing_balance/
+└── results/{linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64}/
+fuzz/
+├── Cargo.toml
+└── fuzz_targets/{poller_event_decode.rs, timer_wheel_insert.rs, channel_send_recv.rs}</code></pre><pre class="diagram"><code>docs/adr/
+0001-rust-not-go-or-cpp.md              0002-poller-dyn-vs-generic-dispatch.md
+0003-edge-vs-level-triggered.md         0004-cooperative-not-preemptive.md
+0005-source-lifetime-mio-divergence.md  0006-io-uring-separate-trait.md
+0007-timer-wheel-not-binary-heap.md     0008-work-stealing-not-shared-queue.md
+0009-drop-cancellation-not-cancel.md    0010-bounded-channels-default.md
+0011-thread-pool-files-and-dns.md       0012-tokio-console-protocol.md
+0013-c-abi-not-libuv-clone.md           0014-license-apache-mit-dual.md
+0015-no-global-runtime.md               0016-c-ares-phase-1-stretch.md
+0017-loom-and-miri-ci-gates.md          0018-opentelemetry-export.md
+0019-prometheus-via-c-abi.md            0020-reproducible-builds-nix.md
+0021-rawwaker-not-boxed-dyn-wake.md     0022-epollexclusive-listener-fanout.md</code></pre><pre class="diagram"><code>docs/architecture/{overview.md, poller-vs-uring.md, waker-protocol.md,
+                    timer-wheel-design.md, work-stealing.md,
+                    structured-concurrency.md, tracing-protocol.md}
+docs/operator-reference.md
+docs/threat-model/{overview.md, boundaries.md}
+docs/runbooks/{triage.md, stuck-task.md, timer-skew.md, fd-leak.md, runaway-cpu.md}
+docs/performance/{methodology.md, tail-latency-analysis.md}
+docs/failure-analysis/postmortem-template.md
+docs/compliance/{soc2-mapping.md, gdpr-mapping.md}
+docs/api/                        # rustdoc + C ABI HTML (generated, not source-controlled)
+docs/sdk/                        # embedder integration guides (markdown, not enumerated)
+ops/{helm/, terraform/, k8s/}    # infra-as-code trees, not enumerated
+templates/{adr.md, postmortem.md, rfc.md, kernel-spec.md}
+papers/whitepaper/whitepaper-v1.0.md
+legal/{terms.md, privacy.md, dpa.md, aup.md, trademark-policy.md,
+       transparency-report-template.md}
+brand/{voice.md, typography.md, palette.md}
+scripts/{bootstrap.sh, upload-to-github.sh, gen-conformance-report.sh}
+tools/kernel-feature-probe/main.rs   # standalone CLI wrapping feature_probe() (§20.2)
+notes/reactor-derivations/           # working notes, not enumerated
+third_party/                         # vendored licence texts only; no compiled deps
+nix/flake.nix</code></pre> </section><section aria-labelledby="sec-40"> <h2 id="sec-40">File inventory <small class="muted">(Appendix A · 29 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>README.md</code></td><td>project overview, quickstart</td></tr><tr><td><code>FINAL_BLUEPRINT.md</code></td><td>this specification, checked into the repo it specifies</td></tr><tr><td><code>BUILD_PLAN.md</code></td><td>phase-by-phase build tracking, referenced by every phase&#39;s deliverables</td></tr><tr><td><code>CHANGELOG.md</code></td><td>Keep-a-Changelog-format release history</td></tr><tr><td><code>BLUEPRINT_LOG.md</code></td><td>phase-transition log (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-12-10">§12.10</a> onward)</td></tr><tr><td><code>CONTRIBUTING.md</code></td><td>contributor workflow</td></tr><tr><td><code>CODE_OF_CONDUCT.md</code></td><td>community conduct policy</td></tr><tr><td><code>SECURITY.md</code></td><td>vulnerability-disclosure policy, PGP fingerprint</td></tr><tr><td><code>LICENSE</code></td><td>dual-licence summary, points at <code>LICENSES/</code></td></tr><tr><td><code>LICENSES/Apache-2.0.txt</code></td><td>Apache-2.0 full text (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-14">ADR-14</a>)</td></tr><tr><td><code>LICENSES/MIT.txt</code></td><td>MIT full text (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-14">ADR-14</a>)</td></tr><tr><td><code>LICENSES/ELv2.txt</code></td><td>reserved for the hosted control plane, Phase-2+</td></tr><tr><td><code>Cargo.toml</code></td><td>workspace root, lists every <code>crates/elr-*</code> member</td></tr><tr><td><code>Cargo.lock</code></td><td>pinned dependency graph</td></tr><tr><td><code>rust-toolchain.toml</code></td><td>pins Rust 1.78 + components (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-1">ADR-01</a>, <a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-17">ADR-17</a>)</td></tr><tr><td><code>Makefile</code></td><td>all build/test/lint/conformance/perf targets</td></tr><tr><td><code>Dockerfile</code></td><td>multi-stage build+runtime image</td></tr><tr><td><code>docker-compose.yml</code></td><td>example server + Prometheus + Grafana sidecar</td></tr><tr><td><code>.dockerignore</code></td><td>Docker build-context exclusions</td></tr><tr><td><code>.env.example</code></td><td>sample environment configuration</td></tr><tr><td><code>.gitignore</code></td><td>VCS exclusions</td></tr><tr><td><code>.github/workflows/ci.yml</code></td><td>build + unit test + lint</td></tr><tr><td><code>.github/workflows/conformance.yml</code></td><td>runs the <a class="cite" href="/system-design-blueprints/systems/event-loop/build/#sec-23">§23</a> conformance suite</td></tr><tr><td><code>.github/workflows/miri.yml</code></td><td>undefined-behaviour gate (<a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-14">P14</a>)</td></tr><tr><td><code>.github/workflows/loom.yml</code></td><td>concurrency-model exhaustion gate</td></tr><tr><td><code>.github/workflows/soak.yml</code></td><td>nightly 24h soak (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-9">M9</a>)</td></tr><tr><td><code>.github/workflows/kernels.yml</code></td><td>three-OS poller matrix (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-14-3">§14.3</a>)</td></tr><tr><td><code>.github/workflows/security.yml</code></td><td><code>cargo-audit</code>/<code>cargo-deny</code></td></tr><tr><td><code>.github/workflows/release.yml</code></td><td>tag-triggered build, sign, publish</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

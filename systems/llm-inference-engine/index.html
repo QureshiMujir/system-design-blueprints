@@ -1,0 +1,627 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>LLM Inference Engine · Engineering Blueprints</title><meta name="description" content="Teams that own their inference runtime debug the surprises themselves: tokenizer drift, quantization rounding, KV-cache out-of-memory and batching starvation (§2). The numbers show why each is hard. To produce one output token the GPU streams every weight once, so on an RTX 4090…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <span aria-current="page">LLM Inference Engine</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>LLM Inference Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">C/C++</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>10 phases</li> <li>~15 weeks</li> <li>1,826 lines</li> <li>blueprint #44</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/llm-inference-engine/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/llm-inference-engine/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/llm-inference-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/llm-inference-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/llm-inference-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/llm-inference-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/llm-inference-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/llm-inference-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/llm-inference-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:LLM Inference Engine"> <div class="doc-grid"> <aside class="doc-toc" data-pagefind-ignore> <details class="toc" open data-collapse-narrow> <summary>On this page</summary> <ol><li><a href="#ex-in-one-paragraph">In one paragraph</a></li><li><a href="#ex-the-problem-concretely">The problem, concretely</a></li><li><a href="#ex-how-it-works-end-to-end">How it works, end to end</a></li><li><a href="#ex-the-core-ideas">The core ideas</a></li><li><a href="#ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</a></li><li><a href="#ex-what-must-never-be-false">What must never be false</a></li><li><a href="#ex-what-breaks-in-production">What breaks in production</a></li><li><a href="#ex-the-numbers">The numbers</a></li><li><a href="#ex-how-it-compares">How it compares</a></li><li><a href="#ex-building-it-the-phase-plan">Building it — the phase plan</a></li><li><a href="#ex-questions-to-test-yourself">Questions to test yourself</a></li><li><a href="#ex-if-you-only-remember-three-things">If you only remember three things</a></li><li><a href="#ex-words-used-here">Words used here</a></li></ol> </details> </aside> <div class="doc-main"> <p class="meta doc-meta" data-pagefind-ignore> <span>Plain-words explainer</span> <span>status: checked</span> <span>written 2026-10-02</span> <span>checked by Opus 5.5 on 2026-10-07</span> <span>380 lines</span> </p>  <div class="prose explainer"><h2 id="ex-in-one-paragraph">In one paragraph</h2>
+<p>A minimal but production-grade runtime for transformer language models of the LLaMA and Mistral
+family. It reads GGUF model files, runs the forward pass correctly on CPU and quickly on CUDA,
+exposes an OpenAI-compatible chat-completions API, and serves concurrent traffic with continuous
+batching and a key-value cache (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-1">§1</a>). It does inference only: training, fine-tuning and gradients
+are out of scope (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-1">§1</a>). It is run by ML infrastructure engineers hosting models for internal tools,
+and by on-call staff who must debug tokenizer, kernel or scheduler failures (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-1">§1</a>). The defining
+fact: generating tokens is bound by memory bandwidth, while processing the prompt is bound by
+compute (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>).</p>
+<h2 id="ex-the-problem-concretely">The problem, concretely</h2>
+<p>Teams that own their inference runtime debug the surprises themselves: tokenizer drift,
+quantization rounding, KV-cache out-of-memory and batching starvation (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-2">§2</a>). The numbers show why
+each is hard. To produce one output token the GPU streams every weight once, so on an RTX 4090 with
+1,008 GB/s of bandwidth and 3.94 GB of 4-bit 7B weights the theoretical ceiling is about 256
+tokens per second for a single stream (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> items 6 and 8). Serving
+32 users at once adds per-request attention memory: 512 KiB per token for a 7B model, about
+1.0 GiB for a 2,048-token request (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> items 1–2). The naive answer, one fixed padded batch, wastes
+GPU cycles on padding and adds head-of-line blocking when requests arrive interactively (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#sec-34">§34</a> A2).
+Meanwhile the model file is untrusted input (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-14">P14</a>), the tokenizer must round-trip exactly (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-6">I6</a>), and
+an unstabilised softmax silently produces NaN on confident predictions (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM4</a>).</p>
+<h2 id="ex-how-it-works-end-to-end">How it works, end to end</h2>
+<p>The blueprint&#39;s diagram is a one-way data path: weights flow up from the loader, requests flow
+down from HTTP, and activations are transient (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-3">§3</a>). Lightly adapted:</p>
+<pre class="diagram"><code> Python Frontend (§20): mini.load(&quot;model.gguf&quot;) -&gt; Engine ; FastAPI /v1/chat/completions
+        │ PyBind11 (ADR-12)
+ Engine + Scheduler + ContinuousBatcher (§18): queue -&gt; prefill -&gt; decode -&gt; finish ; PrefixCache (xxHash)
+   Sampler (§19): greedy/top-k/top-p/min-p/rep/pres/freq      Tokenizer (§14): GGUF BPE + byte-fallback
+ Transformer Forward Pass (§15–§17): embed -&gt; [RMSNorm-&gt;attn-&gt;+res -&gt; RMSNorm-&gt;SwiGLU-&gt;+res] x N -&gt; RMSNorm -&gt; lm_head -&gt; logits
+   KvCache (§18): Contiguous/Paged          Operators: matmul, RMSNorm, RoPE, GQA, SwiGLU, FA2
+ Tensor Library (§13): Storage/strides; Dtype f32,f16,bf16,q8_0,q4_0,q4_K...; Arena per request + weights Arena
+ CpuBackend (§15): AVX2/AVX-512/NEON, OpenMP          CudaBackend (§16–§17): custom kernels, no cuBLAS
+ gguf::Reader (§13): mmap MAP_PRIVATE, header/metadata/tensor parse, bounds-checked</code></pre>
+<p>A chat request arrives at the <strong>Python Frontend</strong>, which owns HTTP framing and Pydantic validation
+of <code>ChatCompletionRequest</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-20-2">§20.2</a>). The chat template embedded in the GGUF file is rendered
+first, then the <code>Tokenizer</code> turns the text into token ids — it is the only module that touches
+text (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-20-2">§20.2</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-9">P9</a>). The ids go through the PyBind11 binding to <code>Engine::submit</code>, which rejects
+over-capacity work synchronously instead of queueing it (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-11-8">§11.8</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-12">P12</a>). The <code>ContinuousBatcher</code>
+keeps three queues — <code>pending</code>, <code>prefill_running</code>, <code>decode_running</code> — and on each iteration runs a
+decode batch over the decoding requests and pops pending requests into a prefill batch (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-18-2">§18.2</a>).
+The <code>PrefixCache</code> may reuse cached pages for a shared first 32 tokens (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-17">ADR-17</a>). Every
+forward pass is the same operator sequence, run by whichever <code>Backend</code> (<code>CpuBackend</code> or
+<code>CudaBackend</code>) was selected once at <code>Engine::create</code>; the engine never branches on which (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-7">I7</a>).
+Attention reads and appends to the request&#39;s <code>KvCache</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-18-2">§18.2</a>). The logits go to the <code>Sampler</code>,
+a pure function of logits and sampling state that never touches the cache (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-3">§3</a>). The frontend
+iterates <code>next_step</code> and streams each token as a Server-Sent Event, ending with <code>data: [DONE]</code>
+(<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-20-2">§20.2</a>). On EOS, a stop string or <code>max_new_tokens</code>, the request moves to <code>Finished</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a>) and its KV
+pages are freed (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-18-2">§18.2</a>). Weights are never copied: <code>gguf::Reader</code> memory-maps the file, all memory
+belongs to the <code>Tensor</code> library&#39;s arenas (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-10">P10</a>), and quantized weights are dequantised in registers
+inside matmul, never in DRAM (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-8">ADR-08</a>).</p>
+<h2 id="ex-the-core-ideas">The core ideas</h2>
+<h3 id="ex-decode-is-memory-bound-prefill-is-compute-bound-4-32-mm5">Decode is memory-bound, prefill is compute-bound (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM5</a>)</h3>
+<p>Decode produces one token per layer per step and is memory-bound; prefill processes the whole
+prompt in one matmul per layer and is compute-bound (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-18-2">§18.2</a>). The capacity model puts numbers on
+both:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Formula (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a>)</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Decode ceiling</td>
+<td>HBM bandwidth ÷ weight bytes = 1,008 GB/s ÷ 3.94 GB</td>
+<td>≈ 256 tok/s (item 8)</td>
+</tr>
+<tr>
+<td>Decode target</td>
+<td><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-3">M3</a> ≥ 200 tok/s</td>
+<td>≈ 78% of the ceiling (item 8)</td>
+</tr>
+<tr>
+<td>Prefill FLOPs</td>
+<td>2 × 7×10⁹ params × 512 tokens</td>
+<td>≈ 7.17×10¹² FLOPs (item 9)</td>
+</tr>
+<tr>
+<td>Prefill time</td>
+<td>7.17×10¹² ÷ 82.5×10¹² (≈50% of ~165 TFLOPS)</td>
+<td>≈ 87 ms vs the ≤ 100 ms <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-4">M4</a> target (item 9)</td>
+</tr>
+</tbody></table></div>
+<p>Attention itself is I/O-bound rather than FLOP-bound at long sequences, which predicts why a tiled
+kernel beats a naive dense one (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM5</a>); the chosen FlashAttention-2 kernel uses O(N) memory
+instead of O(N²) (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-5">ADR-05</a>).</p>
+<h3 id="ex-the-kv-cache-is-amortised-attention-memory-8-32-mm1">The KV cache is amortised attention memory (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM1</a>)</h3>
+<p>Attention keeps the keys and values of earlier tokens so each decode step reuses them (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-36">§36</a>). Its
+size is <code>2(K,V) × layers × kv_heads × head_dim × dtype_bytes</code>; for LLaMA-2-7B (full multi-head
+attention) that is <code>2×32×32×128×2 = 524,288</code> bytes ≈ 512 KiB per token (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> item 1). The chain:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Item (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a>)</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>2 — one request at 2,048 tokens</td>
+<td>≈ 1.0 GiB</td>
+</tr>
+<tr>
+<td>3 — one request at 256 tokens</td>
+<td>≈ 128 MiB</td>
+</tr>
+<tr>
+<td>4 — weighted average (80% near 256, 20% near 2,048)</td>
+<td>≈ 307.2 MiB</td>
+</tr>
+<tr>
+<td>5 — 32 concurrent requests</td>
+<td>≈ 9.83 GiB</td>
+</tr>
+<tr>
+<td>7 — RTX 4090 headroom, 24 − 3.94 − 9.83</td>
+<td>≈ 10.2 GiB</td>
+</tr>
+</tbody></table></div>
+<p>Phase 6 ships <code>ContiguousKvCache</code>; <code>PagedKvCache</code> with fixed 16-token, reference-counted pages is
+deferred (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-7">ADR-07</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-9">ADR-09</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#sec-35">§35</a>). Every page belongs to exactly one request or the free list (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-3">I3</a>).
+The blueprint pulls two ways here. <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a> sets 32 concurrent requests with contiguous KV, and <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a>
+item 7 says that target is plausible at the average lengths above. But <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-18-2">§18.2</a> allocates each
+request <code>(num_kv_heads, max_seq_len, head_dim)</code> tensors at submission and says this &quot;wastes memory
+under length variance&quot;, and <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-7">ADR-07</a> says paging wins once concurrency passes about 8 requests with
+length variance, because contiguous wastes more than 30% of VRAM at p99 (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-7">ADR-07</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-18-2">§18.2</a>).</p>
+<h3 id="ex-quantization-moves-the-bottleneck-it-does-not-remove-it-8-adr-04-adr-08-mm2">Quantization moves the bottleneck, it does not remove it (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-4">ADR-04</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-8">ADR-08</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM2</a>)</h3>
+<p>GGUF stores weights in blocks that share scale factors (<strong>block quantization</strong>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-36">§36</a>). Q4_K packs
+256 weights into 144 bytes: an fp16 scale and minimum, 8 six-bit sub-scales and minimums, and 128
+bytes of packed 4-bit values (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a>). The capacity model counts this as about 4.5 bits per weight
+including scales (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> item 6). Worked example from the blueprint: TinyLlama&#39;s <code>blk.0.attn_q.weight</code>
+is Q4_K with dims <code>[2048,2048]</code>, so <code>(2048×2048/256) × 144 = 2,359,296</code> bytes, and the loader
+asserts that span before the next tensor&#39;s offset (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a>). Q4_K is the default because it gives the
+best quality per bit at the 7B scale (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-4">ADR-04</a>). The matmul dequantises in registers, so no
+dequantised copy ever exists; eager dequantisation costs about 4× the memory and runs out of memory
+at 70B (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-8">ADR-08</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-2">I2</a>). Quantization moves the cost from memory bandwidth to dequant compute, so a
+smaller quantized model is not automatically faster (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM2</a>).</p>
+<h3 id="ex-continuous-batching-a-clock-doling-out-constant-time-work-8-18-mm3-mm7">Continuous batching: a clock doling out constant-time work (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/build/#sec-18">§18</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM3</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM7</a>)</h3>
+<p>The scheduler is a clock, and kernels are constant-time work units it hands out (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM3</a>). A
+request moves <code>Queued → Prefill → Decode → Finished</code>, with <code>Failed</code> and <code>Cancelled</code> reachable from
+any state, and transition guards reject anything else (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-12">I12</a>). One <code>ContinuousBatcher</code> iteration
+(<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-18-2">§18.2</a>):</p>
+<ol>
+<li>If <code>decode_running</code> is non-empty and within budget, run one decode batch over it.</li>
+<li>If <code>pending</code> has a request, pop it into a prefill batch capped by <code>prefill_token_budget</code>.</li>
+<li>Move prefilled requests to <code>decode_running</code>; move finished ones to <code>done</code> and free their pages.</li>
+</ol>
+<p>Budgets are 64 decode slots and 4,096 prefill tokens per iteration (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>); exceeding either truncates
+the batch and requeues the overflow (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-14">I14</a>). An ageing policy keeps any queued request from starving
+(<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-5">I5</a>). The trade: aggregate throughput rises while per-request latency variance grows, so a p50 win
+must not be mistaken for a p99 win (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM7</a>), which is why <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-11">M11</a> caps p99 wait at 5× p50 (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-28">§28</a>).</p>
+<h3 id="ex-the-cpu-path-is-the-oracle-3-p1-i1-mm8">The CPU path is the oracle (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM8</a>)</h3>
+<p>Both backends implement one <code>Backend</code> interface, and every CUDA operator is checked against the CPU
+reference within a documented per-dtype tolerance (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-1">I1</a>). The backend boundary is &quot;a boundary
+of numerical truth&quot;, and <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM8</a> predicts that &quot;the CPU path is the oracle, never the GPU&quot; (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM8</a>).
+The CPU phase (Phase 3, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/build/#sec-15">§15</a>) comes before the CUDA phases (Phases 4–5, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/build/#sec-16">§16</a>–<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/build/#sec-17">§17</a>), and naive
+attention stays as the conformance oracle and fallback for head sizes FlashAttention-2 does not
+template (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-17-2">§17.2</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-5">ADR-05</a>). The tolerances are not stated consistently. <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-26">§26</a> gives fp16 tolerance as
+<code>(5e-3, 1e-3)</code> (rtol, atol). <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-15-4">§15.4</a> checks CPU operators against PyTorch at <code>&lt; 1e-3</code> max-abs-error.
+<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-16-4">§16.4</a> checks CUDA operators at <code>&lt; 5e-3</code> max-abs-error. <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-17-4">§17.4</a> checks FlashAttention-2 at <code>&lt; 1e-2</code>
+fp16, &quot;tolerance per <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-26">§26</a> Tolerances table&quot;, although <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-26">§26</a> has no <code>1e-2</code> fp16 entry (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-17-2">§17.2</a> says
+FlashAttention-2 gets its own tolerance band).</p>
+<h3 id="ex-untrusted-bytes-everywhere-8-i9-i6-t2-t10">Untrusted bytes everywhere (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-9">I9</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-2">T2</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-10">T10</a>)</h3>
+<p><code>gguf::Reader</code> checks every length field against the file size (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-9">I9</a>). Malformed example from the
+blueprint: a header claiming <code>metadata_kv_count = 0xFFFFFFFFFFFFFFFF</code> is rejected with
+<code>GgufBoundsViolation</code> before any allocation, because each pair needs at least 9 bytes and the file
+is too short (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a>). The tokenizer must round-trip all 1,024 conformance fixtures and all 256
+byte-fallback values bit-identically (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-14-4">§14.4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-6">I6</a>), but &quot;a tokenizer is a bijection only on its own
+fixture corpus&quot; (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM6</a>). Its merge loop is bounded and no fixture may take more than 50 ms to
+encode (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-14-4">§14.4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-10">T10</a>). Softmax subtracts the maximum before <code>exp</code>, because without it fp32 overflows
+at logits above 50 (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-15-2">§15.2</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM4</a>). RMSNorm accumulates its sum of squares in fp64 (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-15-2">§15.2</a>).</p>
+<h2 id="ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</h2>
+<h3 id="ex-language-c-20-and-cuda-with-a-python-driver-adr-01">Language: C++20 and CUDA with a Python driver (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-1">ADR-01</a>)</h3>
+<p><strong>Chosen:</strong> C++20 for the core runtime, for kernel, CUDA and llama.cpp ecosystem interop and a
+mature PyBind11 path; CUDA 12.x and Python sit around it (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-1">ADR-01</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-1">§1</a>). <strong>Rejected:</strong> Rust
+(candle/burn), Zig (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-1">ADR-01</a>); pure Python, 10–100× too slow for kernels (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-1">§1</a>). <strong>When the rejected
+choice is right:</strong> a greenfield CPU-only project with no CUDA or llama.cpp interop need and a team
+valuing memory safety over ecosystem reach (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-1">ADR-01</a>).</p>
+<h3 id="ex-model-format-gguf-adr-03">Model format: GGUF (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-3">ADR-03</a>)</h3>
+<p><strong>Chosen:</strong> GGUF v3, the only format shipping pre-quantized weights at this block granularity with
+the tokenizer and chat template embedded (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-3">ADR-03</a>). <strong>Rejected:</strong> safetensors plus <code>config.json</code>,
+ONNX. <strong>When the rejected choice is right:</strong> a deployment already standardised on HF safetensors
+fine-tuning, or one needing ONNX Runtime&#39;s cross-hardware graph optimiser (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-3">ADR-03</a>).</p>
+<h3 id="ex-kv-cache-layout-contiguous-first-paged-later-adr-07">KV cache layout: contiguous first, paged later (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-7">ADR-07</a>)</h3>
+<p><strong>Chosen:</strong> contiguous per-request tensors, the simplest arithmetic and kernel, shipping
+correctness first (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-7">ADR-07</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-1">P1</a>). <strong>Rejected:</strong> vLLM-style paging from day one. <strong>When the rejected
+choice is right:</strong> once concurrency exceeds about 8 requests with length variance, where contiguous
+wastes more than 30% of VRAM at p99 variance (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-7">ADR-07</a>).</p>
+<h3 id="ex-dequantization-fused-in-the-kernel-adr-08">Dequantization: fused in the kernel (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-8">ADR-08</a>)</h3>
+<p><strong>Chosen:</strong> fused dequant-in-register at matmul (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-8">ADR-08</a>). <strong>Rejected:</strong> eager full dequant into an
+fp16 shadow tensor, which costs about 4× the memory and runs out of memory at 70B (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-8">ADR-08</a>). <strong>When
+the rejected choice is right:</strong> only an offline debugging build inspecting dequantised weights
+layer by layer (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-8">ADR-08</a>).</p>
+<h3 id="ex-attention-kernel-flashattention-2-by-default-adr-05">Attention kernel: FlashAttention-2 by default (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-5">ADR-05</a>)</h3>
+<p><strong>Chosen:</strong> the tiled FlashAttention-2 kernel, O(N) memory instead of O(N²) and tensor-core
+utilisation (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-5">ADR-05</a>). <strong>Rejected:</strong> naive dense softmax, PyTorch SDPA. <strong>When the rejected choice
+is right:</strong> naive as the conformance oracle and for untemplated head sizes; SDPA in a pure-Python
+prototyping spike (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-5">ADR-05</a>).</p>
+<h3 id="ex-api-surface-openai-compatible-http-adr-11">API surface: OpenAI-compatible HTTP (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-11">ADR-11</a>)</h3>
+<p><strong>Chosen:</strong> the OpenAI Chat Completions contract, because every client SDK already targets it
+(<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-11">ADR-11</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-5">P5</a>). <strong>Rejected:</strong> a custom gRPC API, a bespoke REST schema. <strong>When the rejected choice is
+right:</strong> gRPC for a latency-critical internal mesh where HTTP/JSON framing overhead is measurable at
+p99 — rarely, under 200 µs of a multi-millisecond request (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-11">ADR-11</a>).</p>
+<h3 id="ex-prefix-cache-hash-xxh3-64-adr-10">Prefix-cache hash: XXH3-64 (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-10">ADR-10</a>)</h3>
+<p><strong>Chosen:</strong> xxHash XXH3-64, the fastest non-cryptographic 64-bit hash, with acceptable odds because
+every hit is byte-verified (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-10">ADR-10</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-13">I13</a>). <strong>Rejected:</strong> SipHash, FNV-1a, SHA-256. <strong>When the
+rejected choice is right:</strong> SipHash if the key space is attacker-influenced (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-7">T7</a>); SHA-256 for a
+cross-host cache needing collision resistance (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-10">ADR-10</a>).</p>
+<h3 id="ex-roads-not-taken-34-35">Roads not taken (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#sec-34">§34</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#sec-35">§35</a>)</h3>
+<p><em>Eager-mode PyTorch serving</em> wins for research, prototyping and low request volume; rejected
+because dispatch overhead and no fused attention or batching cap throughput an order of magnitude
+below <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-3">M3</a>/<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-5">M5</a> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#sec-34">§34</a> A1). <em>Fully static batching</em> wins for offline scoring of uniform-length inputs;
+rejected because interactive arrivals make padding waste and head-of-line blocking the cost (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#sec-34">§34</a>
+A2). <em>Disaggregated prefill and decode GPU pools</em> win in extremely high-QPS multi-tenant clusters;
+rejected because cross-node KV transfer over RDMA is out of scope for a single-box engine (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#sec-34">§34</a>
+A3). <em>A single fused megakernel</em> wins for one fixed model shape where launch overhead dominates;
+rejected because it cannot be checked operator by operator against the CPU oracle (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#sec-34">§34</a> A4).</p>
+<p>Deferred, each with its un-defer trigger (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#sec-35">§35</a>): full <code>PagedKvCache</code> (sustained concurrency above 8
+or an <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-7">M7</a> breach), speculative decoding (an SLO miss on code completion despite FlashAttention-2 and
+batching tuning), the Tensor-Core matmul (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-1">I1</a> parity green for at least 30 days), and Metal or ROCm
+backends (Apple Silicon with no CUDA path; an AMD-GPU-only fleet).</p>
+<h2 id="ex-what-must-never-be-false">What must never be false</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-1">I1</a></strong> — CPU and CUDA agree within per-dtype tolerance; noticed as an <code>ops.*</code> bucket FAIL in <code>conformance.report.json</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-2">I2</a></strong> — quantized weights are never dequantised in DRAM; a live-dequant-buffer assertion, and <code>mini_dequant_buffer_bytes</code> must be 0 outside kernel scratch.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-3">I3</a></strong> — every KV page has exactly one owner or is free; a debug-build integrity check every scheduler iteration.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-4">I4</a></strong> — greedy with a fixed seed is bit-identical on the same backend and hardware; a 100-run determinism replay.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-5">I5</a></strong> — no queued request starves; per-request wait-iteration tracking (<code>mini_request_wait_iterations</code>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-6">I6</a></strong> — the tokenizer round-trips every fixture; the <code>tokenizer.bpe</code> and <code>tokenizer.bytes</code> buckets.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-7">I7</a></strong> — no engine code branches on backend kind outside <code>src/ops/cpu/</code> and <code>src/ops/cuda/</code>; a grep-based <code>lint</code> target.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-8">I8</a></strong> — an <code>Arena</code> is reset only with zero live tensors; ASan plus a debug-mode live-tensor counter.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-9">I9</a></strong> — the loader bounds-checks every length field against file size; the GGUF fuzz regression.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-10">I10</a></strong> — every HTTP response byte-matches its OpenAPI fixture; schema check and byte-diff in CI.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-11">I11</a></strong> — deadlines use <code>CLOCK_MONOTONIC</code>, never wall-clock; a lint forbidding <code>time()</code>/<code>gettimeofday()</code> in <code>src/engine/</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-12">I12</a></strong> — status moves only along the <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a> state machine; a debug-build assertion on illegal transitions.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-13">I13</a></strong> — a prefix-cache hit is used only after verifying the prompt bytes; a synthetic-collision fixture.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-14">I14</a></strong> — the batcher never exceeds its decode-slot or prefill-token budget; a per-iteration budget assertion.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-15">I15</a></strong> — <code>temperature == 0</code> short-circuits to greedy before any division; the property test <code>temperature=0 ⇒ argmax</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-16">I16</a></strong> — tied embeddings never allocate the embedding tensor twice; a pointer-identity assertion in the loader test.</li>
+</ul>
+<h2 id="ex-what-breaks-in-production">What breaks in production</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#fm-1">FM-1</a> — KV cache out of memory under load.</strong> Contiguous over-allocation at high concurrency and
+length (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-7">ADR-07</a>); seen as <code>mini_kv_cache_bytes_in_use</code> near capacity. Admission control rejects new
+requests (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-4">T4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-5">T5</a>); the failure-path example returns HTTP 503 with <code>Retry-After</code> and no queueing
+past capacity (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#sec-8">§8</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-12">P12</a>); <code>runbook/oom.md</code> reduces decode batch size or <code>max_seq_len</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#fm-2">FM-2</a> — silent tokenizer drift.</strong> An uncovered whitespace or byte-fallback edge case, caught by a
+<code>tokenizer.*</code> conformance regression. No automatic recovery; bisect against the reference and
+patch the corpus.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#fm-3">FM-3</a> — KV page used after free.</strong> A page released while still referenced (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-3">I3</a>), caught by the
+debug-build integrity check. The request is killed and the page quarantined.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#fm-4">FM-4</a> — CPU and CUDA diverge.</strong> A kernel bug, rounding mode or reduction race; the <code>ops.*</code> bucket
+fails on GPU only. Bisect the kernel commit under <code>compute-sanitizer</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#fm-5">FM-5</a> — scheduler starvation.</strong> Naive FIFO without <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-5">I5</a> ageing; <code>mini_request_wait_iterations</code> p99
+breaches. Age-boost priority recovers; the operator can reduce incoming rate.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#fm-6">FM-6</a> — GGUF loader crash.</strong> An unbounded read past end of file (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-9">I9</a>); a fuzzer or CI crash, or a
+production SIGSEGV. The process supervisor restarts and the file is quarantined.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#fm-9">FM-9</a> — prefix-cache collision leak.</strong> An XXH3-64 collision with the verify step bypassed by a
+bug; <code>mini_prefix_cache_verify_fail_total</code> or a correctness report. No automatic recovery: disable
+the prefix cache by flag and investigate the verify path.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#fm-11">FM-11</a> — speculative-decoding rejection storm.</strong> Draft acceptance far below assumption;
+<code>mini_spec_accept_rate</code> drops below its floor. The speculative path is disabled with a logged
+fallback (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-7">P7</a>).</li>
+</ul>
+<p>Threats a reader should know (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#sec-22">§22</a>): <strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-2">T2</a></strong> a malformed GGUF file, met by bounded reads and a fuzz
+corpus; <strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-4">T4</a></strong> out-of-memory through huge prompt or <code>max_tokens</code>, met by per-request ceilings and
+rejection at <code>submit()</code>; <strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-5">T5</a></strong> out-of-memory through a flood of small requests, met by per-key
+concurrency limits and a queue-depth cap, answered with 429 and a backoff hint; <strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-7">T7</a></strong> an
+engineered prefix-cache hash collision, met by byte verification on every hit; <strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-10">T10</a></strong> tokenizer
+denial of service, met by bounded merge loops and a fuzzed pre-tokenizer regex.</p>
+<h2 id="ex-the-numbers">The numbers</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Budget / result</th>
+<th>Formula or source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Resident weights, 7B Q4_K</td>
+<td>≤ 4.5 GiB budget; ≈ 3.94 modelled</td>
+<td><code>7×10⁹ × 4.5/8</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> item 6)</td>
+</tr>
+<tr>
+<td>Max context length</td>
+<td>4,096 tokens</td>
+<td><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a></td>
+</tr>
+<tr>
+<td>KV per token, 7B MHA</td>
+<td>≈ 512 KiB</td>
+<td><code>2×32×32×128×2</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> item 1)</td>
+</tr>
+<tr>
+<td>KV per request, 2,048 / 256 tokens</td>
+<td>≈ 1.0 GiB / ≈ 128 MiB</td>
+<td><code>512 KiB × length</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> items 2–3)</td>
+</tr>
+<tr>
+<td>KV at 32 concurrent</td>
+<td>≈ 9.83 GiB</td>
+<td><code>32 × 307.2 MiB</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> items 4–5)</td>
+</tr>
+<tr>
+<td>Concurrent requests, RTX 4090 24 GiB</td>
+<td>32; ≈ 10.2 GiB headroom</td>
+<td><code>24 − 3.94 − 9.83</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> item 7)</td>
+</tr>
+<tr>
+<td>Decode, GPU, batch 1</td>
+<td>target ≥ 200 tok/s; ceiling ≈ 256</td>
+<td><code>1,008 GB/s ÷ 3.94 GB</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-3">M3</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> item 8)</td>
+</tr>
+<tr>
+<td>Decode, CPU (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-2">M2</a>-class 8-core), batch 1</td>
+<td>target ≥ 30 tok/s</td>
+<td><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-2">M2</a></td>
+</tr>
+<tr>
+<td>Aggregate decode, 32 concurrent</td>
+<td>target ≥ 1,500 tok/s</td>
+<td><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-5">M5</a></td>
+</tr>
+<tr>
+<td>TTFT, prompt 512</td>
+<td>target p50 ≤ 100 / p95 ≤ 180 / p99 ≤ 300 ms; ≈ 87 ms modelled</td>
+<td><code>7.17×10¹² ÷ 82.5×10¹²</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-4">M4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> item 9)</td>
+</tr>
+<tr>
+<td>Cold start to first token</td>
+<td>target ≤ 3 s</td>
+<td><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-14">M14</a></td>
+</tr>
+<tr>
+<td>Decode slots / prefill budget</td>
+<td>64 / 4,096 tokens per iteration</td>
+<td><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-14">I14</a></td>
+</tr>
+<tr>
+<td>SSE bandwidth, 32 streams</td>
+<td>≈ 2.3 Mbps</td>
+<td><code>200 × 44 B × 32</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> item 10)</td>
+</tr>
+<tr>
+<td>p99 wait vs p50, 32 concurrent</td>
+<td>target ≤ 5×</td>
+<td><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-28">§28</a> <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-11">M11</a></td>
+</tr>
+</tbody></table></div>
+<p>The tok/s, latency, cold-start and wait rows are design targets gated in CI (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-28">§28</a>); the memory,
+ceiling and bandwidth rows are arithmetic from the <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> assumptions. One unit wobble in the
+blueprint: <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> item 6 labels the weights &quot;≈3.94 GiB&quot;, item 8 divides by the same figure as
+&quot;3.94 GB&quot;, and item 7 subtracts it from a 24 GiB budget (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> items 6–8).</p>
+<h2 id="ex-how-it-compares">How it compares</h2>
+<ul>
+<li><strong>llama.cpp</strong> optimises for single-file, dependency-light inference on consumer hardware with
+contiguous KV and minimal batching. That suits its &quot;run anywhere with minimal setup&quot; niche, and
+this blueprint&#39;s CPU path descends from it (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/compare/#sec-31">§31</a>).</li>
+<li><strong>vLLM</strong> chose paged KV (it originated PagedAttention) and multi-GPU continuous batching. That
+wins at data-centre serving scale, where this single-GPU scheduler would need the deferred paging
+extension to compete (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/compare/#sec-31">§31</a>).</li>
+<li><strong>TensorRT-LLM</strong> compiles fused tensor-core engines ahead of time for maximum single-GPU
+throughput. That wins when the model shape is fixed and compilation is amortised over huge volume,
+at the cost of the operator-level conformance testing this blueprint depends on (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/compare/#sec-31">§31</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-26">§26</a>).</li>
+<li><strong>HuggingFace TGI</strong> serves HF-hub safetensors models with continuous batching and
+FlashAttention-2 in Rust and Python. It wins when breadth of supported architectures matters more
+than the last 20% of throughput (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/compare/#sec-31">§31</a>).</li>
+<li><strong>MLC-LLM</strong> generates fused kernels through the TVM compiler. That wins on heterogeneous hardware
+(mobile, WebGPU, several vendors) that hand-tuned CPU and CUDA kernels do not cover (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/compare/#sec-31">§31</a>).</li>
+</ul>
+<h2 id="ex-building-it-the-phase-plan">Building it — the phase plan</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>What exists afterwards</th>
+<th>The proof (from §N.4)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>repo skeleton, CI, <code>mini-cli --inspect</code></td>
+<td><code>gguf_header_smoke_test</code> asserts the GGUF magic and <code>tensor_count == 201</code> on TinyLlama (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-12-4">§12.4</a>)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>GGUF loader and tensor library</td>
+<td>layer count 22, head_dim 64, vocab 32,000 and a first-embedding-row checksum match exactly (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-13-4">§13.4</a>)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>tokenizer</td>
+<td>1,024/1,024 fixtures bit-identical, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-13">M13</a> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-14-4">§14.4</a>)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>CPU operators, CPU forward pass</td>
+<td>e2e logits match llama.cpp to 4 decimal places on 100 prompts (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-15-4">§15.4</a>)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>CUDA backend, dense ops</td>
+<td>every CUDA operator <code>&lt; 5e-3</code> max-abs-error vs CPU at fp16 (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-16-4">§16.4</a>)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>FlashAttention-2</td>
+<td>attention bucket <code>&lt; 1e-2</code> fp16; <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-3">M3</a>/<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-4">M4</a> gates (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-17-4">§17.4</a>)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>KV cache and continuous batching</td>
+<td>256-request stress test: zero OOM, no outlier &gt; 5× p50 (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-18-4">§18.4</a>)</td>
+</tr>
+<tr>
+<td>7</td>
+<td>sampler library</td>
+<td>property tests 100% over 10,000 logit vectors, incl. <code>temperature==0</code> ⟺ greedy (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-19-4">§19.4</a>)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>OpenAI-compatible server</td>
+<td>100% of OpenAPI examples validate and byte-match fixtures, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-10">I10</a> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-20-4">§20.4</a>)</td>
+</tr>
+<tr>
+<td>9</td>
+<td>observability, flagged speculative decoding, release hardening</td>
+<td>24-hour soak: zero unhandled exceptions, zero memory growth, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-9">M9</a> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-21-4">§21.4</a>)</td>
+</tr>
+</tbody></table></div>
+<p>The blueprint disagrees with itself on Phase 0. <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-1">§1</a>&#39;s &quot;Phase-0 deliverable&quot; lists eight modules,
+including the tokenizer, CPU operators, <code>Engine</code> + <code>Scheduler</code>, <code>Sampler</code> and a generating
+<code>mini-cli</code>. <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-12-1">§12.1</a> says Phase 0 has &quot;No kernels, no tokenizer, no engine yet&quot;, and <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/build/#sec-38">§38</a> lists it as a
+repo skeleton plus a &quot;Hello, GGUF&quot; smoke test. Timeline: Phase 0 in 1 week; the full system in 12
+weeks full-time or 4–6 months part-time (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-1">§1</a>). Build card:
+<code>blueprints/build-cards/LLM-Inference-Engine.md</code>.</p>
+<h2 id="ex-questions-to-test-yourself">Questions to test yourself</h2>
+<ol>
+<li>Why does <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-1">I1</a> (CPU/CUDA numeric equivalence) force CPU-before-CUDA phase ordering rather than
+parallel development? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-1">I1</a>, the phase order from <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/build/#sec-12">§12</a> to <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/build/#sec-16">§16</a>, and <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM8</a> in <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">§30</a>.</em></li>
+<li>Trace <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-7">ADR-07</a> (contiguous KV first) through the Deferred Register&#39;s PagedKvCache entry to the <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-7">M7</a>
+target — at what concurrency does contiguous start costing more than its simplicity is worth? —
+<em>Hint: <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-7">ADR-07</a>&#39;s last column, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-7">M7</a> in <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-28">§28</a> and the un-defer trigger in <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#sec-35">§35</a>.</em></li>
+<li>Why is XXH3-64 (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-10">ADR-10</a>) acceptable for the prefix cache given <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-13">I13</a>, but would not be acceptable
+without it? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-13">I13</a>&#39;s verify path in <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-18-2">§18.2</a> and threat <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-7">T7</a> in <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#sec-22">§22</a>.</em></li>
+<li>Using <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a>&#39;s capacity model and <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a>&#39;s constraints, at what sequence length does attention shift
+from compute-bound to I/O-bound, and how does that match <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM5</a>? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> items 1, 8 and 9, and
+<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">MM5</a> in <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/study/#sec-30">§30</a>.</em></li>
+<li>Using <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-28">§28</a>&#39;s M-table and <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a>&#39;s derivations together, is <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-5">M5</a> (aggregate tokens/sec at 32
+concurrent) primarily bound by compute, memory bandwidth, or scheduling — which invariant would
+you inspect first if <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#m-5">M5</a> regressed? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-32">§32</a> items 5–8 and the scheduler invariants <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-5">I5</a> and <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-14">I14</a>
+in <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#sec-7">§7</a>.</em></li>
+</ol>
+<h2 id="ex-if-you-only-remember-three-things">If you only remember three things</h2>
+<p>Decode reads every weight for each token, so it is bound by memory bandwidth, while prefill is
+bound by compute, and the KV cache stores past keys and values so they are not recomputed.
+Quantization and continuous batching are trades: 4-bit weights move cost into dequant compute, and
+batching raises aggregate throughput while widening the p99 tail. The CPU path is the numerical
+oracle, the GGUF file and tokenizer input are untrusted, and no engine code branches on which
+backend it runs.</p>
+<h2 id="ex-words-used-here">Words used here</h2>
+<ul>
+<li><strong>GGUF</strong> — the llama.cpp-ecosystem model file: header, metadata, tensor descriptors and data.</li>
+<li><strong>Block quantization / Q4_K</strong> — storing weights in fixed-size blocks that share a scale; Q4_K uses 256-weight super-blocks.</li>
+<li><strong>Prefill</strong> — the forward pass over the whole prompt, producing the first KV entries and logits.</li>
+<li><strong>Decode</strong> — the one-token-at-a-time forward pass that produces each later token.</li>
+<li><strong>TTFT</strong> — time to first token, from submission to the first generated token.</li>
+<li><strong>KV cache</strong> — stored per-layer keys and values from earlier tokens, reused across decode steps.</li>
+<li><strong>Paged KV cache</strong> — KV storage cut into fixed-size, reference-counted, shareable pages.</li>
+<li><strong>Continuous batching</strong> — composing the decode and prefill batch anew every scheduler iteration.</li>
+<li><strong>Prefix cache</strong> — cached KV pages for a hashed, verified prompt prefix, reused across requests.</li>
+<li><strong>RMSNorm / RoPE / SwiGLU / GQA</strong> — LLaMA&#39;s normalisation, rotary positions, gated MLP and grouped K/V heads.</li>
+<li><strong>FlashAttention</strong> — IO-aware exact attention that never materialises the full score matrix.</li>
+<li><strong>BPE / byte fallback</strong> — the greedy merge tokenizer, and per-byte tokens for bytes with no vocab entry.</li>
+<li><strong>Sampler</strong> — the component turning a logits vector into a chosen token id.</li>
+<li><strong>Arena</strong> — a bump-allocated memory region freed in bulk on reset.</li>
+<li><strong>Aging</strong> — raising a waiting task&#39;s priority over time so it cannot starve.</li>
+</ul>
+</div> </div> </div> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

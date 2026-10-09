@@ -1,0 +1,854 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Differential Privacy Engine from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Differential Privacy Engine from Scratch, hld: §3 overview + §8 domain model. Build a production-quality differential privacy engine in Rust that provides: - Bounded-sensitivity query execution with rigorous global sensitivity computation and enforcement. - Calibrated noise…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/security-cryptography/">Security &amp; Cryptography</a> </li><li> <a href="/system-design-blueprints/systems/differential-privacy-engine/">Differential Privacy Engine from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:118"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/security-cryptography/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Security &amp; Cryptography</span></a> </p> <h1>Differential Privacy Engine from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~24 weeks</li> <li>5,072 lines</li> <li>blueprint #377</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/differential-privacy-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/differential-privacy-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/differential-privacy-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/differential-privacy-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/differential-privacy-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/differential-privacy-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/differential-privacy-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/differential-privacy-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/differential-privacy-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/differential-privacy-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Differential Privacy Engine from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Architecture Diagram</h3>
+<pre class="diagram"><code>                      DIFFERENTIAL PRIVACY ENGINE  (bound -&gt; calibrate -&gt; account)
++------------------------------------------------------------------------------------+
+|   dp-cli (query / budget / mechanism / validate)                                    |
+|        |                                                                            |
+|        v                                                                            |
+|   dp-query (count / bounded sum / mean / histogram / quantile)                       |
+|        |                          |                                                 |
+|        v                          v                                                 |
+|   dp-sensitivity (clamp to Bounds; L1/L2 global sensitivity; transform stability)    |
+|        |                                                                            |
+|        v                                                                            |
+|   dp-mechanism (Laplace / Gaussian / exponential / report-noisy-max)  &lt;-- dp-svt     |
+|        |   noise calibrated to sensitivity &amp; epsilon                                |
+|        v                                                                            |
+|   dp-sample (SECURE sampler: snapping Laplace / discrete Gaussian; CSPRNG)           |
+|        |                                                                            |
+|        v   every release charges the budget                                         |
+|   dp-accountant (basic/advanced composition; Renyi-DP; zCDP; moments) ----+          |
+|        |                                                                  |          |
+|        v                                                                  v          |
+|   dp-budget (hard ceiling: DENY if release would exceed remaining budget)            |
+|        |                                                                            |
+|        +--&gt; dp-local (randomized response, freq estimation)                          |
+|        +--&gt; dp-dpsgd (clip per-example grads + Gaussian noise + moments)             |
+|        +--&gt; dp-validate (statistical neighboring-dataset tests; sensitivity audit)   |
+|        v                                                                            |
+|   DpResult&lt;T&gt; { value, (eps,delta) }  (post-processing-immune released answer)        |
++------------------------------------------------------------------------------------+</code></pre>
+<h3 id="sec-3-2">3.2 Subsystem Descriptions</h3>
+<p><strong>dp-cli</strong> — Entry point for human operators. Parses <code>query | budget | mechanism | validate</code> subcommands and dispatches to the corresponding library crate. Owns no business logic; translates CLI arguments to typed PrivacyParams and Bounds. Stdout: DpResult JSON or budget summary. Stderr: errors. No access to raw data in production mode.</p>
+<p><strong>dp-query</strong> — The analyst-facing query API. Exposes <code>count</code>, <code>bounded_sum</code>, <code>mean</code>, <code>histogram</code>, and <code>quantile</code> operations. Each query type implements the <code>Query</code> trait: computes its own <code>Sensitivity</code> from supplied <code>Bounds</code>, selects the appropriate mechanism via dp-mechanism, and requests a budget spend via dp-budget. Inbound: raw data slice + Bounds + PrivacyParams. Outbound: <code>DpResult&lt;T&gt;</code>. Does not own noise generation; delegates entirely to dp-mechanism.</p>
+<p><strong>dp-sensitivity</strong> — Computes and enforces global L1/L2 sensitivity. Input: a query description and Bounds. Output: a <code>Sensitivity</code> value certified to be &gt;= the true global sensitivity (<a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-2">I2</a>). Provides <code>clamp(value, bounds)</code> to enforce <a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-6">I6</a>. Provides <code>transform_stability(scale)</code> for composing sensitivities across data transforms. No randomness; deterministic; no I/O.</p>
+<p><strong>dp-mechanism</strong> — Implements the <code>Mechanism</code> trait for Laplace, Gaussian, exponential, and report-noisy-max. Each mechanism takes <code>(exact: T, sens: Sensitivity, params: PrivacyParams)</code> and returns a noisy T. Noise generation is delegated to dp-sample; the mechanism layer only calibrates parameters (scale b = l1/ε for Laplace; σ from analytic-Gaussian formula for Gaussian) and calls the sampler. Advertises its own PrivacyParams to the accountant. dp-svt is a peer crate that implements the sparse vector technique on top of dp-mechanism primitives.</p>
+<p><strong>dp-svt</strong> — Sparse vector technique and above-threshold. Accepts a stream of queries and a threshold; answers &quot;above&quot; or &quot;below&quot; while paying ε once per query that crosses the threshold, not once per query answered. Internally uses dp-mechanism&#39;s Laplace noise. Useful for answering many queries with a single budget allocation.</p>
+<p><strong>dp-sample</strong> — Trusted noise source. Implements the Mironov snapping mechanism for Laplace (closes the float-DP attack) and a discrete / interval-refinement Gaussian. Uses a CSPRNG (OS entropy via <code>getrandom</code>). No higher-level logic; only: uniform bit generation → Laplace/Gaussian samples with no representable-value gaps. This is the trust anchor for <a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-5">I5</a>; all other noise passes through here.</p>
+<p><strong>dp-accountant</strong> — Tracks cumulative privacy loss across releases. Four accountant modes: basic composition (εs add, δs add), advanced composition (sqrt-scaling), RDP (Renyi divergence at a vector of orders α), and zCDP/moments accountant (rho). Provides <code>compose(mechanism_params) -&gt; PrivacyLoss</code> and <code>to_eps_delta(delta_target) -&gt; PrivacyParams</code>. RDP is the default for Gaussian and DP-SGD; converts to tightest (ε,δ) at report time (P6). Monotonic: <a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-9">I9</a> enforced by construction.</p>
+<p><strong>dp-budget</strong> — Hard budget enforcer. Holds a <code>Budget { total: PrivacyParams, spent: PrivacyLoss }</code> per dataset/per-analyst scope. Before any release: query accountant for the cost, compare against <code>total - spent</code>; if it would exceed, return <code>BudgetExhausted</code> error (<a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-10">I10</a>). If allowed, atomically update <code>spent</code>. Maintains an append-only audit log of every charge (P10). No access to raw data; operates solely on PrivacyLoss accounting values.</p>
+<p><strong>dp-local</strong> — Local-DP layer. Implements randomized response with flip probability p for a binary response, and a debiased frequency estimator. Provides heavy-hitter sketches via the RAPPOR-style approach. Does not route through dp-budget (local DP&#39;s trust model is user-side); has its own PrivacyParams for the reported ε guarantee. Outbound: <code>DpResult&lt;T&gt;</code> stamped with local-DP ε.</p>
+<p><strong>dp-dpsgd</strong> — DP-SGD integration. Input: per-example gradient tensors (as f64 slices), a clipping norm bound, and PrivacyParams. Clips each per-example gradient to L2 norm ≤ C, sums, adds Gaussian noise calibrated to (C, ε, δ), and charges the moments accountant once per training step. Returns the noisy batch gradient + updated <code>PrivacyLoss</code> for the training run. Does not implement backpropagation; expects caller-supplied per-example gradients.</p>
+<p><strong>dp-validate</strong> — Statistical DP conformance testing. Constructs pairs of neighboring datasets; runs a mechanism many times on each; applies a hypothesis test (log-likelihood ratio or empirical CDF test) to verify the ε-bound holds. Also runs sensitivity audits (verify declared sensitivity &gt;= empirical sensitivity). Outputs a conformance report: PASS / FAIL per mechanism + accountant cross-checks.</p>
+<p><strong>DpResult&lt;T&gt;</strong> — The post-processing-immune output type. Carries <code>{ value: T, params: PrivacyParams }</code>. Once emitted, any deterministic or randomized function of <code>value</code> remains DP at the same params (<a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-7">I7</a>). The params field is the provenance record for the released value.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Core Entity Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Crate</th>
+<th>Cardinality</th>
+<th>Lifecycle</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Dataset</code></td>
+<td>dp-budget</td>
+<td>one per analyst session</td>
+<td>created → queried → exhausted</td>
+</tr>
+<tr>
+<td><code>Budget</code></td>
+<td>dp-budget</td>
+<td>1:1 with Dataset</td>
+<td>initialized → charged N times → optionally closed</td>
+</tr>
+<tr>
+<td><code>BudgetLedger</code></td>
+<td>dp-budget</td>
+<td>1:1 with Budget</td>
+<td>append-only charge log</td>
+</tr>
+<tr>
+<td><code>Query</code> (trait object)</td>
+<td>dp-query</td>
+<td>many per Dataset</td>
+<td>constructed → sensitivity-checked → privatized → stamped</td>
+</tr>
+<tr>
+<td><code>Mechanism</code> (trait object)</td>
+<td>dp-mechanism</td>
+<td>instantiated per release</td>
+<td>configured → privatize(&amp;self, exact, sens) → emits DpResult</td>
+</tr>
+<tr>
+<td><code>Sensitivity</code></td>
+<td>dp-core / dp-sensitivity</td>
+<td>per query invocation</td>
+<td>computed or declared → validated ≥ true → consumed by mechanism</td>
+</tr>
+<tr>
+<td><code>PrivacyParams</code></td>
+<td>dp-core</td>
+<td>per mechanism</td>
+<td>declared at construction → proven in phase tests</td>
+</tr>
+<tr>
+<td><code>PrivacyLoss</code></td>
+<td>dp-accountant</td>
+<td>per release event</td>
+<td>produced by mechanism → composed into accountant → charged to Budget</td>
+</tr>
+<tr>
+<td><code>RdpAccountant</code></td>
+<td>dp-accountant</td>
+<td>one per Budget (default)</td>
+<td>initialized → accumulate per release → convert to (eps,delta) on demand</td>
+</tr>
+<tr>
+<td><code>ZcdpAccountant</code></td>
+<td>dp-accountant</td>
+<td>optional alternate</td>
+<td>rho accumulator → convert to (eps,delta)</td>
+</tr>
+<tr>
+<td><code>DpResult&lt;T&gt;</code></td>
+<td>dp-core</td>
+<td>one per privatize call</td>
+<td>emitted only after budget passes; post-processing-immune</td>
+</tr>
+<tr>
+<td><code>RandomizedResponse</code></td>
+<td>dp-local</td>
+<td>per local-DP column</td>
+<td>constructed with p → applies to each record → debiased on aggregation</td>
+</tr>
+<tr>
+<td><code>DpSgdTrainer</code></td>
+<td>dp-dpsgd</td>
+<td>per training run</td>
+<td>per-example clip → noised batch grad → accountant charge per step</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Newtype Invariant State Machine</h3>
+<pre class="diagram"><code>Epsilon(f64):
+  UNVALIDATED ──[f64 &gt; 0 &amp;&amp; finite]──► VALID
+               ──[f64 ≤ 0 || NaN || Inf]──► REJECTED (Error::InvalidEpsilon)
+
+Delta(f64):
+  UNVALIDATED ──[0.0 ≤ f64 &lt; 1.0 &amp;&amp; finite]──► VALID
+              ──[f64 &lt; 0 || f64 ≥ 1 || NaN]──► REJECTED (Error::InvalidDelta)
+
+Sensitivity {l1, l2}:
+  UNVALIDATED ──[l1 ≥ 0 &amp;&amp; l2 ≥ 0 &amp;&amp; both finite]──► VALID
+              ──[l1 &lt; 0 || l2 &lt; 0 || Inf]──► REJECTED (Error::UnboundedSensitivity)
+  VALID ──[declared &lt; true global sens]──► UNSOUND (bug; audited by dp-validate, not caught at runtime)</code></pre>
+<h3 id="sec-8-3">8.3 Budget Lifecycle State Machine</h3>
+<pre class="diagram"><code>                    total: PrivacyParams
+                         │
+          ┌──────────────▼──────────────┐
+          │  INITIALIZED                │
+          │  spent = PrivacyLoss::zero()│
+          └──────────────┬──────────────┘
+                         │ spend(cost: PrivacyLoss)
+                         ▼
+          ┌─────────────────────────────┐
+          │  ACTIVE                     │◄────────────────┐
+          │  remaining = total - spent  │  spend() succeeds each time
+          └──────┬──────────────────────┘  remaining ≥ cost
+                 │
+      ┌──────────┴────────────┐
+      │ would_exceed_budget?  │
+      │ composed_cost &gt; total │
+      └──────────┬────────────┘
+                 │ YES
+                 ▼
+          ┌─────────────────────────────┐
+          │  DENIED                     │  DpError::BudgetExhausted
+          │  (no value emitted, I3)     │  fail-closed (I10)
+          └─────────────────────────────┘
+                 │ NO (remaining ≥ cost)
+                 ▼
+          ┌─────────────────────────────┐
+          │  CHARGED                    │  spent += cost; ledger.append(entry)
+          │  DpResult&lt;T&gt; emitted        │
+          └─────────────────────────────┘</code></pre>
+<p>Atomic spend: check and update are an uninterruptible unit; no concurrent path observes a partial spend.</p>
+<h3 id="sec-8-4">8.4 Privacy Accounting Type Hierarchy</h3>
+<pre class="diagram"><code>PrivacyLoss (enum)
+  ├── Basic(PrivacyParams)          — (eps, delta) pair from a single mechanism
+  ├── Rdp(RdpCurve)                 — Vec&lt;(alpha: f64, rdp: f64)&gt;
+  └── Zcdp(rho: f64)               — zCDP accumulator
+
+RdpCurve
+  ├── orders: Vec&lt;f64&gt;              — Renyi orders α &gt; 1
+  └── losses: Vec&lt;f64&gt;             — D_α(M(D) || M(D&#39;)) per α
+
+Composition path:
+  RdpCurve + RdpCurve  →  element-wise sum per α  (I4, I9)
+  Zcdp(ρ₁) + Zcdp(ρ₂) →  Zcdp(ρ₁ + ρ₂)
+  RdpCurve → PrivacyParams via: min over α of {rdp[α] + log(1/δ)/(α-1)} (Mironov 2017 conversion)
+  Zcdp(ρ) → (eps,delta): eps = ρ + 2√(ρ ln(1/δ))  (Bun-Steinke)</code></pre>
+<h3 id="sec-8-5">8.5 Query Execution Sequence</h3>
+<pre class="diagram"><code>  Analyst                dp-query         dp-sensitivity      dp-mechanism     dp-sample      dp-accountant    dp-budget
+    │                       │                  │                  │               │                │               │
+    │  execute(q, data, b)  │                  │                  │               │                │               │
+    │──────────────────────►│                  │                  │               │                │               │
+    │                       │ clamp(data, b.bounds)               │               │                │               │
+    │                       │─────────────────►│                  │               │                │               │
+    │                       │◄─ clamped_data + Sensitivity ───────│               │                │               │
+    │                       │                  │                  │               │                │               │
+    │                       │ exact(clamped_data)                  │               │                │               │
+    │                       │──────────────────────────────────────►(computed locally)              │               │
+    │                       │◄─ exact_value ──────────────────────│               │                │               │
+    │                       │                                      │               │                │               │
+    │                       │ privatize(exact_value, sensitivity)  │               │                │               │
+    │                       │─────────────────────────────────────►│               │                │               │
+    │                       │                                      │ sample_noise()│                │               │
+    │                       │                                      │──────────────►│                │               │
+    │                       │                                      │◄─ noise ──────│                │               │
+    │                       │                                      │               │                │               │
+    │                       │◄─ DpResult&lt;T&gt;(value, params) ────────│               │                │               │
+    │                       │                                                       │                │               │
+    │                       │ cost = accountant.compute(params)                     │                │               │
+    │                       │──────────────────────────────────────────────────────►│                │               │
+    │                       │◄─ PrivacyLoss ───────────────────────────────────────│                │               │
+    │                       │                                                                        │               │
+    │                       │ budget.spend(cost)                                                     │               │
+    │                       │───────────────────────────────────────────────────────────────────────►│               │
+    │                       │◄─ Ok(()) | Err(BudgetExhausted) ────────────────────────────────────────────────────│
+    │◄── DpResult&lt;T&gt; ───────│  (only if Ok)                                                                         │</code></pre>
+<h3 id="sec-8-6">8.6 Sensitivity Computation Rules (Normative)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Query</th>
+<th>Neighboring relation</th>
+<th>L1 global sensitivity</th>
+<th>L2 global sensitivity</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Count</td>
+<td>add/remove one record</td>
+<td>1</td>
+<td>1</td>
+</tr>
+<tr>
+<td>Bounded sum ([l,u])</td>
+<td>add/remove</td>
+<td>max(|l|, |u|)</td>
+<td>max(|l|, |u|)</td>
+</tr>
+<tr>
+<td>Bounded mean ([l,u], n)</td>
+<td>add/remove</td>
+<td>(u-l)/n</td>
+<td>(u-l)/n</td>
+</tr>
+<tr>
+<td>Histogram (k bins, [l,u])</td>
+<td>add/remove</td>
+<td>1 (parallel: max bin sens=1)</td>
+<td>1</td>
+</tr>
+<tr>
+<td>Quantile (via exp mech)</td>
+<td>add/remove</td>
+<td>1/n (score sensitivity)</td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>Replace neighbor model: sensitivity may differ; user must declare which model is in use.</li>
+<li>Unbounded query (no Bounds declared) → <code>Error::UnboundedSensitivity</code> (<a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-10">I10</a>, P7).</li>
+<li>Transform stability: if a map f has stability t (i.e., d(f(D),f(D&#39;)) ≤ t·d(D,D&#39;)), then sensitivity of g∘f = t · sens(g).</li>
+</ul>
+<h3 id="sec-8-7">8.7 Mechanism Calibration Normative Rules</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>Noise law</th>
+<th>Scale / sigma rule</th>
+<th>DP guarantee</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Laplace</td>
+<td>Lap(b)</td>
+<td>b = l1_sens / ε</td>
+<td>pure ε-DP (δ=0)</td>
+</tr>
+<tr>
+<td>Gaussian (classical)</td>
+<td>N(0,σ²)</td>
+<td>σ = l2_sens · √(2 ln(1.25/δ)) / ε</td>
+<td>(ε,δ)-DP; not tight</td>
+</tr>
+<tr>
+<td>Gaussian (analytic, Balle-Wang)</td>
+<td>N(0,σ²)</td>
+<td>σ = smallest s.t. Φ(Δ/(2s) - εs/Δ) - e^ε·Φ(-Δ/(2s) - εs/Δ) ≤ δ</td>
+<td>(ε,δ)-DP; optimal σ</td>
+</tr>
+<tr>
+<td>Exponential</td>
+<td>Categorical</td>
+<td>P(o) ∝ exp(ε·u(o)/(2·Δu))</td>
+<td>ε-DP</td>
+</tr>
+<tr>
+<td>Report-noisy-max</td>
+<td>Lap(1/ε) per score</td>
+<td>b = 1/ε (sensitivity 1 counts)</td>
+<td>ε-DP (cheaper than Exp for argmax)</td>
+</tr>
+<tr>
+<td>Randomized response (local)</td>
+<td>Bernoulli(p)</td>
+<td>p = e^ε/(1+e^ε)</td>
+<td>ε-LDP; debiased estimator unbiases the aggregate</td>
+</tr>
+</tbody></table></div>
+<p>Invariant: noise scale must be computed from the sensitivity declared at call time, not any cached value (<a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-2">I2</a>).</p>
+<h3 id="sec-8-8">8.8 Sparse Vector Technique (SVT) Model</h3>
+<pre class="diagram"><code>SVTState:
+  threshold: T (noised once at construction, pays 1 use from ρ_threshold)
+  above_count: u32
+  above_limit: u32   (k = max above-threshold queries to answer)
+  epsilon_threshold: Epsilon
+  epsilon_answer: Epsilon   (charged per ABOVE answer; no charge for BELOW)
+
+Transitions per query q_i:
+  noised_q_i = q_i(D) + Lap(2/eps_threshold)
+  if noised_q_i &lt; threshold: emit ⊥ (BELOW); no budget charge for answer
+  else if above_count &lt; above_limit:
+    emit true + Lap(4k/eps_answer)  (ABOVE); charge eps_answer / k to budget; above_count++
+  else: terminate SVT (all k answers exhausted)</code></pre>
+<p>Privacy: total cost = epsilon_threshold + epsilon_answer (sequential composition of the two components); parallel composition does NOT apply here.</p>
+<h3 id="sec-8-9">8.9 DP-SGD Execution Model</h3>
+<pre class="diagram"><code>Per training step t:
+  for each example i in minibatch B:
+    g_i = ∇L(θ, x_i)                           // per-example gradient
+    g_i_clipped = g_i / max(1, ‖g_i‖₂ / C)    // clip to L2 norm ≤ C
+  g_sum = Σ g_i_clipped
+  g_noised = (g_sum + N(0, σ²C²·I)) / |B|      // σ = noise_multiplier
+  θ ← θ - η · g_noised
+
+Accountant charge per step:
+  q = |B| / N  (subsampling rate)
+  Compute RDP(α) = subsampled_gaussian_rdp(α, σ, q) per order α
+  Accumulate into RdpAccountant
+  Privacy budget checked after each step; training halts if budget exhausted (I3, I10)
+
+Key parameters:
+  C:  gradient clipping norm (bounds L2 sensitivity per example = C)
+  σ:  noise multiplier (σ·C = Gaussian std dev)
+  q:  subsampling rate → amplification; ONLY claimed through RDP accountant (P9)</code></pre>
+<h3 id="sec-8-10">8.10 Serialization / Trace / Wire Layouts</h3>
+<p><strong>Audit log entry (append-only, stored as newline-delimited JSON):</strong></p>
+<pre class="diagram"><code>{
+  &quot;ts&quot;: &quot;&lt;RFC3339&gt;&quot;,
+  &quot;dataset_id&quot;: &quot;&lt;uuid&gt;&quot;,
+  &quot;query_id&quot;: &quot;&lt;uuid&gt;&quot;,
+  &quot;mechanism&quot;: &quot;&lt;LaplaceMechanism|GaussianMechanism|...&gt;&quot;,
+  &quot;sensitivity&quot;: {&quot;l1&quot;: &lt;f64&gt;, &quot;l2&quot;: &lt;f64&gt;},
+  &quot;privacy_cost&quot;: {&quot;epsilon&quot;: &lt;f64&gt;, &quot;delta&quot;: &lt;f64&gt;},
+  &quot;accountant_type&quot;: &quot;&lt;RDP|zCDP|Basic&gt;&quot;,
+  &quot;budget_remaining&quot;: {&quot;epsilon&quot;: &lt;f64&gt;, &quot;delta&quot;: &lt;f64&gt;},
+  &quot;outcome&quot;: &quot;CHARGED&quot; | &quot;DENIED&quot;
+}</code></pre>
+<p>Logged fields (P10): mechanism type, sensitivity, cost, outcome. NOT logged: raw data, exact query result, noise value.</p>
+<p><strong>PrivacyParams wire encoding (Protobuf schema sketch):</strong></p>
+<pre class="diagram"><code>message PrivacyParams {
+  double epsilon = 1;   // must be &gt; 0, finite; validated on decode
+  double delta   = 2;   // must be in [0,1); 0 implies pure DP
+}
+message RdpCurve {
+  repeated double alpha = 1;
+  repeated double loss  = 2;  // parallel arrays; same length required
+}</code></pre>
+<p><strong>CLI output format (dp-cli):</strong></p>
+<pre class="diagram"><code>{
+  &quot;value&quot;: &lt;T&gt;,
+  &quot;epsilon&quot;: &lt;f64&gt;,
+  &quot;delta&quot;: &lt;f64&gt;,
+  &quot;mechanism&quot;: &quot;&lt;string&gt;&quot;,
+  &quot;budget_remaining_epsilon&quot;: &lt;f64&gt;
+}</code></pre>
+<p>Raw exact value never appears in CLI output (P10).</p>
+<h3 id="sec-8-11">8.11 Worked Example — Bounded Sum Query</h3>
+<p>Setup: dataset D of salaries, n=1000, bounds [20000, 200000], total budget ε=1.0, δ=1e-6.</p>
+<ol>
+<li><code>Bounds { lower: 20000.0, upper: 200000.0 }</code> → declared.</li>
+<li><code>dp-sensitivity</code>: l1_sens = max(|20000|, |200000|) = 200000; l2_sens = 200000.</li>
+<li><code>LaplaceMechanism { scale: 200000 / 1.0 = 200000.0 }</code> — Laplace noise with scale 2e5.</li>
+<li><code>dp-sample</code> (snapping): compute exact sum, add Lap(2e5) via snapping mechanism (not naive float).</li>
+<li><code>DpResult { value: exact_sum + noise, params: PrivacyParams { epsilon: 1.0, delta: 0.0 } }</code>.</li>
+<li><code>RdpAccountant.accumulate(rdp_laplace(alpha, 1.0))</code> for each order α.</li>
+<li><code>Budget.spend(cost)</code> → remaining ε reduces; ledger entry appended.</li>
+<li>Analyst receives numeric answer + PrivacyParams stamp; raw sum never emitted.</li>
+</ol>
+<p>If the analyst prefers Gaussian: delta=1e-6 → analytic Gaussian σ calibration via Balle-Wang bisection → sigma ≈ 200000 · sqrt(2 ln(1.25/1e-6)) / 1.0 ≈ 739000 (classical), or tighter analytic sigma ≈ 715000 → RdpAccountant tracks D_α for each order; accountant is charged before emitting the result.</p>
+<h3 id="sec-8-12">8.12 Failure-Path Example — Budget Exhaustion Mid-Session</h3>
+<p>Setup: budget ε=0.5, δ=0. Three Laplace queries each requesting ε=0.2.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Cost</th>
+<th>Cumulative (basic)</th>
+<th>Budget check</th>
+<th>Outcome</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Q1</td>
+<td>ε=0.2</td>
+<td>0.2</td>
+<td>0.2 ≤ 0.5 → PASS</td>
+<td>CHARGED; DpResult emitted</td>
+</tr>
+<tr>
+<td>Q2</td>
+<td>ε=0.2</td>
+<td>0.4</td>
+<td>0.4 ≤ 0.5 → PASS</td>
+<td>CHARGED; DpResult emitted</td>
+</tr>
+<tr>
+<td>Q3</td>
+<td>ε=0.2</td>
+<td>0.6</td>
+<td>0.6 &gt; 0.5 → FAIL</td>
+<td>DENIED; <code>Err(BudgetExhausted)</code>; nothing emitted</td>
+</tr>
+</tbody></table></div>
+<p>Q3 leaves no partial state change: the budget read and the check are atomic; no noise was sampled before the check passes (fail-closed, <a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-10">I10</a>).</p>
+<h3 id="sec-8-13">8.13 Mechanism Privacy Proof Sketches (Normative Constraints)</h3>
+<p>Each mechanism must satisfy the following normative constraints — not full proofs, but the key inequality the implementation must honor:</p>
+<p><strong>Laplace Mechanism</strong></p>
+<ul>
+<li>Output: f(D) + Lap(b), b = Δ₁/ε.</li>
+<li>Proof constraint: for any D, D&#39; neighboring, any S ⊆ ℝ:
+<code>Pr[M(D) ∈ S] / Pr[M(D&#39;) ∈ S] ≤ exp(|f(D)-f(D&#39;)|/b) ≤ exp(Δ₁/b) = exp(ε)</code>.</li>
+<li>Implementation check: b &gt; 0 (ε &gt; 0 &amp;&amp; Δ₁ &gt; 0); b = ∞ rejected (<a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-10">I10</a>).</li>
+</ul>
+<p><strong>Gaussian Mechanism (analytic)</strong></p>
+<ul>
+<li>Output: f(D) + N(0, σ²).</li>
+<li>Proof constraint (Balle-Wang): σ is the smallest value satisfying
+<code>Φ(Δ₂/(2σ) - εσ/Δ₂) - e^ε · Φ(-Δ₂/(2σ) - εσ/Δ₂) ≤ δ</code>.</li>
+<li>Implementation check: δ &gt; 0 (pure DP impossible for Gaussian, <a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-8">I8</a>); bisection tolerance ≤ 1e-10.</li>
+</ul>
+<p><strong>Exponential Mechanism</strong></p>
+<ul>
+<li>Output: candidate o with probability ∝ exp(ε · u(o) / (2·Δu)).</li>
+<li>Proof constraint: for any neighboring D, D&#39;, any output o:
+<code>Pr[M(D)=o] / Pr[M(D&#39;)=o] = exp(ε(u(D,o)-u(D&#39;,o))/(2Δu)) ≤ exp(ε)</code>.</li>
+<li>Implementation check: utility differences bounded by Δu (sensitivity of u); log-sum-exp stable normalization.</li>
+</ul>
+<p><strong>Randomized Response</strong></p>
+<ul>
+<li>Output: true answer with prob p = e^ε/(1+e^ε); flip with prob 1-p.</li>
+<li>Proof constraint: <code>p/(1-p) = e^ε</code>; satisfies ε-LDP.</li>
+<li>Debiasing estimator: <code>p̂_true = (p̂_obs - (1-p)) / (2p-1)</code>; unbiased, variance inflated by 1/(2p-1)².</li>
+</ul>
+<h3 id="sec-8-14">8.14 Composition Proof Constraints</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Composition type</th>
+<th>Constraint enforced by accountant</th>
+<th>Reference</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Basic sequential</td>
+<td>(Σεᵢ, Σδᵢ) is a valid upper bound</td>
+<td>Dwork-Roth Thm 3.14</td>
+</tr>
+<tr>
+<td>Advanced sequential (k mechanisms, each ε)</td>
+<td>(ε√(2k·ln(1/δ&#39;)) + k·ε(e^ε-1), δ&#39;+k·δ)</td>
+<td>Dwork-Roth Thm 3.20</td>
+</tr>
+<tr>
+<td>Parallel (disjoint subsets)</td>
+<td>max(εᵢ) for ε; max(δᵢ) for δ</td>
+<td>Dwork-Roth</td>
+</tr>
+<tr>
+<td>RDP sequential</td>
+<td>RDP[α] = Σ RDP_i[α] per order; convert at end</td>
+<td>Mironov 2017 Prop 1</td>
+</tr>
+<tr>
+<td>zCDP sequential</td>
+<td>ρ_total = Σ ρᵢ</td>
+<td>Bun-Steinke Lem 1.8</td>
+</tr>
+<tr>
+<td>Subsampled Gaussian (DP-SGD)</td>
+<td>RDP amplified by subsampling rate q</td>
+<td>Mironov 2017 Thm 9</td>
+</tr>
+</tbody></table></div>
+<p>Accountant must choose the tightest applicable rule at conversion time (P6).</p>
+<h3 id="sec-8-15">8.15 RDP Accountant Detail</h3>
+<p><strong>Per-mechanism RDP loss (α &gt; 1):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>D_α(M(D) ‖ M(D&#39;))</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Gaussian N(0,σ²), Δ₂</td>
+<td>α·Δ₂²/(2σ²)</td>
+</tr>
+<tr>
+<td>Laplace Lap(b), Δ₁</td>
+<td>min(α·Δ₁²/(2b²), ...) — exact formula via moment generating function</td>
+</tr>
+<tr>
+<td>Subsampled Gaussian (rate q)</td>
+<td>≤ (1/α-1)·log(q²·D_α/(M_q)+...) — Mironov Thm 9</td>
+</tr>
+</tbody></table></div>
+<p><strong>Conversion RDP → (ε,δ):</strong></p>
+<ul>
+<li>For each order α: <code>ε(α,δ) = rdp[α] + log(1/δ)/(α-1)</code>.</li>
+<li>Return <code>min over α { ε(α,δ) }</code> for the target δ.</li>
+<li>Implementation: sweep orders vector, return minimum; order vector should include [1.5, 2, 4, 8, 16, 32, 64] as defaults.</li>
+</ul>
+<p><strong>Composition accumulation invariant (<a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-9">I9</a>):</strong></p>
+<ul>
+<li>After k steps: <code>rdp_total[α] = Σᵢ rdp_i[α]</code> for all α.</li>
+<li>Monotone: adding step k+1 can only increase rdp_total[α] (δ ≥ 0 per-step contribution).</li>
+</ul>
+<h3 id="sec-8-16">8.16 Edge Cases</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Edge Case</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ε=0 passed to Epsilon::new</td>
+<td><code>Err(InvalidEpsilon)</code>; construction fails</td>
+</tr>
+<tr>
+<td>δ=1.0 passed to Delta::new</td>
+<td><code>Err(InvalidDelta)</code>; construction fails</td>
+</tr>
+<tr>
+<td>Sensitivity l1=0 (constant query)</td>
+<td>Valid; noise scale = 0; mechanism adds no noise (deterministic release charges ε=0)</td>
+</tr>
+<tr>
+<td>Gaussian requested with δ=0</td>
+<td><code>Err(PureDpIncompatible)</code>; Gaussian requires δ&gt;0 (<a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-8">I8</a>)</td>
+</tr>
+<tr>
+<td>Bounds [u, l] where l &gt; u</td>
+<td><code>Err(InvalidBounds)</code></td>
+</tr>
+<tr>
+<td>Data value outside [lower, upper]</td>
+<td>Clamped silently to nearest bound (<a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-6">I6</a>); NOT an error</td>
+</tr>
+<tr>
+<td>SVT above_limit reached</td>
+<td>Further queries return <code>Err(SvtExhausted)</code>; no budget charged</td>
+</tr>
+<tr>
+<td>RDP orders Vec is empty</td>
+<td><code>Err(InvalidRdpOrders)</code>; accounting refuses to proceed</td>
+</tr>
+<tr>
+<td>Concurrent spend on same Budget</td>
+<td>Serialized via internal mutex; second spend sees post-first state</td>
+</tr>
+<tr>
+<td>DP-SGD minibatch size &gt; dataset size</td>
+<td><code>Err(InvalidSubsamplingRate)</code>; q must be in (0,1]</td>
+</tr>
+<tr>
+<td>Composition of RDP + Basic PrivacyLoss</td>
+<td>Forced conversion of Basic → RDP before summation; or convert RDP→(ε,δ) and sum as Basic (less tight)</td>
+</tr>
+<tr>
+<td>Snapping mechanism overflow (large exact value)</td>
+<td>Clamp exact value to representable range before snap; documented precondition</td>
+</tr>
+<tr>
+<td>Histogram with 0 records in a bin</td>
+<td>Count = 0; sensitivity still 1 (add/remove); noise still added to 0</td>
+</tr>
+<tr>
+<td>Mean query with n=0</td>
+<td><code>Err(EmptyDataset)</code>; sensitivity undefined for 0-record mean</td>
+</tr>
+<tr>
+<td>Quantile p=0 or p=1</td>
+<td>Exponential mechanism over sorted candidates; edge candidates bounded by declared Bounds</td>
+</tr>
+<tr>
+<td>Multiple analysts sharing one Budget</td>
+<td>Named sub-budgets; total partitioned at creation; sub-budgets cannot borrow from each other</td>
+</tr>
+<tr>
+<td>RDP order α=1</td>
+<td>Approaches KL divergence; 0/0 limit excluded from order vector; skip or handle via L&#39;Hopital</td>
+</tr>
+<tr>
+<td>RDP curve with all losses=0</td>
+<td>Convert yields ε=0; only valid when sensitivity=0 (deterministic query); flagged in dp-validate</td>
+</tr>
+<tr>
+<td>Epsilon very large (e.g., 1e15)</td>
+<td>Accepted by Epsilon::new; noise approaches 0; privacy is technically satisfied but semantically useless; dp-cli may warn</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-17">8.17 Type Ownership and Lifetime Model</h3>
+<p>Key ownership rules enforced at compile time:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Relationship</th>
+<th>Ownership model</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Budget</code> and <code>BudgetLedger</code></td>
+<td><code>Budget</code> owns <code>BudgetLedger</code> exclusively</td>
+<td>Ledger is an internal implementation detail; no outside ref</td>
+</tr>
+<tr>
+<td><code>RdpAccountant</code> inside <code>Budget</code></td>
+<td><code>Budget</code> owns accountant; exposes borrow for read</td>
+<td>Prevents out-of-band accountant mutation</td>
+</tr>
+<tr>
+<td><code>DpResult&lt;T&gt;</code> returned by mechanisms</td>
+<td>Owned value returned to caller</td>
+<td>Post-processing immunity: caller may transform freely (<a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-7">I7</a>)</td>
+</tr>
+<tr>
+<td><code>Mechanism</code> trait objects</td>
+<td><code>Arc&lt;dyn Mechanism&gt;</code> for shared-mechanism configs</td>
+<td>Multiple queries may share a configured mechanism</td>
+</tr>
+<tr>
+<td><code>Query</code> trait objects</td>
+<td><code>Box&lt;dyn Query&gt;</code> per invocation</td>
+<td>Single-use; no shared state between query executions</td>
+</tr>
+<tr>
+<td><code>Dataset</code> reference</td>
+<td>Borrowed <code>&amp;[Record]</code> passed to query</td>
+<td>Engine never takes ownership of raw data; borrow ends after query</td>
+</tr>
+<tr>
+<td><code>Bounds</code></td>
+<td><code>Copy</code> (two f64 fields)</td>
+<td>Passed by value to avoid lifetime complexity in sensitivity path</td>
+</tr>
+</tbody></table></div>
+<p>Concurrency: <code>Budget</code> wraps inner state in <code>Mutex&lt;BudgetInner&gt;</code>; <code>Arc&lt;Budget&gt;</code> is <code>Send + Sync</code>. All other core types are <code>Send</code> (no raw pointers). <code>RdpAccountant</code> accumulation is single-threaded within the mutex.</p>
+<h3 id="sec-8-18">8.18 Local DP Frequency Estimation Model</h3>
+<p><strong>Objective:</strong> estimate frequency vector f ∈ [0,1]^k from n local DP responses without accessing true answers.</p>
+<p><strong>Randomized Response on k categories:</strong></p>
+<ul>
+<li>Each user holds true answer v ∈ {1,...,k}.</li>
+<li>Report true v with prob p = (e^ε/(e^ε + k - 1)); report each other value with prob (1-p)/(k-1).</li>
+<li>Satisfies ε-LDP per user.</li>
+<li>Aggregator receives n reports; computes empirical frequency of each category.</li>
+<li>Debiased estimate: <code>f̂_j = (p̂_j - (1-p)/(k-1)) / (p - (1-p)/(k-1))</code>.</li>
+<li>Variance per cell: <code>O(k e^ε / (n (e^ε-1)²))</code>.</li>
+</ul>
+<p><strong>Heavy-hitter sketch (RAPPOR-style):</strong></p>
+<ul>
+<li>User encodes v into a Bloom filter; applies randomized response per bit.</li>
+<li>Server decodes candidates above frequency threshold from noisy counts.</li>
+<li>Privacy: ε-LDP per user (bit-level RR with per-bit ε&#39; summing to ε via basic composition across bits).</li>
+</ul>
+<h3 id="sec-8-18-2">8.18 dp-validate Statistical Test Protocol</h3>
+<p><strong>Neighboring dataset test (per mechanism M):</strong></p>
+<ol>
+<li>Fix a query f and two neighboring datasets D, D&#39; (differ by one record).</li>
+<li>Sample N=10000 outputs from M(D) → distribution P; N=10000 from M(D&#39;) → distribution Q.</li>
+<li>For each threshold t, compute empirical <code>Pr[M(D) ≥ t]</code> and <code>Pr[M(D&#39;) ≥ t]</code>.</li>
+<li>Check: for all t, <code>log(Pr[M(D) ≥ t] / Pr[M(D&#39;) ≥ t]) ≤ ε + δ_slack</code>.</li>
+<li><code>δ_slack = 1/√N</code> (statistical tolerance); fail if exceeded by more than 3σ.</li>
+<li>Also check the reverse direction (symmetry of DP).</li>
+</ol>
+<p><strong>Sensitivity audit:</strong></p>
+<ul>
+<li>For n=1000 random pairs (D, D&#39;) that differ by one record, compute <code>|f(D) - f(D&#39;)|</code>.</li>
+<li>Assert: <code>max over pairs ≤ declared_sensitivity.l1</code> (soundness, <a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-2">I2</a>).</li>
+<li>If any pair exceeds declared, emit <code>SensitivityViolation</code> error.</li>
+</ul>
+<p><strong>Accountant cross-check:</strong></p>
+<ul>
+<li>Run k=100 identical Gaussian releases; compare RDP-accountant&#39;s (ε,δ) vs advanced composition (ε,δ).</li>
+<li>Assert: RDP gives ε ≤ advanced-composition ε (tightness check, P6).</li>
+<li>Assert: both ≥ true composition lower bound from first-principles (correctness check, <a class="cite" href="/system-design-blueprints/systems/differential-privacy-engine/reliability/#inv-4">I4</a>).</li>
+</ul>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

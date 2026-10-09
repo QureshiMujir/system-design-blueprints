@@ -1,0 +1,405 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>CDN Edge Node — Architecture · Engineering Blueprints</title><meta name="description" content="CDN Edge Node, hld: §3 overview + §8 domain model. Build a single-PoP CDN edge node: an HTTP/1.1 + HTTP/2 + HTTP/3 caching reverse proxy that terminates TLS, serves from a tiered cache (RAM → NVMe → origin-shield tier), enforces RFC 9111 HTTP caching…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/cdn-edge/">CDN Edge Node</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>CDN Edge Node</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~36 weeks</li> <li>2,385 lines</li> <li>blueprint #159</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/cdn-edge/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/cdn-edge/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/cdn-edge/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/cdn-edge/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/cdn-edge/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/cdn-edge/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/cdn-edge/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/cdn-edge/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/cdn-edge/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/cdn-edge/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:CDN Edge Node — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: the edge node&#39;s own request path
+%% legend ingest: side planes (purge, defense, observability)
+%% legend store: cache tiers and fleet placement map
+%% legend side: client and customer origin
+  C([&quot;&lt;b&gt;Client&lt;/b&gt;&lt;br/&gt;browser / app&quot;])
+  TLS[&quot;&lt;b&gt;TLS + Protocol Termination&lt;/b&gt;&lt;br/&gt;Phase 3, 4&lt;br/&gt;rustls; SNI cert select&lt;br/&gt;ALPN h3/h2/http11&quot;]
+  HTTP[&quot;&lt;b&gt;HTTP Frontend&lt;/b&gt;&lt;br/&gt;Phase 1, 2, 4&lt;br/&gt;parse; canonicalize&lt;br/&gt;range/conditional&quot;]
+  SEM[&quot;&lt;b&gt;Cache Semantics Engine&lt;/b&gt;&lt;br/&gt;Phase 5&lt;br/&gt;freshness calc; Vary&lt;br/&gt;validators (RFC 9111)&quot;]
+  TC[(&quot;&lt;b&gt;Tiered Cache Store&lt;/b&gt;&lt;br/&gt;Phase 6, 7&lt;br/&gt;L1 DRAM (TinyLFU admit)&lt;br/&gt;L2 NVMe (mmap, S3-FIFO)&quot;)]
+  SF[&quot;&lt;b&gt;Single-Flight Gate&lt;/b&gt;&lt;br/&gt;Phase 9&lt;br/&gt;coalesce by CacheKey&quot;]
+  RING[&quot;&lt;b&gt;Consistent-Hash Ring&lt;/b&gt;&lt;br/&gt;Phase 7&lt;br/&gt;fleet map&quot;]
+  SH[&quot;&lt;b&gt;Origin Shield + Fetch&lt;/b&gt;&lt;br/&gt;Phase 8&lt;br/&gt;pool, retry, breaker&quot;]
+  O([&quot;&lt;b&gt;Origin&lt;/b&gt;&lt;br/&gt;customer&quot;])
+  PB[&quot;&lt;b&gt;Purge/Invalidation Bus&lt;/b&gt;&lt;br/&gt;Phase 10&quot;]
+  DD[&quot;&lt;b&gt;DDoS / Poisoning Defense&lt;/b&gt;&lt;br/&gt;Phase 11&quot;]
+  OBS[&quot;&lt;b&gt;Observability Plane&lt;/b&gt;&lt;br/&gt;all phases, hooks&quot;]
+  C -- &quot;TCP/UDP&quot; --&gt; TLS
+  TLS -- &quot;cleartext HTTP frame&quot; --&gt; HTTP
+  HTTP -- &quot;CacheKey (§8.1)&quot; --&gt; SEM
+  SEM -- &quot;hit&quot; --&gt; TC
+  SEM -- &quot;miss/stale&quot; --&gt; SF
+  TC -- &quot;placement hash (§8.4)&quot; --&gt; RING
+  SF -- &quot;one fetch/key&quot; --&gt; SH
+  SH -- &quot;HTTP&quot; --&gt; O
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  classDef side stroke-width:1.5px
+  class TLS,HTTP,SEM,SF,SH rt
+  class PB,DD,OBS ingest
+  class TC,RING store
+  class C,O side</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the edge node&#39;s own request path</li><li><span class="swatch ingest"></span>side planes (purge, defense, observability)</li><li><span class="swatch store"></span>cache tiers and fleet placement map</li><li><span class="swatch side"></span>client and customer origin</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>                                   ┌────────────────────────────┐
+                                   │   Client (browser / app)   │
+                                   └─────────────┬──────────────┘
+                                                 │ TCP/UDP
+                          ┌──────────────────────▼──────────────────────┐
+                          │  TLS + Protocol Termination (Phase 3, 4)     │
+                          │  rustls; SNI cert select; ALPN h3/h2/http11 │
+                          └──────────────────────┬──────────────────────┘
+                                                 │ cleartext HTTP frame
+                          ┌──────────────────────▼──────────────────────┐
+                          │  HTTP Frontend (Phase 1, 2, 4)               │
+                          │  parse; canonicalize; range/conditional      │
+                          └──────────────────────┬──────────────────────┘
+                                                 │ CacheKey (§8.1)
+                          ┌──────────────────────▼──────────────────────┐
+                          │  Cache Semantics Engine (Phase 5)            │
+                          │  freshness calc; Vary; validators (RFC 9111) │
+                          └───────┬───────────────────────┬─────────────┘
+                            hit   │                        │ miss/stale
+                    ┌─────────────▼───────────┐  ┌─────────▼──────────────┐
+                    │ Tiered Cache Store       │  │ Single-Flight Gate     │
+                    │ (Phase 6, 7)             │  │ (Phase 9)              │
+                    │ L1 DRAM (TinyLFU admit)  │  │ coalesce by CacheKey   │
+                    │ L2 NVMe (mmap, S3-FIFO)  │  └─────────┬──────────────┘
+                    └─────────────┬────────────┘            │ one fetch/key
+                                  │ placement hash (§8.4)    │
+                    ┌─────────────▼────────────┐  ┌─────────▼──────────────┐
+                    │ Consistent-Hash Ring      │  │ Origin Shield + Fetch   │
+                    │ (Phase 7) — fleet map     │  │ (Phase 8)               │
+                    └───────────────────────────┘  │ pool, retry, breaker    │
+                                                    └─────────┬──────────────┘
+                                                              │ HTTP
+                                                    ┌─────────▼──────────────┐
+                                                    │  Origin (customer)      │
+                                                    └─────────────────────────┘
+
+        ┌───────────────────────┐   ┌──────────────────────────┐   ┌───────────────────────┐
+        │ Purge/Invalidation Bus │   │ DDoS / Poisoning Defense │   │ Observability Plane    │
+        │ (Phase 10)             │   │ (Phase 11)               │   │ (all phases, hooks)    │
+        └───────────────────────┘   └──────────────────────────┘   └───────────────────────┘</code></pre></details>
+<p><strong>TLS + Protocol Termination</strong> — trust boundary #1: untrusted bytes become a
+parsed, ALPN-negotiated stream; SNI drives per-zone cert selection (up to
+12k certs, <code>§4</code>).</p>
+<p><strong>HTTP Frontend</strong> — parses per-protocol wire format into one canonical
+<code>Request</code> (<code>§11</code>); computes the range/conditional intent; hands off a
+normalized <code>CacheKey</code>.</p>
+<p><strong>Cache Semantics Engine</strong> — the RFC 9111 brain: computes freshness
+lifetime, decides hit/stale/miss, applies <code>Vary</code>, decides whether a
+validator (<code>ETag</code>/<code>Last-Modified</code>) round-trip is needed. Pure logic, no I/O.</p>
+<p><strong>Tiered Cache Store</strong> — trust boundary #2 (concurrency boundary): DRAM
+(L1, TinyLFU-admitted) and NVMe (L2, mmap-backed, S3-FIFO-evicted);
+placement across the simulated fleet resolved via consistent hashing.</p>
+<p><strong>Single-Flight Gate</strong> — concurrency boundary: collapses N concurrent
+misses on the same <code>CacheKey</code> into 1 origin fetch.</p>
+<p><strong>Origin Shield + Fetch</strong> — protocol boundary to the outside world;
+connection pool, retry policy, circuit breaker, weighted origin selection.</p>
+<p><strong>Purge/Invalidation Bus</strong> — external interface (control-plane API) +
+async propagation channel/queue across the simulated fleet, SLA-bound.</p>
+<p><strong>DDoS / Poisoning Defense</strong> — cross-cutting: rate limiting and
+cache-key/header-normalization enforcement sit in front of and inside the
+Cache Semantics Engine.</p>
+<p><strong>Observability Plane</strong> — cross-cutting: every box emits metrics/traces;
+not a separate data-flow hop.</p>
+<p>All later sections (Domain Model, Repository Layout, Core Schema, phases)
+name the same boxes and the same module names; drift from this diagram is
+a defect (terminology-lock discipline, enforced throughout this document).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Cache Object Model &amp; CacheKey</h3>
+<pre class="diagram"><code>CacheKey := SipHash24( method, authority, normalized_path, sorted(vary_map) )
+CacheEntry {
+  key: CacheKey, status: u16, headers: HeaderMap, body: BodyRef,
+  stored_at: Instant, freshness_lifetime: Duration,
+  validators: { etag: Option&lt;ETag&gt;, last_modified: Option&lt;HttpDate&gt; },
+  vary_headers: Vec&lt;HeaderName&gt;, tags: SmallVec&lt;[Tag; 4]&gt;,
+  version: u64, tier: TierId, size_bytes: u32,
+}</code></pre>
+<p><code>version</code> increments on every write to the same key (enforces <code>I4</code>, <code>I14</code>
+region); <code>tier</code> ∈ {L1, L2, Shield} names where the authoritative copy lives.
+Tags are customer-assigned strings (<code>ADR-08</code> region: purge granularity).</p>
+<h3 id="sec-8-2">8.2 HTTP Cache Semantics (RFC 9111)</h3>
+<p>Freshness lifetime = explicit (<code>max-age</code>, or <code>Expires</code>) else heuristic
+(<code>10% of (Date − Last-Modified)</code>, capped, RFC 9111 clause 4.2.2). Response is:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Condition</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Fresh</td>
+<td><code>age &lt; freshness_lifetime</code></td>
+<td>serve directly, no origin contact</td>
+</tr>
+<tr>
+<td>Stale-revalidate</td>
+<td><code>age ≥ freshness_lifetime</code>, no override</td>
+<td>conditional GET (<code>If-None-Match</code>/<code>If-Modified-Since</code>)</td>
+</tr>
+<tr>
+<td>Stale-while-revalidate</td>
+<td>stale + <code>stale-while-revalidate=N</code> and <code>age − freshness_lifetime &lt; N</code></td>
+<td>serve stale, revalidate async (<code>P12</code>)</td>
+</tr>
+<tr>
+<td>Stale-if-error</td>
+<td>origin unreachable + <code>stale-if-error=N</code></td>
+<td>serve stale, mark degraded</td>
+</tr>
+<tr>
+<td>Must-revalidate</td>
+<td><code>must-revalidate</code>/<code>no-cache</code> present</td>
+<td>never serve stale, block on origin</td>
+</tr>
+<tr>
+<td>Uncacheable</td>
+<td><code>no-store</code>, or authenticated + no explicit cache directive</td>
+<td>bypass cache entirely</td>
+</tr>
+</tbody></table></div>
+<p><code>Vary</code> handling: response <code>Vary: X</code> records <code>X</code>&#39;s request-header value in
+<code>vary_map</code> (<code>§8.1</code>); a later request matches the <code>CacheEntry</code> only if every
+<code>vary_map</code> value matches. <code>Vary: *</code> is a magic value meaning never reusable
+— treated as <code>no-store</code> for storage purposes (<code>P1</code>).</p>
+<h3 id="sec-8-3">8.3 Request Coalescing / Single-Flight</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">stateDiagram-v2
+  [*] --&gt; Idle
+  Idle --&gt; Fetching : miss, first request (waiters = [])
+  Fetching --&gt; Fetching : concurrent miss, same key (waiters + [waker])
+  Fetching --&gt; Delivering : origin responds
+  Delivering --&gt; Idle : broadcast to waiters, cache write
+  Fetching --&gt; Idle : timeout 30s (ADR-14 region), waiters get 504</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>State: Idle -&gt; Fetching(waiters: Vec&lt;Waker&gt;) -&gt; Delivering -&gt; Idle
+Idle          --miss, first request--&gt;     Fetching([])
+Fetching(ws)  --concurrent miss, same key--&gt; Fetching(ws + [waker])
+Fetching(ws)  --origin responds--&gt;          Delivering
+Delivering    --broadcast to ws, cache write--&gt; Idle
+Fetching(ws)  --timeout (30s, ADR-14 region)--&gt; Idle (waiters get 504)</code></pre></details>
+<p>Exactly one origin fetch exists per <code>(CacheKey, tier)</code> while <code>Fetching</code>
+(<code>I3</code>); a losing waiter&#39;s added tail latency equals
+<code>t_origin_response − t_waiter_arrival</code>, bounded by the 80 ms p99 miss
+target (<code>§4</code>).</p>
+<h3 id="sec-8-4">8.4 Origin Shield, Mid-Tier Hierarchy &amp; Placement</h3>
+<p>A zone marked <code>shield: true</code> routes all its edge nodes&#39; misses to one
+designated <strong>shield node</strong>, chosen by consistent hashing over the zone id
+(Karger et al. 1997; bounded-load variant caps any node at
+<code>(1 + ε) × average_load</code>, <code>ε = 0.25</code>). The shield node holds its own L1/L2
+tiers and is the only node permitted to open origin connections for that
+zone (<code>I11</code>). Ring structure:</p>
+<pre class="diagram"><code>Ring: BTreeMap&lt;u64 /*hash*/, NodeId&gt;, V virtual nodes/physical node (V=150)
+placement(zone_id) = ring.range(hash(zone_id)..).next()  // first node CW
+rebalance_cost(join/leave one node) ≈ K / N of keys move (K=virtual nodes)</code></pre>
+<p>Node join/leave moves ≈ <code>1/N</code> of keys (N = physical nodes), not <code>(N-1)/N</code>
+as with modulo hashing (<code>P8</code>); this is the exact property Karger et al.
+prove and Maggs &amp; Sitaraman (2015) apply to CDN placement.</p>
+<h3 id="sec-8-5">8.5 Purge / Invalidation State Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Purge kind</th>
+<th>Selector</th>
+<th>Propagation</th>
+<th>Ack model</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>By URL</td>
+<td>exact <code>CacheKey</code></td>
+<td>direct fan-out to owning node (ring lookup)</td>
+<td>per-node ack, aggregate</td>
+</tr>
+<tr>
+<td>By tag</td>
+<td><code>Tag</code> → roaring-bitmap key set</td>
+<td>fan-out to all nodes holding ≥1 key with tag</td>
+<td>per-node ack, aggregate</td>
+</tr>
+<tr>
+<td>Soft-purge</td>
+<td>marks entry stale (<code>freshness_lifetime = 0</code>), keeps bytes</td>
+<td>same as URL purge</td>
+<td>per-node ack</td>
+</tr>
+<tr>
+<td>Full flush</td>
+<td>zone-wide</td>
+<td>broadcast to zone&#39;s node set</td>
+<td>per-node ack</td>
+</tr>
+</tbody></table></div>
+<p>Every purge carries a monotonic <code>purge_seq</code> per key; a node applies a
+purge only if <code>purge_seq &gt; entry.version</code>&#39;s last-seen purge_seq, making
+purge idempotent under retry/replay and race-safe against a concurrent
+insert (<code>I4</code>, <code>P14</code>).</p>
+<h3 id="sec-8-6">8.6 Worked Example — Fresh Hit → Stale → Revalidated</h3>
+<ol>
+<li><code>GET /p/42</code> arrives; <code>CacheKey = H(GET, example.com, /p/42, {})</code>.</li>
+<li>L1 lookup hits; <code>stored_at=T0</code>, <code>freshness_lifetime=60s</code>; <code>age=10s</code> →
+<strong>Fresh</strong> (<code>§8.2</code>) → served, no origin contact, <code>I1</code> holds.</li>
+<li>At <code>age=65s</code> a new <code>GET /p/42</code> arrives → <strong>Stale-revalidate</strong>.</li>
+<li>Origin Fetch sends <code>If-None-Match: &quot;abc123&quot;</code> (from <code>validators.etag</code>).</li>
+<li>Origin returns <code>304 Not Modified</code> → freshness lifetime reset, <code>version</code>
+incremented, body untouched → served from cache with fresh headers.</li>
+</ol>
+<h3 id="sec-8-7">8.7 Malformed-Input Example</h3>
+<p>Request: <code>GET /a/../../etc/passwd HTTP/1.1</code> with <code>Host: example.com</code>.
+Path-normalization (<code>§8.1</code>) resolves <code>..</code> segments <em>before</em> hashing;
+result: <code>/etc/passwd</code> relative to root, which the HTTP Frontend rejects
+with <code>400 Bad Request</code> because it escapes the configured document root
+prefix — the cache is never consulted, preventing a path-traversal cache
+poisoning entry from ever being created (<code>T2</code>, <code>I2</code>).</p>
+<h3 id="sec-8-8">8.8 Failure-Path Example</h3>
+<p>Origin for zone <code>z1</code> becomes unreachable (connect timeout ×3, <code>ADR-</code> retry
+policy). Circuit breaker (<code>§17</code>) opens after 5 consecutive 6 s buckets
+above 50% failure. A request for a stale <code>CacheEntry</code> with
+<code>stale-if-error=300</code> arrives: Cache Semantics Engine (<code>§8.2</code>) serves the
+stale copy, tags the response <code>Warning: 110</code>, increments
+<code>stale_if_error_serves_total</code>, and does <strong>not</strong> attempt origin contact
+until the breaker half-opens (<code>P12</code>, <code>I11</code>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-1">P1</a> — Cache key independence.</strong> The store keys on an opaque hash; HTTP semantics (<a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#sec-8">§8</a>) map requests to keys. Tradeoff: key-computation bugs are invisible to the store. Operational implication: key normalization is the single highest-leverage correctness surface (Phase 5). Violate it → cross-Vary cache poisoning (<code>T2</code>).</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-2">P2</a> — Tiered transparency.</strong> A hit at L1 or L2 is indistinguishable to the caller. Tradeoff: extra indirection per lookup (~50 ns). Violating it (leaking tier identity into response headers inconsistently) breaks client-observable caching behavior.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-3">P3</a> — Coalesce before fan-out.</strong> Single-flight sits between the cache and the origin fetch, never bypassed. Tradeoff: &quot;losers&quot; of a collapse wait for the &quot;winner.&quot; Violating it reintroduces thundering herd (<code>I3</code>).</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-4">P4</a> — Freshness is computed, never assumed.</strong> Every response&#39;s freshness lifetime is derived per RFC 9111 clause 4, not cached as a boolean. Tradeoff: a few extra CPU cycles per hit. Violating it silently serves stale-as-fresh (<code>I1</code>).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-5">P5</a> — Admission gates eviction.</strong> TinyLFU decides <em>whether</em> to admit before LRU/S3-FIFO decides <em>what</em> to evict. Tradeoff: sketch memory overhead (~1 byte/entry). Violating it lets one-hit-wonders evict hot objects (<code>I9</code>).</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-6">P6</a> — Shield the origin.</strong> All miss traffic for a shielded zone funnels through one designated mid-tier node. Tradeoff: shield-node hot-spotting risk, mitigated by consistent hashing (<code>P8</code>). Violating it exposes origin to full edge-fleet miss fan-out.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-7">P7</a> — Purge is async but SLA-bound.</strong> A purge call returns immediately; propagation is a background, monitored, timed operation. Tradeoff: there exists a (bounded) window where stale content is still served. Violating the bound breaches <code>I5</code>.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-8">P8</a> — Placement via consistent hashing.</strong> Content-to-node mapping uses a hash ring with bounded load (Karger et al. 1997), not modulo hashing. Tradeoff: ring maintenance cost on membership change. Violating it (naive <code>hash % N</code>) causes full-cache invalidation on any node join/leave.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-9">P9</a> — Backpressure over buffering.</strong> Every queue (origin-fetch pool, purge propagation, coalescing wait-list) is bounded; excess is rejected with a typed error, never silently dropped or unboundedly queued (<code>I10</code>). Tradeoff: callers must handle rejection.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-10">P10</a> — Sandbox every trust boundary.</strong> Parser input, TLS termination, and (when enabled) edge-compute execution each run behind an explicit boundary with bounded resource limits. Violating it is how Cloudbleed- class bugs happen.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-11">P11</a> — Observability is not optional.</strong> Every request carries a trace span and increments per-zone metrics; there is no &quot;fast path that skips telemetry.&quot; Tradeoff: ~200 ns/request overhead, budgeted in <code>§4</code>.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-12">P12</a> — Fail toward staleness, not toward errors.</strong> When origin is unreachable, prefer <code>stale-if-error</code> over a 5xx if a stale copy exists and the zone policy allows it. Tradeoff: a client may see slightly outdated content instead of an explicit failure.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-13">P13</a> — TLS terminates at the edge, always.</strong> No cleartext pass-through mode exists. Tradeoff: every PoP must hold private key material (mitigated by per-cert on-disk encryption, <code>ADR-24</code> region).</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/cdn-edge/architecture/#p-14">P14</a> — No silent data loss on eviction/purge race.</strong> A purge that races an in-flight insert must resolve deterministically via version numbers (<code>I4</code>), never &quot;last write wins by accident.&quot;</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

@@ -1,0 +1,903 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Bundler / Transpiler (Webpack/Vite/esbuild-like) — Architecture · Engineering Blueprints</title><meta name="description" content="Bundler / Transpiler (Webpack/Vite/esbuild-like), hld: §3 overview + §8 domain model. Build, from scratch in Rust, a deterministic JS/TS bundler + transpiler — bndl — that lexes/parses ES2022+TS+JSX, resolves Node CJS/ESM specifiers, builds a module graph, tree-shakes, scope-hoists…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/web-browsers-collaboration/">Web, Browsers &amp; Collaboration</a> </li><li> <a href="/system-design-blueprints/systems/bundler-transpiler/">Bundler / Transpiler (Webpack/Vite/esbuild-like)</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:255"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/web-browsers-collaboration/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Web, Browsers &amp; Collaboration</span></a> </p> <h1>Bundler / Transpiler (Webpack/Vite/esbuild-like)</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~27 weeks</li> <li>4,800 lines</li> <li>blueprint #264</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/bundler-transpiler/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/bundler-transpiler/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/bundler-transpiler/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/bundler-transpiler/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/bundler-transpiler/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/bundler-transpiler/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/bundler-transpiler/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/bundler-transpiler/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/bundler-transpiler/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/bundler-transpiler/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Bundler / Transpiler (Webpack/Vite/esbuild-like) — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<p><code>bndl</code> is a 12-crate Cargo workspace. Data flows one direction on the build path
+(entries → resolve+load → graph → shake → chunk → emit); the dev path (<code>bndl-server</code>)
+re-enters the same pipeline on-demand per request and per fs event. The
+content-addressed cache (<code>bndl-cache</code>) wraps the three expensive memoizable stages
+(parse, transform, codegen). Three boundaries — <strong>trust</strong>, <strong>concurrency</strong>,
+<strong>persistence</strong> — partition the system and are referenced by every later phase.</p>
+<h3 id="sec-3-1">3.1 Component Diagram</h3>
+<pre class="diagram"><code>                          bndl (CLI) · config · Plugin host (resolve/load/transform/render)
+              build                         serve (dev)                  transform · analyze · graph
+                |                               |                                 |
+                v                               v                                 v
+        +-----------------------------------------------------------------------------------+
+        |  Orchestrator: entries -&gt; resolve+load -&gt; module graph -&gt; shake -&gt; chunk -&gt; emit   |
+        +-----------------------------------------------------------------------------------+
+            |  resolve specifier                                   |  watch + HMR
+            v                                                      v
+        bndl-resolver  --abs paths--&gt;  bndl-graph  &lt;----------  bndl-server (on-demand ESM, HMR)
+            ^  package.json/tsconfig        |  Module{ast,imports,exports,symbols}
+            |                               v
+        bndl-parser  &lt;--Token stream--  bndl-lexer            bndl-transform (TypeStrip·JSX·Lower·Define)
+            |  ESTree AST + spans                                   |  rewritten AST
+            v                                                       v
+        bndl-treeshake (reachable symbols) --&gt; bndl-chunk (module-group split) --&gt; bndl-codegen
+                                                                                   (Renamer·hoist·
+                                                                                    Minifier·print)
+                                                                                        |
+                                                                                        v
+                                                                  OutputChunk{code, .map(-&gt;#265)} + manifest
+        bndl-cache (BLAKE3 content-addressed) wraps parse / transform / codegen artifacts
+
+  == TRUST ==  untrusted source text · untrusted node_modules (package.json, .js/.ts) · config + plugins
+               cross at: bndl-lexer/parser (source), bndl-resolver (package.json), bndl-cli (config/plugins)
+  == CONCURRENCY == thread pool (rayon). Per-module parse+transform parallel; Module is Send+Sync &amp;
+               immutable post-build; per-chunk codegen parallel; resolver/graph mutate behind locks only.
+  == PERSISTENCE == bndl-cache on-disk CAS (BLAKE3) + in-mem layer · output OutputChunk + manifest to disk.</code></pre>
+<h3 id="sec-3-2">3.2 Boundaries</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Boundary</th>
+<th>Where it sits</th>
+<th>Rule enforced</th>
+<th>Phase ref</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Trust</strong></td>
+<td><code>bndl-lexer</code>/<code>bndl-parser</code> (source text); <code>bndl-resolver</code> (<code>package.json</code>/tsconfig from <code>node_modules</code>); <code>bndl-cli</code> (config + plugin code)</td>
+<td>Lexer/parser <strong>never panic</strong> on any byte sequence → emit <code>Invalid</code> token / <code>ParseError</code> + recover. Resolver treats every <code>package.json</code> field as adversarial (<code>InvalidExports</code>, <code>BadTsPaths</code>). All untrusted input is bounded (max nesting, max size).</td>
+<td>1, 2, 3, 4; Threat Model</td>
+</tr>
+<tr>
+<td><strong>Concurrency</strong></td>
+<td>thread pool over module set; per-chunk codegen</td>
+<td><code>Module</code> is <strong>immutable + <code>Send</code>+<code>Sync</code></strong> once built → fearless parallel reads. Mutation (graph edges, resolver caches) only behind <code>Mutex</code>/<code>DashMap</code> during the build phase, never during shake/chunk/emit. Determinism independent of thread schedule (<a class="cite" href="/system-design-blueprints/systems/bundler-transpiler/architecture/#sec-3-15">§3.15</a>).</td>
+<td>5, 9, 10</td>
+</tr>
+<tr>
+<td><strong>Persistence</strong></td>
+<td><code>bndl-cache</code> CAS; output dir</td>
+<td><code>CacheKey = BLAKE3(content ‖ options)</code> is the only identity; artifacts are pure functions of their key → safe to share/evict. Output writes are atomic (temp + rename).</td>
+<td>13</td>
+</tr>
+</tbody></table></div>
+<p>The pipeline is <strong>pull-based on the dev path, push-based on build</strong>: <code>build</code>
+materializes the whole graph then shakes/chunks/emits; <code>serve</code> resolves+transforms
+exactly the modules the browser requests, deferring shake/chunk (ESM-native, no
+bundling) and using HMR for incremental updates.</p>
+<h3 id="sec-3-3">3.3 <code>bndl-lexer</code></h3>
+<p>ECMAScript/TS/JSX tokenizer. <strong>In:</strong> <code>&amp;str</code> source + <code>SourceId</code>. <strong>Out:</strong> <code>Token</code>
+stream (<code>TokenKind</code>, <code>Span</code>, <code>had_newline_before</code>). Owns the code-point classifier
+(ID_Start/ID_Continue, whitespace, line terminators), template-literal state stack,
+<strong>regex-vs-divide</strong> disambiguation (resolved with parser-fed context flag),
+numeric/bigint literal scanning, JSX text/ident modes. <strong>Invariant:</strong> total — every
+byte sequence yields a finite token run ending in <code>Eof</code>; lexical errors surface as
+<code>Invalid</code> tokens, never panics. <code>had_newline_before</code> is the sole ASI signal the parser
+consumes. Referenced by Phase 1 (impl), Phase 2 (parser pulls tokens), Phase 3 (JSX/TS
+token shapes).</p>
+<h3 id="sec-3-4">3.4 <code>bndl-parser</code></h3>
+<p>Recursive-descent (statements/decls) + Pratt (expressions, binding powers) parser.
+<strong>In:</strong> token stream via <code>parse_program(src, id, syntax) -&gt; (Program, Vec&lt;ParseError&gt;)</code>.
+<strong>Out:</strong> ESTree-shaped <code>Program</code> with <code>Span</code>+<code>NodeId</code> on every node, plus a
+<code>Vec&lt;ParseError&gt;</code> (<code>ParseErrorKind</code>). <code>Syntax{typescript, jsx}</code> gates grammar
+extensions. <strong>Invariant:</strong> always returns a <code>Program</code> (error-recovery panic mode
+re-syncs at statement boundaries) so downstream stages and the IDE/dev server get a best
+-effort tree; spans are byte-accurate (source-map + diagnostics correctness). Reads
+<code>bndl-lexer</code> + <code>bndl-ast</code>. Referenced by Phase 2 (core grammar), Phase 3 (TS/JSX), and
+the differential parser-conformance gate (Phase 13, Test262).</p>
+<h3 id="sec-3-5">3.5 <code>bndl-ast</code></h3>
+<p>The ESTree-shaped AST + <code>Visit</code>/<code>VisitMut</code> visitor traits. <strong>In/Out:</strong> pure data —
+<code>Program</code>, <code>ModuleItem</code>, <code>Stmt</code>, <code>Expr</code>, <code>Pat</code>, <code>Ident{sym:Atom}</code>, <code>NodeId</code>, <code>Span</code>;
+<strong>no parsing logic</strong>. Identifiers carry interned <code>Atom</code>s (cheap eq/hash, dedup). Holds
+scope-id <em>placeholders</em> filled later by <code>bndl-codegen</code>&#39;s <code>ScopeTree</code>. <strong>Invariant:</strong> the
+single shared node vocabulary — lexer/parser produce it, transform/treeshake/codegen
+consume and rewrite it; <code>NodeId</code> is stable across passes for source-map provenance and
+cache keying. <code>VisitMut</code> is the only sanctioned in-place rewrite path (Phase 6 driver
+builds on it).</p>
+<h3 id="sec-3-6">3.6 <code>bndl-resolver</code></h3>
+<p>Module resolution implementing <strong>both</strong> Node algorithms: ESM (<code>PACKAGE_RESOLVE</code>,
+<code>PACKAGE_EXPORTS_RESOLVE</code> with conditional + pattern matching, <code>ESM_FILE_FORMAT</code>) and
+CJS (<code>LOAD_AS_FILE</code>/<code>LOAD_AS_DIRECTORY</code>/<code>LOAD_NODE_MODULES</code>). <strong>In:</strong> <code>Specifier</code>
+(<code>Relative</code>/<code>Absolute</code>/<code>Bare{pkg,sub}</code>) + importer path + <code>ResolveOptions</code>. <strong>Out:</strong>
+<code>ResolveResult{path, kind, side_effects, from_node_modules}</code> or <code>ResolveError</code>. Matches
+<code>Condition</code>s against <code>exports</code>/<code>imports</code>; honors <code>main</code>/<code>module</code>/<code>browser</code> main-fields;
+resolves tsconfig <code>paths</code>/<code>baseUrl</code> <strong>before</strong> <code>node_modules</code>; does extension + index
+probing; canonicalizes via symlink <strong>realpath</strong>. Caches fs stats, parsed <code>package.json</code>,
+and realpath. <strong>Invariant:</strong> resolution is a deterministic pure function of (specifier,
+importer, options, fs snapshot) — same inputs → same <code>ResolveResult</code>. Feeds absolute
+paths to <code>bndl-graph</code>; Phase 4 owns it.</p>
+<h3 id="sec-3-7">3.7 <code>bndl-graph</code></h3>
+<p>Builds the module graph. <strong>In:</strong> entry paths + the resolver. <strong>Out:</strong> <code>ModuleGraph</code>
+(<code>Vec&lt;Module&gt;</code>, <code>entries</code>, edges, recorded cycles). Each <code>Module</code> holds <code>ast</code>,
+<code>ImportRecord</code>s (<code>Static</code>/<code>Dynamic</code>/<code>Require</code>/<code>ExportStar</code>), <code>ExportRecord</code>s
+(local symbol or <code>reexport:(ModuleId,Atom)</code>), <code>Symbol</code>s, and <code>has_side_effects</code>.
+Classifies <code>ModuleKind</code> (<code>Esm</code>/<code>Cjs</code>/<code>Json</code>/<code>Css</code>/<code>Asset</code>/<code>Builtin</code>/<code>External</code>); scans
+ESM import/export + CJS <code>require</code>/<code>module.exports</code>; <strong>detects cycles</strong>; models <strong>live
+bindings</strong> (an import is a read-only view of the exported binding — identity preserved),
+re-exports, and export-star expansion. Loads modules <strong>in parallel</strong> on the thread pool.
+<strong>Invariant:</strong> every resolved edge points to a real <code>ModuleId</code>; <code>Module</code> is immutable +
+<code>Send</code>+<code>Sync</code> after construction. Reads <code>bndl-parser</code> + <code>bndl-resolver</code>. Consumed by
+treeshake (Phase 7), chunk (Phase 9), codegen, and the dev server.</p>
+<h3 id="sec-3-8">3.8 <code>bndl-transform</code></h3>
+<p>AST rewrite pipeline. <strong>In:</strong> <code>&amp;mut Program</code> + <code>TransformContext{target, defines, syntax, jsx_runtime}</code>. <strong>Out:</strong> rewritten <code>Program</code> (same <code>NodeId</code> lineage for maps). Passes,
+<strong>ordered</strong>: <code>TypeStrip</code> (erase TS annotations/interfaces/enums/decorators — <em>no type
+checking</em>, that is #42) → <code>JsxTransform</code> (<code>Classic</code> <code>createElement</code> or <code>Automatic</code>
+<code>jsx-runtime</code>) → <code>Lowering</code> (optional chaining, nullish, class fields,
+logical-assignment, async per <code>Target</code>) → <code>Define</code> (constant replacement from
+<code>DefineMap</code>, enabling later DCE). Driven by a <code>VisitMut</code> driver. <strong>Invariant:</strong> transforms
+are semantics-preserving and target-correct; ordering is fixed (e.g. type-strip before
+JSX before lowering). Implements <code>TransformPass</code>. Reads <code>bndl-ast</code>; Phase 6 owns it; the
+dev server runs it per-module on-demand.</p>
+<h3 id="sec-3-9">3.9 <code>bndl-treeshake</code></h3>
+<p>Symbol-level reachability. <strong>In:</strong> <code>&amp;mut ModuleGraph</code> + entry <code>ModuleId</code>s via
+<code>shake(graph, entries) -&gt; ReachableSet</code>. <strong>Out:</strong> the set of live <code>(module, symbol)</code>,
+with dead statements/exports/imports eliminated and re-exports pruned. Builds a
+<code>SymbolGraph</code> (per-symbol dependency edges + side-effect markers); worklist reachability
+from entry exports; side-effect analysis honoring <code>sideEffects:false</code> and <code>/*#__PURE__*/</code>
+(<code>SideEffect::Pure</code>/<code>Impure</code>/<code>Unknown</code>). <strong>Invariant — soundness:</strong> never remove code with
+observable side effects unless <strong>proven</strong> pure; top-level effectful statements pin their
+module; over-removal is a correctness bug, not an optimization. Reads <code>bndl-graph</code>;
+output drives <code>bndl-chunk</code>. Phase 7.</p>
+<h3 id="sec-3-10">3.10 <code>bndl-chunk</code></h3>
+<p>Code splitting via esbuild/Rollup <strong>module groups</strong>. <strong>In:</strong> <code>split(graph, reachable, fmt) -&gt; ChunkGraph</code>. <strong>Out:</strong> <code>ChunkGraph</code> (<code>Vec&lt;Chunk&gt;</code>) + manifest. A module&#39;s chunk is
+fixed by the <strong>set of entry points (static + dynamic) that can reach it</strong>: single-entry →
+that entry&#39;s chunk; multi-entry → a shared chunk. <code>import()</code> creates a chunk boundary
+(<code>is_dynamic</code>). Wires cross-chunk imports (<code>Chunk.imports</code>); names chunks
+deterministically; content-hashes (<code>Chunk.hash</code>) with a <strong>fixed-point pass</strong> so
+cross-chunk hash references converge. <strong>Invariant — determinism:</strong> identical (graph,
+reachable, options) → byte-identical chunk set, stable order + names + hashes (long-term
+CDN caching). Reads <code>bndl-graph</code> + <code>bndl-treeshake</code>. Phase 9; consumed per-chunk by
+codegen.</p>
+<h3 id="sec-3-11">3.11 <code>bndl-codegen</code></h3>
+<p>Emits final code; owns <strong>four</strong> subsystems. <strong>In:</strong> <code>emit_chunk(chunk, graph, fmt, opts) -&gt; OutputChunk{file_name, code, map}</code>. (1) <strong><code>ScopeTree</code> + <code>Renamer</code></strong> — scope analysis
+binds every reference; the cross-module <code>Renamer</code> produces collision-free names (also
+short names for minify). (2) <strong>Scope hoisting / module concatenation</strong> — hoist ESM
+modules into one shared scope (Rollup/esbuild-style); <strong>wrapped lazy-init fallback</strong> (a
+runtime function with first-call memoization) for CJS, cyclic, or <code>eval</code>-bearing modules.
+(3) <strong>Module runtime + <code>OutputFormat</code> wrappers</strong> — inject <code>__require</code>/<code>__esm</code>/
+<code>__commonJS</code>/<code>__toESM</code>/<code>__export</code> interop helpers; wrap as <code>Esm</code>/<code>Cjs</code>/<code>Iife</code>; rewrite
+imports/exports incl. CJS↔ESM interop (CJS = value snapshot at require-time, ESM = live
+binding). (4) <strong><code>Minifier</code></strong> — scope-aware mangle + DCE + constant fold + dead-branch
+removal (Phase 11). Source maps composed across all stages via the <strong>#265 codec</strong> (never
+hand-rolls VLQ). <strong>Invariant:</strong> output is semantics-preserving and deterministic; live-
+binding identity + mutation-visibility survive renaming/hoisting. Reads <code>bndl-ast</code> +
+<code>bndl-chunk</code>. Phases 8, 10, 11.</p>
+<h3 id="sec-3-12">3.12 <code>bndl-cache</code></h3>
+<p>Content-addressed incremental store. <strong>In:</strong> content + options → <code>CacheKey([u8;32])</code> =
+<code>BLAKE3(content ‖ options)</code>. <strong>Out:</strong> memoized <code>Artifact</code> (<code>Parsed</code>/<code>Transformed</code>/
+<code>Emitted</code>). In-memory layer over a <strong>persistent on-disk CAS</strong>; change-driven invalidation
+(a changed source → new key → miss → recompute; unchanged deps hit). <strong>Invariant:</strong> an
+artifact is a pure function of its key → cache hits are observationally identical to
+recompute; eviction is always safe. Wraps the three expensive stages (parse/transform/
+codegen) and underpins incremental rebuild + the dev server (Phase 13).</p>
+<h3 id="sec-3-13">3.13 <code>bndl-server</code></h3>
+<p>Vite-style ESM dev server + HMR. <strong>In:</strong> entries + config; HTTP/WS clients; fs events via
+<code>Watcher</code>. <strong>Out:</strong> per-request transformed ESM modules; WS HMR updates. Owns <code>DevServer</code>
+(http + ws + transform pipeline + cache + watcher), <code>HmrEngine</code> (boundary computation +
+accepted-modules set), <code>HmrBoundary{module, accepts}</code>, <code>ModuleRunner</code>. Serves modules
+<strong>on-demand</strong> (ESM-native, <strong>no bundling</strong> in dev) with dependency <strong>pre-bundling</strong> of
+<code>node_modules</code>; on change, computes the HMR boundary, propagates up the graph to the
+nearest accepting module, and <strong>falls back to full reload</strong> when no boundary accepts.
+<strong>Invariant:</strong> dev transform output is byte-consistent with the build path&#39;s per-module
+transform (same <code>bndl-transform</code> + cache). Reads <code>bndl-graph</code> + <code>bndl-transform</code> +
+<code>bndl-codegen</code> + <code>bndl-cache</code>. Phase 12.</p>
+<h3 id="sec-3-14">3.14 <code>bndl-cli</code></h3>
+<p>The <code>bndl</code> binary + plugin host. <strong>In:</strong> <code>run(args: CliArgs) -&gt; ExitCode</code> — subcommands
+<code>build</code>, <code>serve</code>, <code>transform</code>, <code>analyze</code>, <code>graph</code>. Loads config; hosts the <code>Plugin</code> trait
+(<code>resolve</code>/<code>load</code>/<code>transform</code>/<code>render_chunk</code> hooks) — plugins extend each pipeline stage.
+<strong>Out:</strong> orchestration of the whole pipeline; written <code>OutputChunk</code>s + manifest (<code>build</code>),
+the dev server (<code>serve</code>), a single transformed file (<code>transform</code>), graph/size reports
+(<code>analyze</code>/<code>graph</code>). <strong>Invariant:</strong> the orchestration layer — the only crate depending on
+all others; the plugin host is the single extension surface and runs inside the <strong>trust
+boundary</strong> (plugin code is treated as untrusted config). Phase 0 scaffolds it; every later
+phase wires its stage in.</p>
+<h3 id="sec-3-15">3.15 Determinism Contract</h3>
+<p>A cross-cutting invariant verified in Phase 13: <strong>identical inputs + options ⇒
+byte-identical output</strong>, independent of thread schedule. Enforced by (1) stable module
+ordering (by resolution order, not completion order), (2) stable identifier-rename order
+(<code>Renamer</code> keyed on <code>NodeId</code>/scope position), (3) stable chunk hashing with a fixed-point
+pass over cross-chunk hash references, (4) deterministic chunk naming. Required for cache
+correctness and long-term CDN caching; any nondeterminism is a release-blocking bug.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — JS/TS Modules, Grammar, and the Module Graph</h2>
+<p>The domain is four layered models, each a lowering of the prior: <strong>bytes → tokens → AST → module graph → reachable/chunk model</strong>. Every layer is span-tagged (<code>Span{start,end}</code> byte offsets into one <code>SourceId</code>) so positions compose into the final source map via the #265 codec. Identifiers are interned <code>Atom</code>. All <code>Module</code> records are immutable + <code>Send+Sync</code> once built, enabling fearless parallel processing.</p>
+<h3 id="sec-8-1">8.1 Tokenization model (bndl-lexer)</h3>
+<p>The lexer maps ECMAScript code points → <code>TokenKind</code>. It never panics: any unclassifiable sequence yields <code>TokenKind::Invalid</code> (parser recovers). <code>had_newline_before</code> is set when ≥1 <code>LineTerminator</code> precedes a token → feeds ASI.</p>
+<p><strong>Code-point classes</strong> (per ECMAScript lexical grammar <a class="cite" href="/system-design-blueprints/systems/bundler-transpiler/blueprint/#sec-12-1">§12.1</a>–12.9):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Class</th>
+<th>Members</th>
+<th>Produces</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>WhiteSpace</code></td>
+<td>TAB, VT, FF, SP, NBSP, ZWNBSP (U+FEFF), Zs</td>
+<td>skipped</td>
+</tr>
+<tr>
+<td><code>LineTerminator</code></td>
+<td>LF, CR, LS (U+2028), PS (U+2029)</td>
+<td>sets <code>had_newline_before</code></td>
+</tr>
+<tr>
+<td><code>IdentStart</code></td>
+<td><code>$</code> <code>_</code> UnicodeIDStart, <code>\u</code>-escape</td>
+<td><code>Ident</code> / <code>Keyword</code></td>
+</tr>
+<tr>
+<td><code>IdentPart</code></td>
+<td>IdentStart + UnicodeIDContinue + ZWNJ/ZWJ</td>
+<td>continues ident</td>
+</tr>
+<tr>
+<td><code>DecimalDigit</code> / <code>0x</code>/<code>0o</code>/<code>0b</code></td>
+<td>numeric</td>
+<td><code>Num(f64)</code> / <code>BigInt</code> (trailing <code>n</code>)</td>
+</tr>
+<tr>
+<td><code>&quot;</code> <code>&#39;</code></td>
+<td>string body, escapes, line-continuation</td>
+<td><code>Str</code></td>
+</tr>
+<tr>
+<td><code>`</code></td>
+<td>template — stateful (see below)</td>
+<td><code>NoSubTemplate</code>/<code>TemplateHead</code>/<code>Middle</code>/<code>Tail</code></td>
+</tr>
+<tr>
+<td><code>/</code></td>
+<td>divide <strong>or</strong> regex (context-dependent)</td>
+<td><code>Punct(Slash..)</code> / <code>Regex</code></td>
+</tr>
+<tr>
+<td><code>#</code></td>
+<td>private name (<code>#x</code>)</td>
+<td><code>PrivateName</code></td>
+</tr>
+<tr>
+<td>punctuators</td>
+<td>per <a class="cite" href="/system-design-blueprints/systems/bundler-transpiler/blueprint/#sec-12-8">§12.8</a> maximal-munch</td>
+<td><code>Punct(Punct)</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Token kinds</strong> (<code>TokenKind</code>): <code>Ident</code>, <code>PrivateName</code>, <code>Keyword(Keyword)</code>, <code>Num(f64)</code>, <code>BigInt</code>, <code>Str</code>, <code>NoSubTemplate</code>, <code>TemplateHead</code>, <code>TemplateMiddle</code>, <code>TemplateTail</code>, <code>Regex</code>, <code>Punct(Punct)</code>, <code>JsxText</code>, <code>JsxIdent</code>, <code>Eof</code>, <code>Invalid</code>.</p>
+<p><strong>Keywords</strong> are lexed as <code>Ident</code> then reclassified <code>Keyword(_)</code>; contextual keywords (<code>async</code>, <code>let</code>, <code>of</code>, <code>as</code>, <code>from</code>, <code>get</code>, <code>set</code>, <code>yield</code>, <code>await</code>, TS <code>type</code>/<code>interface</code>/<code>enum</code>/<code>declare</code>) stay <code>Ident</code> and are resolved by the parser via position (avoids mode-dependent lexing).</p>
+<p><strong>Template-literal state machine</strong> — a <code>template-stack</code> of brace depths tracks nested <code>${...}</code>:</p>
+<pre class="diagram"><code>            `...`                 `...${              }...${            }...`
+   Start ──NoSubTemplate──▶ Done   ──TemplateHead──▶ InExpr ──TemplateMiddle──▶ InExpr ──TemplateTail──▶ Done
+                                        │  push depth        ▲ on `}` at depth==tpl-brace re-enter tpl
+                                        ▼                    │
+                                   (normal token stream; `{`/`}` adjust depth)</code></pre>
+<p>A <code>}</code> only closes a template substitution when brace-depth returns to the template&#39;s recorded depth; otherwise it is <code>Punct(RBrace)</code>. Unterminated <code>`</code> → <code>Invalid</code> + <code>ParseErrorKind::UnterminatedTemplate</code>.</p>
+<p><strong>Regex-vs-divide disambiguation</strong> — <code>/</code> is ambiguous: regex literal vs division. The lexer holds a <code>regex-context flag</code> fed by the parser&#39;s expected-token state. Rule: a <code>/</code> begins a <code>Regex</code> when an expression is <strong>not</strong> yet in operand position (preceded by <code>(</code>, <code>,</code>, <code>=</code>, <code>:</code>, <code>[</code>, <code>!</code>, <code>&amp;</code>, <code>|</code>, <code>?</code>, <code>{</code>, <code>;</code>, <code>return</code>, <code>typeof</code>, keyword operators, or line start). It is <code>Slash</code> when preceded by an <code>Ident</code>, <code>)</code>, <code>]</code>, <code>Num</code>, <code>Str</code>, template tail, or <code>this</code>/literal (operand just closed). Invalid regex body → <code>Invalid</code> + <code>ParseErrorKind::InvalidRegex</code>.</p>
+<p><strong>ASI inputs</strong> — the lexer supplies <code>had_newline_before</code>; the parser inserts a virtual <code>;</code> per the three ASI rules: (1) offending token on a new line; (2) <code>}</code> or EOF reached; (3) restricted productions (<code>return</code>/<code>throw</code>/<code>break</code>/<code>continue</code>/<code>yield</code>/post-<code>++</code>/<code>--</code>/arrow) where a <code>LineTerminator</code> forbids continuation.</p>
+<h3 id="sec-8-2">8.2 Load-bearing grammar (EBNF)</h3>
+<p>Recursive descent for statements/declarations + Pratt for expressions. <code>Syntax{typescript,jsx}</code> gates TS/JSX productions. Representative subset (terminals in <code>&#39;&#39;</code>):</p>
+<pre class="code language-ebnf" data-lang="ebnf"><code>Program        ::= ( ModuleItem )* EOF ;
+ModuleItem     ::= ImportDeclaration | ExportDeclaration | Statement ;
+
+ImportDeclaration
+  ::= &#39;import&#39; ImportClause &#39;from&#39; ModuleSpecifier &#39;;&#39;
+    | &#39;import&#39; ModuleSpecifier &#39;;&#39;                          (* side-effect import *)
+    | &#39;import&#39; &#39;type&#39; ImportClause &#39;from&#39; ModuleSpecifier &#39;;&#39;   (* TS, erased *) ;
+ImportClause   ::= DefaultBinding ( &#39;,&#39; NameSpaceImport | &#39;,&#39; NamedImports )?
+                 | NameSpaceImport | NamedImports ;
+NameSpaceImport::= &#39;*&#39; &#39;as&#39; Ident ;
+NamedImports   ::= &#39;{&#39; ( ImportSpec ( &#39;,&#39; ImportSpec )* &#39;,&#39;? )? &#39;}&#39; ;
+ImportSpec     ::= ( Ident | String ) ( &#39;as&#39; Ident )? ;
+ModuleSpecifier::= String ;
+
+ExportDeclaration
+  ::= &#39;export&#39; &#39;*&#39; ( &#39;as&#39; Ident )? &#39;from&#39; ModuleSpecifier &#39;;&#39;   (* export-star / export-as-namespace *)
+    | &#39;export&#39; NamedExports ( &#39;from&#39; ModuleSpecifier )? &#39;;&#39;
+    | &#39;export&#39; &#39;default&#39; ( AssignmentExpression | FuncDecl | ClassDecl ) &#39;;&#39;
+    | &#39;export&#39; Declaration ;
+NamedExports   ::= &#39;{&#39; ( ExportSpec ( &#39;,&#39; ExportSpec )* &#39;,&#39;? )? &#39;}&#39; ;
+ExportSpec     ::= ( Ident | String ) ( &#39;as&#39; ( Ident | String ) )? ;
+
+ImportExpression ::= &#39;import&#39; &#39;(&#39; AssignmentExpression ( &#39;,&#39; AssignmentExpression )? &#39;)&#39;  (* dynamic *)
+                   | &#39;import&#39; &#39;.&#39; &#39;meta&#39; ;
+ClassDeclaration ::= &#39;abstract&#39;? &#39;class&#39; Ident TypeParams? Heredity? &#39;{&#39; ClassElement* &#39;}&#39; ;  (* &#39;abstract&#39;,&#39;implements&#39;,TypeParams: TS, erased *)
+
+(* Pratt expression core — driven by binding powers, not nested BNF *)
+Expression       ::= AssignmentExpression ( &#39;,&#39; AssignmentExpression )* ;
+AssignmentExpression ::= ArrowFunction | YieldExpression
+                       | ConditionalExpression
+                       | LeftHandSide AssignmentOperator AssignmentExpression ;
+PrattExpr(rbp)   ::= NUD ( while lbp(peek) &gt; rbp : LED )* ;   (* see binding-power table 8.2.1 *)</code></pre>
+<h4 id="sec-8-2-1">8.2.1 Pratt binding-power table (lbp; higher binds tighter)</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operator(s)</th>
+<th>lbp</th>
+<th>Assoc</th>
+<th>LED form</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>,</code> (sequence)¹</td>
+<td>1</td>
+<td>L</td>
+<td><code>Bin/Seq</code></td>
+</tr>
+<tr>
+<td><code>=</code> <code>+=</code> … <code>&amp;&amp;=</code> `</td>
+<td></td>
+<td>=<code> </code>??=`</td>
+<td>2</td>
+</tr>
+<tr>
+<td><code>? :</code></td>
+<td>3</td>
+<td>R</td>
+<td><code>Cond</code></td>
+</tr>
+<tr>
+<td><code>??</code></td>
+<td>4</td>
+<td>L²</td>
+<td><code>Bin</code></td>
+</tr>
+<tr>
+<td>`</td>
+<td></td>
+<td>`</td>
+<td>5</td>
+</tr>
+<tr>
+<td><code>&amp;&amp;</code></td>
+<td>6</td>
+<td>L</td>
+<td><code>Bin</code></td>
+</tr>
+<tr>
+<td>`</td>
+<td><code> </code>^<code> </code>&amp;`</td>
+<td>7–9</td>
+<td>L</td>
+</tr>
+<tr>
+<td><code>==</code> <code>!=</code> <code>===</code> <code>!==</code></td>
+<td>10</td>
+<td>L</td>
+<td><code>Bin</code></td>
+</tr>
+<tr>
+<td><code>&lt;</code> <code>&gt;</code> <code>&lt;=</code> <code>&gt;=</code> <code>instanceof</code> <code>in</code>³</td>
+<td>11</td>
+<td>L</td>
+<td><code>Bin</code></td>
+</tr>
+<tr>
+<td><code>&lt;&lt;</code> <code>&gt;&gt;</code> <code>&gt;&gt;&gt;</code></td>
+<td>12</td>
+<td>L</td>
+<td><code>Bin</code></td>
+</tr>
+<tr>
+<td><code>+</code> <code>-</code></td>
+<td>13</td>
+<td>L</td>
+<td><code>Bin</code></td>
+</tr>
+<tr>
+<td><code>*</code> <code>/</code> <code>%</code></td>
+<td>14</td>
+<td>L</td>
+<td><code>Bin</code></td>
+</tr>
+<tr>
+<td><code>**</code></td>
+<td>15</td>
+<td>R</td>
+<td><code>Bin</code></td>
+</tr>
+<tr>
+<td>prefix <code>! ~ + - typeof void delete await</code> (unary NUD)</td>
+<td>16</td>
+<td>—</td>
+<td><code>Unary/Await</code></td>
+</tr>
+<tr>
+<td>postfix <code>++ --</code></td>
+<td>17</td>
+<td>—</td>
+<td><code>Update</code> (ASI-restricted)</td>
+</tr>
+<tr>
+<td><code>new</code></td>
+<td>18</td>
+<td>—</td>
+<td><code>New</code></td>
+</tr>
+<tr>
+<td><code>.</code> <code>?.</code> <code>[]</code> <code>()</code> <code>tag`...`</code></td>
+<td>19</td>
+<td>L</td>
+<td><code>Member/OptChain/Call/Template</code></td>
+</tr>
+</tbody></table></div>
+<p>¹ sequence lbp suppressed inside argument/array/declarator parsing. ² <code>??</code> cannot mix with <code>&amp;&amp;</code>/<code>||</code> without parens (parse error). ³ <code>in</code> disabled while parsing <code>for(...;;)</code> init header.</p>
+<h3 id="sec-8-3">8.3 AST mapping (production → AST variant)</h3>
+<p><code>Program{items: Vec&lt;ModuleItem&gt;, source_type}</code> where <code>source_type ∈ {Module, Script}</code> (CJS files = <code>Script</code>).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Grammar production</th>
+<th>AST node (bndl-ast)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ImportDeclaration</td>
+<td><code>ModuleItem::Import(ImportDecl{specifiers, source: Atom, span})</code></td>
+</tr>
+<tr>
+<td><code>export { … } [from]</code></td>
+<td><code>ModuleItem::Export(ExportDecl::Named{specifiers, source: Option&lt;Atom&gt;})</code></td>
+</tr>
+<tr>
+<td><code>export default E</code></td>
+<td><code>ExportDecl::Default(Box&lt;Expr&gt;)</code></td>
+</tr>
+<tr>
+<td><code>export * [as ns] from</code></td>
+<td><code>ExportDecl::All{source: Atom, alias: Option&lt;Atom&gt;}</code></td>
+</tr>
+<tr>
+<td><code>export &lt;decl&gt;</code></td>
+<td><code>ExportDecl::Decl(Box&lt;Stmt&gt;)</code></td>
+</tr>
+<tr>
+<td>ExpressionStatement</td>
+<td><code>Stmt::Expr(Box&lt;Expr&gt;)</code></td>
+</tr>
+<tr>
+<td><code>var/let/const</code></td>
+<td><code>Stmt::Var(VarDecl)</code></td>
+</tr>
+<tr>
+<td><code>function</code> decl</td>
+<td><code>Stmt::Func(FuncDecl)</code></td>
+</tr>
+<tr>
+<td><code>class</code> decl</td>
+<td><code>Stmt::Class(ClassDecl)</code></td>
+</tr>
+<tr>
+<td><code>{ … }</code></td>
+<td><code>Stmt::Block(Vec&lt;Stmt&gt;)</code></td>
+</tr>
+<tr>
+<td>BinaryExpr / logical</td>
+<td><code>Expr::Bin(BinExpr)</code></td>
+</tr>
+<tr>
+<td><code>a.b</code> / <code>a[b]</code></td>
+<td><code>Expr::Member(MemberExpr)</code></td>
+</tr>
+<tr>
+<td><code>a?.b</code> chain</td>
+<td><code>Expr::Optional(OptChain)</code></td>
+</tr>
+<tr>
+<td><code>f(x)</code></td>
+<td><code>Expr::Call(CallExpr)</code></td>
+</tr>
+<tr>
+<td><code>import(x)</code> dynamic</td>
+<td><code>Expr::Import(ImportExpr)</code></td>
+</tr>
+<tr>
+<td>arrow <code>=&gt;</code></td>
+<td><code>Expr::Arrow(ArrowExpr)</code></td>
+</tr>
+<tr>
+<td><code>`…${}…`</code></td>
+<td><code>Expr::Template(..)</code></td>
+</tr>
+<tr>
+<td>identifier reference</td>
+<td><code>Expr::Ident(Ident{sym: Atom, span, node_id})</code></td>
+</tr>
+<tr>
+<td>TS type annot/interface/enum/<code>as</code>/<code>satisfies</code>/<code>declare</code>/decorators</td>
+<td><strong>erased</strong> in Phase-6 TypeStrip (parsed, never emitted)</td>
+</tr>
+<tr>
+<td>JSX element/fragment</td>
+<td><code>Expr::Call</code> after JsxTransform (<code>createElement</code> or <code>jsx</code>)</td>
+</tr>
+</tbody></table></div>
+<p>Every node carries <code>node_id: NodeId</code> (assigned monotonically at parse) + <code>span</code>. Scope-id placeholders are filled by Phase-8 <code>ScopeTree</code>.</p>
+<h3 id="sec-8-4">8.4 Module-resolution decision model (bndl-resolver)</h3>
+<p><code>Specifier</code> is classified first: <code>Relative</code> (<code>./</code>, <code>../</code>), <code>Absolute</code> (<code>/</code>, drive), or <code>Bare{pkg,sub}</code>. <code>ResolveResult{path, kind, side_effects, from_node_modules}</code>. tsconfig <code>paths</code>/<code>baseUrl</code> run <strong>before</strong> node_modules.</p>
+<pre class="diagram"><code>resolve(spec, importer):
+  ┌─ tsConfig.paths match? ──yes──▶ rewrite to candidates ──▶ probe ──hit─▶ ResolveResult
+  │                          no
+  ▼
+  Relative|Absolute? ──yes──▶ join(importer_dir, spec) ──▶ LOAD_AS_FILE ─miss─▶ LOAD_AS_DIRECTORY ─miss─▶ ResolveError::NotFound
+  │ no (Bare)
+  ▼
+  ESM importer (type:module / .mjs)?
+     ├─ yes ▶ PACKAGE_RESOLVE → PACKAGE_EXPORTS_RESOLVE (if &quot;exports&quot;)  else legacy main/module
+     └─ no  ▶ LOAD_NODE_MODULES (CJS)</code></pre>
+<p><strong>CJS <code>LOAD_NODE_MODULES</code></strong> — walk ancestor <code>node_modules/</code>:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Probe path</th>
+<th>Hit →</th>
+<th>Miss →</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><code>&lt;ancestor&gt;/node_modules/&lt;pkg&gt;</code> (exact)</td>
+<td>realpath → <code>ResolveResult</code></td>
+<td>next probe</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>&lt;ancestor&gt;/node_modules/&lt;pkg&gt;.{js,json,node,…extensions}</code></td>
+<td>realpath → <code>ResolveResult</code></td>
+<td>next probe</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>&lt;ancestor&gt;/node_modules/&lt;pkg&gt;/package.json#main_fields</code> ([&quot;browser&quot;?,&quot;module&quot;?,&quot;main&quot;] in order)</td>
+<td><code>LOAD_AS_FILE(main_field_value)</code> → <code>ResolveResult</code></td>
+<td>probe index</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>&lt;ancestor&gt;/node_modules/&lt;pkg&gt;/index.{js,json,node}</code></td>
+<td>realpath → <code>ResolveResult</code></td>
+<td>next ancestor dir</td>
+</tr>
+<tr>
+<td>—</td>
+<td>no ancestor <code>node_modules/</code> matched</td>
+<td>—</td>
+<td><code>ResolveError::PackageNotFound</code></td>
+</tr>
+</tbody></table></div>
+<p>All hits pass through <code>realpath(symlink)</code> → canonical path (symlink realpath cache); symlink cycles detected and capped.</p>
+<p><strong>ESM <code>PACKAGE_EXPORTS_RESOLVE</code></strong> — condition + pattern matching against <code>package.json#exports</code>:</p>
+<pre class="diagram"><code>exports == string                     → that target (only sub == &quot;.&quot;)
+exports == { &quot;.&quot;: …, &quot;./sub&quot;: … }     → exact key, else pattern key &quot;./*&quot; (capture * = sub-tail)
+target == string                      → must start &quot;./&quot;, forbid &quot;../&quot;/abs escapes → InvalidExports
+target == { import|require|browser|node|development|production|default : … }
+        → match Condition list LEFT→RIGHT in ResolveOptions.conditions (first match wins; recurse)
+target == [ a, b ]                    → first that resolves
+no key/condition matches              → ResolveError::NotExported
+&quot;imports&quot; (#-prefixed)                → same algorithm, internal specifiers</code></pre>
+<p><strong>Condition ordering</strong> (<code>ResolveOptions.conditions</code>, build default): <code>[&quot;import&quot;,&quot;module&quot;,&quot;browser&quot;?,&quot;node&quot;?,&quot;production&quot;|&quot;development&quot;,&quot;default&quot;]</code>. <code>Condition::Custom(Atom)</code> allows user keys. <code>&quot;browser&quot;</code> field/condition active when targeting browser; flips Node builtins → <code>ModuleKind::External</code>/polyfill.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th><code>ResolveError</code></th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>NotFound</code></td>
+<td>relative path + no extension/index hit</td>
+</tr>
+<tr>
+<td><code>PackageNotFound</code></td>
+<td>bare pkg absent from all ancestor <code>node_modules</code></td>
+</tr>
+<tr>
+<td><code>InvalidExports</code></td>
+<td><code>exports</code> target escapes package root / not <code>./</code>-prefixed</td>
+</tr>
+<tr>
+<td><code>NotExported</code></td>
+<td>subpath not in <code>exports</code> map (encapsulation)</td>
+</tr>
+<tr>
+<td><code>BadTsPaths</code></td>
+<td>tsconfig <code>paths</code> pattern malformed / no <code>baseUrl</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Module-graph + live-binding model (bndl-graph)</h3>
+<p><code>ModuleGraph{modules: Vec&lt;Module&gt;, entries, edges, cycles}</code>. Each <code>Module{id: ModuleId, path, kind: ModuleKind, ast, imports, exports, symbols, has_side_effects}</code>. <code>ModuleKind ∈ {Esm, Cjs, Json, Css, Asset, Builtin, External}</code>.</p>
+<p><strong>Records:</strong></p>
+<pre class="code language-rust" data-lang="rust"><code>ImportRecord { specifier: Atom, resolved: Option&lt;ModuleId&gt;, kind: ImportKind }   // Static|Dynamic|Require|ExportStar
+ExportRecord { name: Atom, local: Option&lt;SymbolId&gt;, reexport: Option&lt;(ModuleId, Atom)&gt; }
+Symbol       { name: Atom, kind: SymbolKind, local: bool }                       // SymbolId interned per module
+Binding      // (scope-level link from a reference to its defining Symbol)</code></pre>
+<p><strong>Live bindings</strong> — an ESM import is a <em>live, read-only view</em> of the exporter&#39;s binding, not a value copy. Invariant: rename/tree-shake/concatenate must preserve (a) <strong>binding identity</strong> (all importers + exporter alias the same storage) and (b) <strong>mutation visibility</strong> (an exporter reassigning <code>export let x</code> is observed by importers). After scope hoisting (Phase 8) the binding becomes one shared variable; in wrapped mode it is a getter on the namespace object. Default export = synthetic export named <code>default</code>.</p>
+<p><strong>export-star flattening</strong> — <code>export * from &#39;m&#39;</code> (<code>ExportDecl::All{alias:None}</code>) re-exports all of <code>m</code>&#39;s named exports <em>except</em> <code>default</code> and any name explicitly bound by the importer (local exports + earlier stars shadow). Resolved by a fixed-point walk across transitive stars; an ambiguous name (two stars export same name) is <strong>silently excluded</strong> (per spec), not an error, unless directly imported → then <code>BadImport</code>/missing-export. <code>export * as ns</code> (<code>alias:Some</code>) instead binds a single namespace symbol.</p>
+<p><strong>Cycle handling</strong> — Tarjan SCC over static-import edges records <code>cycles</code>. ESM cycles are legal: bindings are hoisted/TDZ-checked; the graph keeps them and Phase-8 forces the wrapped lazy-init fallback for any module in a cycle that needs ordering. CJS <code>require</code> cycle → partial <code>module.exports</code> snapshot returned (the in-progress object), matching Node; not an error.</p>
+<p><strong>CJS↔ESM interop</strong> —</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Direction</th>
+<th>Bridge</th>
+<th>Helper (Phase 10)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ESM imports CJS</td>
+<td>CJS <code>module.exports</code> value snapshot wrapped as ESM namespace; <code>default</code> = whole exports</td>
+<td><code>__toESM</code></td>
+</tr>
+<tr>
+<td>CJS requires ESM</td>
+<td>ESM namespace materialized eagerly into a value object</td>
+<td><code>__commonJS</code> wrapper + <code>__esm</code></td>
+</tr>
+<tr>
+<td>named import from CJS</td>
+<td>best-effort static keys; unknown → runtime getter</td>
+<td><code>__export</code></td>
+</tr>
+</tbody></table></div>
+<p><code>ImportKind::Require</code> marks CJS edges (always wrapped, never concatenated). <code>Dynamic</code> marks <code>import()</code> edges → chunk boundary (Phase 9).</p>
+<h3 id="sec-8-6">8.6 Worked example — 3 modules: tokens → AST → graph → reachable → chunks → ESM</h3>
+<p>Project: <code>entry.ts</code> (entry) imports local <code>util.ts</code> + bare pkg <code>lib</code> (conditional exports). Build target ESM, tree-shaking on.</p>
+<p><code>entry.ts</code></p>
+<pre class="code language-ts" data-lang="ts"><code>// entry.ts — module surface (import declarations + reference notes; not runnable)
+import { used } from &quot;./util&quot;;   // referenced via call site used()
+import { hello } from &quot;lib&quot;;     // referenced as a value
+// entry body references: used(), hello  → both symbols reachable from entry</code></pre>
+<p><code>util.ts</code></p>
+<pre class="code language-ts" data-lang="ts"><code>// util.ts — exported declarations (arrow bodies elided, shown as type)
+export const used: () =&gt; number;   // body returns 41 + 1; referenced → KEPT
+export const dead: () =&gt; string;   // body returns &quot;tree-shaken&quot;; unreferenced + Pure + sideEffects:false → ELIMINATED</code></pre>
+<p><code>lib/package.json</code>: <code>{ &quot;exports&quot;: { &quot;.&quot;: { &quot;import&quot;: &quot;./esm/index.js&quot;, &quot;require&quot;: &quot;./cjs/index.js&quot; } }, &quot;sideEffects&quot;: false }</code>
+<code>lib/esm/index.js</code>: <code>export const hello = &quot;hi&quot;;</code></p>
+<p><strong>(1) Tokens</strong> (<code>entry.ts</code>, abbreviated): <code>Keyword(import)</code> <code>Punct({)</code> <code>Ident(used)</code> <code>Punct(})</code> <code>Ident(from)</code>* <code>Str(&quot;./util&quot;)</code> <code>Punct(;)</code> … (*<code>from</code> lexed as <code>Ident</code>, parser-reclassified). <code>() =&gt; 41 + 1</code> in util.ts: <code>Punct(()</code> <code>Punct())</code> <code>Punct(=&gt;)</code> <code>Num(41)</code> <code>Punct(+)</code> <code>Num(1)</code>.</p>
+<p><strong>(2) AST</strong> — <code>entry</code>: <code>[Import(ImportDecl{spec:[used], source:&quot;./util&quot;}), Import(ImportDecl{spec:[hello], source:&quot;lib&quot;}), Stmt::Expr(Call(console.log, [Call(used), Ident(hello)]))]</code>. <code>util</code>: two <code>ExportDecl::Decl(Var(const …))</code>, each a <code>Expr::Arrow</code>. TS <code>: number</code> / <code>(): number</code> erased by TypeStrip.</p>
+<p><strong>(3) Graph</strong> —</p>
+<pre class="diagram"><code>ModuleId(0)=entry.ts  imports: [Static→util(1), Static→lib(2)]   exports: []
+ModuleId(1)=util.ts   exports: [used→S0, dead→S1]   has_side_effects:false
+ModuleId(2)=lib       (exports.import → ./esm/index.js) kind:Esm  side_effects:false (pkg sideEffects:false)
+ModuleId(3)=lib/esm/index.js  exports:[hello→S0]
+entries=[0]   cycles=[]</code></pre>
+<p>Resolver picked <code>lib</code> via <code>PACKAGE_EXPORTS_RESOLVE</code> with <code>Condition::Import</code> first → <code>./esm/index.js</code>.</p>
+<p><strong>(4) Reachable symbols</strong> (TreeShaker from <code>entries</code>): entry uses <code>util.used</code> + <code>lib.hello</code>. <code>used</code> reachable; <code>dead</code> unreferenced + arrow is <code>Pure</code> + module <code>sideEffects:false</code> → <strong>eliminated</strong>. ReachableSet = <code>{entry:*, util:[used], lib/index:[hello]}</code>.</p>
+<p><strong>(5) Chunks</strong> (module groups): all modules reachable only from entry-0 → single entry chunk; no dynamic import → no async chunk; no shared chunk. <code>Chunk{id:0, modules:[0,1,3], entry:Some(0), is_dynamic:false}</code> (module 2 collapses to 3). Hash computed over final content.</p>
+<p><strong>(6) Emitted ESM</strong> (scope-hoisted, <code>dead</code> gone, identifiers kept—no minify):</p>
+<pre class="diagram"><code>// Emitted ESM — module-by-module result (declarations + reference notes, not runnable):
+//   util.ts        → declares `used` (body returns 41 + 1)            [kept]
+//   lib/esm/index  → declares `hello` (value &quot;hi&quot;)                    [kept]
+//   entry.ts       → references used(), hello                         [both reachable]
+// One shared `const` per module via concatenation (no wrapper — pure ESM, acyclic).</code></pre>
+<p>Live binding <code>used</code>/<code>hello</code> became one shared <code>const</code> per module (concatenation, no wrapper — pure ESM, acyclic).</p>
+<h3 id="sec-8-7">8.7 Malformed / edge examples → error</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Stage</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>const t = `a${b</code> (no closing)</td>
+<td>lexer</td>
+<td><code>Invalid</code> token + <code>ParseErrorKind::UnterminatedTemplate</code>; parser recovers at <code>;</code>/EOF</td>
+</tr>
+<tr>
+<td><code>const s = &quot;ab</code> (no close quote)</td>
+<td>lexer</td>
+<td><code>ParseErrorKind::UnterminatedString</code></td>
+</tr>
+<tr>
+<td><code>import x from 123;</code> (specifier not string)</td>
+<td>parser</td>
+<td><code>ParseErrorKind::BadImport</code> (<code>ModuleSpecifier</code> must be <code>Str</code>)</td>
+</tr>
+<tr>
+<td><code>import { gone } from &quot;./util&quot;;</code> (<code>gone</code> not exported)</td>
+<td>graph</td>
+<td>missing-export diagnostic; <code>ImportSpec</code> resolves to no <code>ExportRecord</code> → hard error (strict) / runtime <code>undefined</code> (loose CJS)</td>
+</tr>
+<tr>
+<td><code>import &quot;no-such-pkg&quot;;</code> (bare, absent)</td>
+<td>resolver</td>
+<td><code>ResolveError::PackageNotFound</code> → fatal build error w/ importer span</td>
+</tr>
+<tr>
+<td>CJS <code>a.js: require(&#39;./b&#39;)</code> ↔ <code>b.js: require(&#39;./a&#39;)</code></td>
+<td>graph</td>
+<td>cycle recorded; <code>require</code> returns partial <code>module.exports</code> snapshot (Node semantics) — <strong>not</strong> an error</td>
+</tr>
+<tr>
+<td>dynamic <code>import(&#39;./a&#39;)</code> where <code>a</code> dynamically imports <code>./b</code> which imports <code>./a</code></td>
+<td>graph/chunk</td>
+<td>circular dynamic edge tolerated; each <code>import()</code> is a chunk boundary + async; runtime promise resolves with in-flight module record (no deadlock — memoized)</td>
+</tr>
+<tr>
+<td><code>a as b</code> in <code>??</code>/<code>&amp;&amp;</code> mix without parens</td>
+<td>parser</td>
+<td><code>ParseErrorKind::UnexpectedToken</code> (coalesce-mix rule)</td>
+</tr>
+<tr>
+<td>TS <code>let x: Foo</code> with <code>Syntax.typescript=false</code></td>
+<td>parser</td>
+<td><code>ParseErrorKind::TrailingTsType</code></td>
+</tr>
+<tr>
+<td><code>&lt;div/&gt;</code> with <code>Syntax.jsx=false</code></td>
+<td>parser</td>
+<td><code>ParseErrorKind::JsxNotEnabled</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-8">8.8 Incremental rebuild after one file edit (sequence)</h3>
+<p>Edit to <code>util.ts</code> only. <code>bndl-cache</code> keys = <code>CacheKey = BLAKE3(content + options)</code>; only changed-key artifacts recompute.</p>
+<pre class="diagram"><code>Watcher        Server/Orchestrator     Cache(BLAKE3)        Graph            Treeshake/Chunk/Codegen
+   │ fs event(util.ts)  │                    │                 │                       │
+   ├───────────────────▶│ invalidate(util)   │                 │                       │
+   │                    ├───────────────────▶│ evict key(util) │                       │
+   │                    │ reparse util ──────▶│ miss→Parsed     │                       │
+   │                    │ retransform util ──▶│ miss→Transformed│                       │
+   │                    │ rescan imports/exports ───────────────▶ update Module(1)      │
+   │                    │  (entry, lib AST: cache HIT — reused, not reparsed)           │
+   │                    │ exports of util changed? ─────────────▶ if export SET same →  │
+   │                    │                    │                 │  importers unaffected  │
+   │                    │ reshake (incremental from dirty set) ─────────────────────────▶ ReachableSet Δ
+   │                    │ rechunk (only chunks touching util) ──────────────────────────▶ re-emit chunk(s)
+   │                    │ stable hash recompute → new file_name only if content changed  │
+   │                    │ (dev: send HMR update over ws to ModuleRunner; HMR boundary)   │</code></pre>
+<p>Invariant: identical inputs+options → byte-identical output (stable module order, rename order, fixed-point chunk hashing). If <code>util.ts</code>&#39;s <strong>export set / signature</strong> is unchanged, importer artifacts stay cache-hits; only <code>util</code>&#39;s own parse→transform→emit recomputes, plus any chunk physically containing it (rehash). HMR (Phase 12) finds the nearest <code>HmrBoundary{module, accepts}</code>; if none accepts, full-reload fallback.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

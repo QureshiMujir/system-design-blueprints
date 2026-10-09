@@ -1,0 +1,692 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Infrastructure-as-Code Engine (Terraform-like) — Architecture · Engineering Blueprints</title><meta name="description" content="Infrastructure-as-Code Engine (Terraform-like), hld: §3 overview + §8 domain model. Build iac — a from-scratch, Terraform/OpenTofu-class declarative provisioning engine in Rust that parses HCL-like config, evaluates it over a cty-like value lattice (incl. Unknown/Sensitive), builds…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/infrastructure-as-code-engine/">Infrastructure-as-Code Engine (Terraform-like)</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Infrastructure-as-Code Engine (Terraform-like)</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~43 weeks</li> <li>4,164 lines</li> <li>blueprint #267</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/infrastructure-as-code-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/infrastructure-as-code-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/infrastructure-as-code-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/infrastructure-as-code-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/infrastructure-as-code-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/infrastructure-as-code-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/infrastructure-as-code-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/infrastructure-as-code-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/infrastructure-as-code-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/infrastructure-as-code-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Infrastructure-as-Code Engine (Terraform-like) — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>   Operator / CI :  iac init | validate | fmt | plan | apply | destroy | refresh | import | output | graph | state ...
+                                  |  *.iac config + CLI flags + -var / -var-file
+                                  v
+   iac-cli  ────────────────────────────────────────────────────────────────────────────────────
+                                  |  load + parse
+                                  v
+   iac-hcl : Lexer -&gt; Parser -&gt; config AST (Body / Block / Attribute / Expression) + Diagnostics
+                                  |  AST (parsed, unevaluated)
+                                  v
+   iac-eval : Value/Type lattice · EvalContext · Function registry · for/cond/splat · convert/unify
+                                  |  evaluated config (with Unknown / Sensitive marks)
+                                  v
+   iac-core : module expand · NodeExpander(count/for_each) · graph build · PLAN · APPLY
+       |  build graph             |  refresh + 3-way diff -&gt; ResourceChange/Action            |  walk + RPC
+       v                          v                                                           v
+   iac-graph : DAG +        iac-state : versioned State · StateBackend ·               iac-provider : Provider
+   cycle detect (Tarjan) +  StateLock · serial / lineage ·                             trait · ProviderSchema ·
+   transitive reduction +   atomic write (temp+fsync+rename) + .backup                 installer/registry ·
+   bounded Walker           &lt;----------- read prior State / write new State ---------- plugin RPC / child process
+                                                                                             |  CRUD
+                                                                                             v
+   ╔══════════════════════════════════════════════════════════════════════════╗      real infrastructure
+   ║ TRUST BOUNDARY ──── untrusted *.iac config  +  untrusted provider responses ║      (AWS/GCP/... — NOT us)
+   ╚══════════════════════════════════════════════════════════════════════════╝
+   CONCURRENCY BOUNDARY ── Walker runs provider RPCs in parallel up to -parallelism; State is single-writer.
+   PERSISTENCE BOUNDARY ── iac-state is the only durable artifact; written atomically under lock.</code></pre>
+<p>Data flows top-down through a strict pipeline; each crate owns one transformation and a single invariant. <code>iac-core</code> is the only orchestrator — it is the sole crate that fans out to <code>iac-graph</code>, <code>iac-state</code>, and <code>iac-provider</code>, and it holds the single write capability for State.</p>
+<h3 id="sec-3-1">3.1 iac-cli — the <code>iac</code> binary</h3>
+<p>Thin presentation/orchestration shell. In: argv (subcommand + flags), env, <code>*.iac</code> files on disk, stdin (for <code>state push</code>). Out: exit code, human-rendered diagnostics/plan/apply progress to stderr, machine output (<code>-json</code>) to stdout, <code>output</code> values. Subcommands <code>init validate fmt plan apply destroy refresh import output graph state{list,show,mv,rm,pull,push}</code> each translate to one <code>iac-core</code> entry point; no business logic lives here. Invariant: <strong>a non-zero exit ⇔ at least one error Diagnostic</strong>; <code>plan</code> exits 0/2 (0=empty, 2=non-empty diff, <code>-detailed-exitcode</code>). Owns flag parsing, <code>-var</code>/<code>-var-file</code> collection, TTY detection for color/progress, and SIGINT capture forwarded to the Apply executor&#39;s cancel token. Built Phase 0 (shell) then wired per subcommand across Phases 7–10.</p>
+<h3 id="sec-3-2">3.2 iac-hcl — configuration language front end</h3>
+<p>Turns bytes into a typed but <strong>unevaluated</strong> config AST. In: UTF-8 source + filename. Out: <code>Body</code> (root), or <code>Vec&lt;Diagnostic&gt;</code> with byte-accurate <code>Span</code>s. Pipeline: <code>Lexer</code> (tokens, here-doc <code>&lt;&lt;EOT</code> / <code>&lt;&lt;-EOT</code>, <code>#</code>/<code>//</code>/<code>/* */</code> comments, template <code>${</code>/<code>%{</code> interpolation lexing) → recursive-descent <code>Parser</code> (blocks with labels, attributes, the full <code>Expression</code> grammar incl. precedence-climbed <code>BinaryOp</code>/<code>UnaryOp</code>, <code>Conditional</code>, <code>ForExpr</code>, <code>Splat</code>, <code>Index</code>, <code>FunctionCall{expand_final}</code>, <code>Template</code>). Invariant: <strong>never panics on adversarial input</strong> — every malformed byte sequence yields a recoverable Diagnostic, and parsing is total. No evaluation, no I/O beyond the provided source, no provider knowledge. Built Phase 1; <code>fmt</code> reuses its lossless token/span info.</p>
+<h3 id="sec-3-3">3.3 iac-eval — value/type lattice + evaluator</h3>
+<p>Evaluates an AST <code>Expression</code> against an <code>EvalContext</code> to a <code>Value</code>. In: AST + scopes (variables, locals, <code>each</code>/<code>count</code>, function registry, current module <code>path</code>). Out: <code>Value</code> or <code>EvalError</code>. Implements the cty-like lattice: concrete kinds (Null/Bool/Number(Decimal)/String/List/Set/Map/Object/Tuple) plus the two lattice marks <code>Unknown(Type)</code> (computed, not-yet-known) and <code>Sensitive(Box&lt;Value&gt;)</code>. <code>convert(v,to)</code> and <code>unify(types)</code> give type coercion/common-supertype; the <code>Function</code> trait registry supplies builtins. Invariants: <strong><code>Unknown</code> never compares equal to a concrete value and is contagious</strong> (any op touching Unknown → Unknown); <strong><code>Sensitive</code> propagates through every operation</strong> and is never silently dropped; evaluation order is <strong>deterministic</strong> (sorted map/object iteration, no wall-clock/RNG). Built Phases 2 (lattice + core evaluator) and 3 (Functions, for/cond/splat/dynamic, var/local/output scopes).</p>
+<h3 id="sec-3-4">3.4 iac-core — the orchestration engine</h3>
+<p>Owns the end-to-end lifecycle; depends on all of 1–5. Sub-components:</p>
+<ul>
+<li><strong>Module expander / config loader</strong> — discovers <code>*.iac</code>, loads <code>module</code> calls recursively, resolves source addresses, builds the module tree, evaluates variables/locals/outputs per module instance. Invariant: a module instance is a closed scope; cross-module refs flow only through declared <code>variable</code>/<code>output</code>. Built Phase 9.</li>
+<li><strong>NodeExpander</strong> — expands <code>count</code> (→ integer <code>IndexKey</code>) and <code>for_each</code> (→ string <code>IndexKey</code>) into per-instance <code>ResourceAddress</code>es. Invariant: <strong>expansion under an <code>Unknown</code> count/for_each is deferred</strong> (&quot;known after apply&quot; instance set), never guessed. Built Phase 9.</li>
+<li><strong>Graph builder</strong> — extracts references from evaluated config, emits nodes (resources, data sources, modules, var/local/output) and dependency edges into an <code>iac-graph</code> <code>Graph&lt;N&gt;</code> where <code>N: GraphNode</code>. Invariant: every <code>references()</code> edge present before walk. Built Phase 4.</li>
+<li><strong>Plan engine</strong> — the <strong>three-way diff</strong>: refresh prior State via <code>Provider::read_resource</code>, compare (a) prior, (b) refreshed reality, (c) desired config, call <code>Provider::plan_resource</code> for computed/<code>requires_replace</code>, and emit <code>ResourceChange{action,before,after,requires_replace}</code>. Action rule: NoOp if all agree; Update if non-<code>force_new</code> attrs differ; Replace if any <code>force_new</code> attr differs (ordered by <code>create_before_destroy</code>); Create if no prior; Delete if in State but absent from config. Propagates <code>Unknown</code> top-down; renders human-readable plan with Sensitive redaction. Invariant: <strong>plan is byte-identical given identical config+vars+prior+provider responses</strong>. Built Phase 7.</li>
+<li><strong>Apply executor</strong> — walks the graph at <code>-parallelism</code>, calls <code>Provider::apply_resource</code>, resolves <code>Unknown</code>s in dependency order, and writes State <strong>incrementally after each instance</strong>. Invariant: <strong>partial failure leaves a valid, partially-advanced State</strong> (failed/interrupted instances marked Tainted/Deposed, dependents deferred), and apply is <strong>idempotent</strong> — a fresh plan against the new State is all-NoOp when reality is unchanged. Built Phase 8; CBD/cancel hardening Phase 11.</li>
+</ul>
+<p><code>refresh</code>, <code>destroy</code>, <code>import</code>, and <code>-target</code> are thin operations over these components (Phase 10).</p>
+<h3 id="sec-3-5">3.5 iac-graph — dependency graph engine</h3>
+<p>Generic <code>Graph&lt;N&gt;</code> over node payload; edges directed dependency → dependent. In: nodes + <code>add_edge</code>. Out: a <code>WalkResult{diagnostics, visited}</code>. <code>detect_cycles()</code> runs Tarjan SCC (returns the offending node lists), <code>transitive_reduction()</code> drops redundant edges for a minimal walk, <code>walk(parallelism, visit)</code> performs the <strong>reverse-topological</strong> traversal (dependencies before dependents on apply; reversed on destroy). Invariants: <strong>cycles are a hard error before any walk</strong>; <strong>a node&#39;s error defers its dependents and is aggregated, never panicked</strong> — independent subgraphs continue. Pure graph algorithms, no domain knowledge of resources/providers. Built Phase 4.</p>
+<h3 id="sec-3-6">3.6 iac-state + StateBackend — durable reality</h3>
+<p>Holds desired-vs-actual reality across runs and is <strong>the only durable artifact</strong>. <code>State{version, serial, lineage, resources: Vec&lt;ResourceStateBucket&gt;, outputs}</code>; each <code>ResourceInstance</code> carries <code>attributes: Value</code>, <code>schema_version</code>, <code>dependencies</code>, and <code>status</code> (Ready/Tainted/Deposed). <code>StateBackend</code> trait: <code>lock/unlock</code> (advisory <code>StateLock</code> with <code>LockInfo</code>), <code>read</code>, <code>write</code>. In: a <code>State</code> to persist or a lock request. Out: <code>State</code> or <code>BackendError</code>. Invariants: <strong>single-writer</strong> (a <code>write</code> requires the held lock); <strong>atomic write</strong> = temp file + <code>fsync</code> + <code>rename</code>, with <code>.backup</code> of the prior serial; <strong>serial increments monotonically</strong>; <strong><code>lineage</code> (a <code>Uuid</code>) detects a wrong/forked state file</strong>; a crash mid-write leaves the old or new file, <strong>never torn</strong>. Local backend ships now; remote is a stub. State schema upgrade/migration bridges <code>version</code>. Built Phase 5; lock heartbeat/force-unlock Phase 11.</p>
+<h3 id="sec-3-7">3.7 iac-provider + plugin RPC — the provider boundary</h3>
+<p>Defines the <code>Provider</code> trait and the out-of-process plugin protocol; the engine <strong>orchestrates</strong> providers, it is not a cloud (NON-GOAL). <code>ProviderSchema{provider, resources, data_sources}</code> describes each resource&#39;s <code>Attribute</code>s (<code>required/optional/computed/sensitive/force_new</code>) and <code>NestedBlock</code>s. CRUD surface: <code>configure</code>, <code>validate_resource</code>, <code>read_resource</code> (refresh), <code>plan_resource</code> (→ <code>PlannedChange{planned, requires_replace}</code>, <code>Unknown</code> for computed), <code>apply_resource</code>, <code>import_resource</code>. Transport: launch provider as a <strong>child process</strong>, perform a version <strong>handshake</strong>, then exchange <strong>framed protobuf-ish messages</strong> for schema negotiation + CRUD; an installer/registry resolves/pins provider binaries. Invariant: <strong>provider responses are untrusted</strong> (across the TRUST boundary) — every response is type-checked against the negotiated schema and <code>force_new</code>/computed claims are validated, never blindly persisted. A built-in reference provider (&quot;null&quot;/&quot;local&quot;) backs tests without external infra. Built Phase 6; timeouts/retries Phase 11.</p>
+<h3 id="sec-3-8">3.8 The provider process — real infrastructure</h3>
+<p>A separate executable (child of <code>iac</code>) that actually performs <code>read/plan/apply/import</code> against real APIs (AWS/GCP/etc.). Lives entirely <strong>outside the trust boundary and outside this codebase</strong> (NON-GOAL: we do not implement any cloud). It crashes, times out, returns malformed or eventually-consistent data — all of which <code>iac-provider</code> must contain. The Walker&#39;s <code>-parallelism</code> bounds how many such processes run CRUD concurrently; each is single-purpose per RPC and stateless between calls (all durable truth lives in <code>iac-state</code>). Exercised end-to-end via the reference provider from Phase 6 onward and in the Phase 12 conformance/idempotency gate.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Config Language, Value Lattice, and Plan</h2>
+<p>The domain model is the contract every later phase compiles against: tokens → AST (<code>iac-hcl</code>) → <code>Value</code>/<code>Type</code> lattice (<code>iac-eval</code>) → dependency graph (<code>iac-graph</code>) → the three-way diff producing <code>ResourceChange</code>/<code>Action</code> (<code>iac-core</code>). This section pins lexical grammar, configuration grammar (EBNF), block schemas, the value lattice, conversion/unification, the diff decision table, one end-to-end worked example, the malformed-input → <code>Diagnostic</code> catalogue, and a plan→apply sequence diagram.</p>
+<h3 id="sec-8-1">8.1 Lexical model — tokens</h3>
+<p><code>iac-hcl</code> <code>Lexer</code> emits a token stream with byte-offset <code>Span</code> (start, len, line, col) on every token; never panics, emits <code>Diagnostic{severity:Error}</code> on illegal bytes and resyncs.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Token class</th>
+<th>Lexeme rule</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Ident</code></td>
+<td><code>[A-Za-z_][A-Za-z0-9_-]*</code></td>
+<td>block types, attr names, traversal leafs; <code>-</code> allowed mid-ident (HCL2)</td>
+</tr>
+<tr>
+<td><code>Number</code></td>
+<td><code>[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?</code></td>
+<td>parsed to <code>Decimal</code> (exact base-10; no binary float drift in plans)</td>
+</tr>
+<tr>
+<td><code>QuotedStr</code></td>
+<td><code>&quot;</code> … <code>&quot;</code> with <code>${</code>/<code>%{</code> interp, <code>\n \t \&quot; \\ \uXXXX</code> escapes</td>
+<td>becomes <code>Expression::Template</code> if it contains interp, else <code>Str</code></td>
+</tr>
+<tr>
+<td><code>Heredoc</code></td>
+<td><code>&lt;&lt;TAG\n…\nTAG</code> and <code>&lt;&lt;-TAG</code> (indent-stripped)</td>
+<td>body is template-scanned; closing TAG must be alone on its line</td>
+</tr>
+<tr>
+<td><code>Interp</code> open/close</td>
+<td><code>${</code> <code>}</code> (value), <code>%{</code> <code>}</code> (directive: <code>if</code>/<code>for</code>/<code>endif</code>/<code>endfor</code>)</td>
+<td>nesting tracked by a brace-depth stack in the lexer</td>
+</tr>
+<tr>
+<td>Operators</td>
+<td><code>== != &lt; &lt;= &gt; &gt;= &amp;&amp; || ! + - * / % ?: ...</code></td>
+<td><code>...</code> is the splat/expand-final marker</td>
+</tr>
+<tr>
+<td>Punctuation</td>
+<td><code>{ } [ ] ( ) , . : = =&gt;</code></td>
+<td><code>=&gt;</code> only inside object literals</td>
+</tr>
+<tr>
+<td>Comments</td>
+<td><code># …</code>, <code>// …</code> (line), <code>/* … */</code> (block)</td>
+<td>attached as trivia; dropped from AST, retained for <code>fmt</code></td>
+</tr>
+</tbody></table></div>
+<p>Whitespace/newlines are insignificant except: newline terminates a single-line attribute; closing heredoc TAG must own its line. <code>LegacyIndex</code> (<code>foo.0</code>) tokenizes as <code>Ident &quot;.&quot; Number</code> and is folded to <code>Traversal::LegacyIndex(u64)</code> by the parser.</p>
+<h3 id="sec-8-2">8.2 Configuration grammar (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>config-file  = body ;
+body         = { attribute | block } ;
+block        = IDENT { label } &quot;{&quot; body &quot;}&quot; ;
+label        = IDENT | STRING ;
+attribute    = IDENT &quot;=&quot; expr NEWLINE ;
+
+expr         = conditional ;
+conditional  = logic_or [ &quot;?&quot; expr &quot;:&quot; expr ] ;
+logic_or     = logic_and { &quot;||&quot; logic_and } ;
+logic_and    = equality  { &quot;&amp;&amp;&quot; equality } ;
+equality     = compare   { ( &quot;==&quot; | &quot;!=&quot; ) compare } ;
+compare      = additive  { ( &quot;&lt;&quot; | &quot;&lt;=&quot; | &quot;&gt;&quot; | &quot;&gt;=&quot; ) additive } ;
+additive     = multiply  { ( &quot;+&quot; | &quot;-&quot; ) multiply } ;
+multiply     = unary     { ( &quot;*&quot; | &quot;/&quot; | &quot;%&quot; ) unary } ;
+unary        = [ &quot;!&quot; | &quot;-&quot; ] postfix ;
+postfix      = primary { index | getattr | splat } ;
+index        = &quot;[&quot; expr &quot;]&quot; ;
+getattr      = &quot;.&quot; IDENT | &quot;.&quot; NUMBER ;          (* NUMBER -&gt; LegacyIndex *)
+splat        = &quot;.&quot; &quot;*&quot; { getattr | index } ;     (* attr.*.id *)
+
+primary      = literal | tuple | object | template | scope_traversal
+             | func_call | for_expr | &quot;(&quot; expr &quot;)&quot; ;
+literal      = &quot;null&quot; | &quot;true&quot; | &quot;false&quot; | NUMBER | STRING ;
+tuple        = &quot;[&quot; [ expr { &quot;,&quot; expr } [ &quot;,&quot; ] ] &quot;]&quot; ;
+object       = &quot;{&quot; [ objelem { ( &quot;,&quot; | NEWLINE ) objelem } ] &quot;}&quot; ;
+objelem      = ( IDENT | &quot;(&quot; expr &quot;)&quot; | STRING ) ( &quot;=&quot; | &quot;:&quot; ) expr ;
+template     = QUOTED_WITH_INTERP | HEREDOC ;     (* -&gt; Expression::Template *)
+scope_traversal = IDENT { getattr | index } ;     (* -&gt; Variable | ScopeTraversal *)
+func_call    = IDENT &quot;(&quot; [ expr { &quot;,&quot; expr } [ &quot;,&quot; ] ] [ &quot;...&quot; ] &quot;)&quot; ;  (* &quot;...&quot; -&gt; expand_final *)
+for_expr     = &quot;[&quot; &quot;for&quot; IDENT [ &quot;,&quot; IDENT ] &quot;in&quot; expr &quot;:&quot; expr [ &quot;if&quot; expr ] &quot;]&quot;   (* tuple/list *)
+             | &quot;{&quot; &quot;for&quot; IDENT [ &quot;,&quot; IDENT ] &quot;in&quot; expr &quot;:&quot; expr &quot;=&gt;&quot; expr [ &quot;...&quot; ] [ &quot;if&quot; expr ] &quot;}&quot; ; (* object *)</code></pre>
+<p>Parser is recursive-descent with the precedence ladder above (Pratt-style for binary ops). A bare <code>IDENT</code> with no following <code>getattr</code>/<code>index</code> → <code>Expression::Variable</code>; with a traversal tail → <code>Expression::ScopeTraversal(Vec&lt;Traversal&gt;)</code>. Dynamic blocks are surface sugar: <code>dynamic &quot;ingress&quot; { for_each = … content { … } }</code> parses as an ordinary <code>Block</code> ty=<code>dynamic</code>, expanded in Phase 3.</p>
+<h3 id="sec-8-3">8.3 Block schemas (top-level)</h3>
+<p>Top-level <code>Block</code>s recognized by <code>iac-core</code>&#39;s loader; arity = label count.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Block <code>ty</code></th>
+<th>Labels</th>
+<th>Body shape</th>
+<th>Maps to</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>resource</code></td>
+<td>2 (<code>&lt;type&gt;</code> <code>&lt;name&gt;</code>)</td>
+<td>provider attrs + nested blocks; meta: <code>count</code>, <code>for_each</code>, <code>depends_on</code>, <code>lifecycle{ create_before_destroy, prevent_destroy, ignore_changes }</code>, <code>provider</code></td>
+<td>managed <code>ResourceAddress</code> (mode <code>Managed</code>)</td>
+</tr>
+<tr>
+<td><code>data</code></td>
+<td>2 (<code>&lt;type&gt;</code> <code>&lt;name&gt;</code>)</td>
+<td>provider attrs; meta: <code>count</code>, <code>for_each</code>, <code>depends_on</code>, <code>provider</code></td>
+<td><code>ResourceAddress</code> (mode <code>Data</code>); planned as <code>Read</code></td>
+</tr>
+<tr>
+<td><code>provider</code></td>
+<td>1 (<code>&lt;name&gt;</code>)</td>
+<td>provider config attrs (validated by <code>Provider::configure</code>)</td>
+<td><code>ProviderAddress</code></td>
+</tr>
+<tr>
+<td><code>variable</code></td>
+<td>1 (<code>&lt;name&gt;</code>)</td>
+<td><code>type</code>, <code>default</code>, <code>description</code>, <code>sensitive</code>, <code>nullable</code>, <code>validation{condition,error_message}</code></td>
+<td>input → <code>EvalContext.variables</code></td>
+</tr>
+<tr>
+<td><code>locals</code></td>
+<td>0</td>
+<td>arbitrary <code>name = expr</code></td>
+<td><code>EvalContext.locals</code> (lazy, memoized)</td>
+</tr>
+<tr>
+<td><code>output</code></td>
+<td>1 (<code>&lt;name&gt;</code>)</td>
+<td><code>value</code>, <code>description</code>, <code>sensitive</code>, <code>depends_on</code></td>
+<td><code>State.outputs</code> / <code>OutputChange</code></td>
+</tr>
+<tr>
+<td><code>module</code></td>
+<td>1 (<code>&lt;name&gt;</code>)</td>
+<td><code>source</code>, <code>version</code>, input attrs; meta: <code>count</code>, <code>for_each</code>, <code>providers</code>, <code>depends_on</code></td>
+<td>module instance; <code>ModulePath</code> prefix</td>
+</tr>
+<tr>
+<td><code>terraform</code></td>
+<td>0</td>
+<td><code>required_version</code>, <code>required_providers</code>, <code>backend</code></td>
+<td>engine config (not graph nodes)</td>
+</tr>
+</tbody></table></div>
+<p><code>count</code> and <code>for_each</code> are mutually exclusive on one block (else <code>Diagnostic</code> Error). Validation: required attrs present, no unknown attrs vs <code>ProviderSchema</code>, type-checkable via <code>convert</code>.</p>
+<h3 id="sec-8-4">8.4 Value lattice + Type system</h3>
+<p><code>Value</code> (<code>iac-eval</code>) is the cty-like dynamic value. Each <code>Value</code> has a <code>Type</code>; <code>Unknown(Type)</code> carries its type even when the concrete value is not yet known; <code>Sensitive(Box&lt;Value&gt;)</code> is a privacy mark that propagates through every operation.</p>
+<pre class="diagram"><code>Type lattice (⊑ = &quot;convertible-to&quot;, convert widens upward):
+
+                      Dynamic            (top: accepts/produces any; &quot;any&quot;)
+            ┌────────────┼─────────────┬───────────┐
+        Object{..}   Tuple[..]     Map(T)        Set(T)/List(T)
+            │            │            │              │
+          String  ◄──  Number  ◄──  Bool          (elements recurse)
+            │
+         (leaf)
+
+Mark lattice (orthogonal):   concrete ⊑ Unknown(T)        (knownness)
+                             plain    ⊑ Sensitive(plain)  (sensitivity, monotone)</code></pre>
+<p>Rules:</p>
+<ul>
+<li><strong>Knownness</strong>: <code>Unknown(T)</code> is the join of all concrete values of type <code>T</code>. <code>Unknown != concrete</code> is <em>always</em> <code>Unknown(Bool)</code> (never <code>false</code>) — Unknown never compares equal to a known value (KEY FACT).</li>
+<li><strong>Sensitivity</strong>: monotone — any operation touching a <code>Sensitive</code> input yields a <code>Sensitive</code> output; redacted in plan render/logs as <code>(sensitive value)</code>. Removing the mark requires explicit <code>nonsensitive()</code>.</li>
+<li><strong>Ordering for determinism</strong>: <code>Set</code>/<code>Map</code>/<code>Object</code> use <code>BTreeSet</code>/<code>BTreeMap</code> ⇒ sorted iteration ⇒ byte-identical plans (DETERMINISM invariant).</li>
+</ul>
+<p><code>convert(v, to)</code> — cty conversion (subset shown):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>from \ to</th>
+<th>Bool</th>
+<th>Number</th>
+<th>String</th>
+<th>List(T)</th>
+<th>Set(T)</th>
+<th>Map(T)</th>
+<th>Object{..}</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Bool</td>
+<td>id</td>
+<td>err</td>
+<td><code>&quot;true&quot;</code>/<code>&quot;false&quot;</code></td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+</tr>
+<tr>
+<td>Number</td>
+<td>err</td>
+<td>id</td>
+<td>decimal str</td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+</tr>
+<tr>
+<td>String</td>
+<td><code>&quot;true&quot;</code>/<code>&quot;false&quot;</code>→Bool else err</td>
+<td>parse Decimal else err</td>
+<td>id</td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+</tr>
+<tr>
+<td>List(A)</td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+<td>elem-convert A→T</td>
+<td>dedup→Set(T)</td>
+<td>err</td>
+<td>err</td>
+</tr>
+<tr>
+<td>Tuple[..]</td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+<td>unify→List</td>
+<td>unify→Set</td>
+<td>err</td>
+<td>by-position→Object</td>
+</tr>
+<tr>
+<td>Object{..}</td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+<td>err</td>
+<td>unify vals→Map(T)</td>
+<td>attr-convert (missing optional ok)</td>
+</tr>
+<tr>
+<td>Null</td>
+<td>→Null</td>
+<td>→Null</td>
+<td>→Null</td>
+<td>→Null</td>
+<td>→Null</td>
+<td>→Null</td>
+<td>→Null</td>
+</tr>
+<tr>
+<td>Unknown(A)</td>
+<td>Unknown(Bool)</td>
+<td>Unknown(Number)</td>
+<td>…</td>
+<td>propagates Unknown(target)</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+</tr>
+</tbody></table></div>
+<p><code>unify(types)</code> → least common <code>Type</code> (lattice join): all-equal→that type; numeric+string→String only if explicitly forced (else <code>None</code>); mixed structurals→<code>Dynamic</code>; empty→<code>Dynamic</code>. Used for tuple→list/set element typing and conditional-branch result typing. <code>convert</code> failure → <code>EvalError::TypeMismatch{ from, to, span }</code> → <code>Diagnostic</code>.</p>
+<h3 id="sec-8-5">8.5 The three-way diff + Action computation</h3>
+<p>A plan diffs three inputs per resource instance: <strong>P</strong> = prior <code>State</code> value, <strong>R</strong> = refreshed reality (<code>Provider::read_resource(prior)</code>), <strong>C</strong> = desired config (evaluated <code>Value</code>, possibly <code>Unknown</code>). Drift = <code>P ≠ R</code>. The provider&#39;s <code>plan_resource(prior=R, proposed=C)</code> returns <code>PlannedChange{ planned, requires_replace }</code>; <code>iac-core</code> computes the <code>Action</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>In prior?</th>
+<th>In config?</th>
+<th>R vs C</th>
+<th>force_new attr changed?</th>
+<th>→ <code>Action</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>no</td>
+<td>yes</td>
+<td>—</td>
+<td>—</td>
+<td><code>Create</code></td>
+</tr>
+<tr>
+<td>yes</td>
+<td>no</td>
+<td>—</td>
+<td>—</td>
+<td><code>Delete</code></td>
+</tr>
+<tr>
+<td>yes (data)</td>
+<td>yes</td>
+<td>—</td>
+<td>—</td>
+<td><code>Read</code> (data sources always re-read)</td>
+</tr>
+<tr>
+<td>yes</td>
+<td>yes</td>
+<td>R == C</td>
+<td>—</td>
+<td><code>NoOp</code></td>
+</tr>
+<tr>
+<td>yes</td>
+<td>yes</td>
+<td>R ≠ C</td>
+<td>no</td>
+<td><code>Update</code></td>
+</tr>
+<tr>
+<td>yes</td>
+<td>yes</td>
+<td>R ≠ C</td>
+<td>yes</td>
+<td><code>Replace{ create_before_destroy }</code></td>
+</tr>
+<tr>
+<td>yes</td>
+<td>yes</td>
+<td>drift <code>P≠R</code>, C==R</td>
+<td>—</td>
+<td><code>NoOp</code> (state reconciled to R; recorded)</td>
+</tr>
+<tr>
+<td>yes</td>
+<td>yes</td>
+<td>drift <code>P≠R</code>, C≠R</td>
+<td>per-attr</td>
+<td><code>Update</code>/<code>Replace</code> as above, diff vs <strong>R</strong></td>
+</tr>
+</tbody></table></div>
+<p>Rules: comparison is against <strong>refreshed reality R</strong>, not stale prior P, so drift is healed. <code>Replace</code> ordering: <code>create_before_destroy=true</code> → new instance created, dependents re-pointed, old <code>Deposed(DeposedKey)</code> then destroyed; <code>false</code> → destroy-then-create (default). Any operand <code>Unknown</code> ⇒ changed attrs that are Unknown render <code>(known after apply)</code> and the instance is <code>applyable</code> but not fully diffable until apply resolves them top-down. <code>lifecycle.prevent_destroy=true</code> + <code>Delete</code>/<code>Replace</code> ⇒ <code>Diagnostic</code> Error, plan rejected. <code>ignore_changes</code> masks listed attrs from the diff.</p>
+<h3 id="sec-8-6">8.6 Worked example: variable + two resources, B references A</h3>
+<p>Config (<code>main.iac</code>):</p>
+<pre class="code language-hcl" data-lang="hcl"><code>variable &quot;name&quot; { type = string  default = &quot;web&quot; }
+
+resource &quot;null_thing&quot; &quot;a&quot; {
+  label = var.name                 # A.id is computed
+}
+
+resource &quot;null_thing&quot; &quot;b&quot; {
+  label   = &quot;child-of-${null_thing.a.id}&quot;   # references A.id (Unknown at plan)
+  upstream = null_thing.a.id
+}</code></pre>
+<p><strong>Tokens</strong> (excerpt for B.label): <code>Ident(&quot;resource&quot;) QuotedStr(&quot;null_thing&quot;) QuotedStr(&quot;b&quot;) {  Ident(&quot;label&quot;) = QuotedStr-with-interp[ Str(&quot;child-of-&quot;) ${ Ident(&quot;null_thing&quot;) . id-traversal } ] …</code></p>
+<p><strong>AST</strong> (B.label): <code>Attribute{ name:&quot;label&quot;, expr: Template([ Lit(Str &quot;child-of-&quot;), ScopeTraversal([Attr&quot;null_thing&quot;,Attr&quot;a&quot;,Attr&quot;id&quot;]) ]) }</code>. <code>upstream</code> expr = <code>ScopeTraversal([Attr&quot;null_thing&quot;,Attr&quot;a&quot;,Attr&quot;id&quot;])</code>.</p>
+<p><strong>Evaluation</strong> (<code>var.name=&quot;web&quot;</code>; provider marks <code>id</code> <code>computed</code>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Address</th>
+<th>attr</th>
+<th>evaluated <code>Value</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>null_thing.a</code></td>
+<td>label</td>
+<td><code>Str(&quot;web&quot;)</code></td>
+</tr>
+<tr>
+<td><code>null_thing.a</code></td>
+<td>id</td>
+<td><code>Unknown(String)</code> (computed)</td>
+</tr>
+<tr>
+<td><code>null_thing.b</code></td>
+<td>label</td>
+<td><code>Unknown(String)</code> (template touches Unknown ⇒ Unknown)</td>
+</tr>
+<tr>
+<td><code>null_thing.b</code></td>
+<td>upstream</td>
+<td><code>Unknown(String)</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Reference extraction → edges</strong> (<code>iac-graph</code>): <code>b → a</code> (B references <code>null_thing.a.id</code>), and both <code>a,b → var.name</code> (resolved at eval; not a graph node). DAG: <code>a</code> then <code>b</code>. Reverse-topo walk order on apply: <code>a</code>, then <code>b</code>.</p>
+<p><strong>Resulting Plan</strong>:</p>
+<pre class="diagram"><code>  + null_thing.a
+      label = &quot;web&quot;
+      id    = (known after apply)
+
+  + null_thing.b
+      label    = (known after apply)        # &quot;child-of-${a.id}&quot;, a.id unknown
+      upstream = (known after apply)
+
+Plan: 2 to add, 0 to change, 0 to destroy.   applyable = true</code></pre>
+<p><code>ResourceChange{ address: null_thing.a, action: Create, before: Null, after: Object{label:Str&quot;web&quot;, id:Unknown(String)} }</code>; likewise B. Apply resolves <code>a.id</code> first (provider returns e.g. <code>&quot;a-7f3&quot;</code>), then re-evaluates B&#39;s template to <code>&quot;child-of-a-7f3&quot;</code> before <code>apply_resource(b)</code>.</p>
+<h3 id="sec-8-7">8.7 Malformed input → Diagnostic catalogue</h3>
+<p>Every failure path yields a <code>Diagnostic{severity, summary, detail, span}</code>; the engine emits <em>all</em> collectable diagnostics per pass (not fail-fast), then aborts the affected phase.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Detected in</th>
+<th><code>summary</code></th>
+<th>Detail / handling</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Cyclic reference <code>a→b→a</code></td>
+<td><code>iac-graph</code> <code>detect_cycles</code></td>
+<td>&quot;Cycle in resource dependencies&quot;</td>
+<td>Tarjan SCC lists the cycle members; plan rejected</td>
+</tr>
+<tr>
+<td>Unknown function <code>frobnicate(x)</code></td>
+<td><code>iac-eval</code> registry lookup</td>
+<td>&quot;Call to unknown function&quot;</td>
+<td>suggest nearest by edit-distance; <code>EvalError::NoSuchFunction</code></td>
+</tr>
+<tr>
+<td>Type mismatch <code>count = &quot;x&quot;</code></td>
+<td><code>iac-eval</code> <code>convert</code></td>
+<td>&quot;Invalid value for input&quot;</td>
+<td><code>from=String, to=Number</code>; span on the expr</td>
+</tr>
+<tr>
+<td>Dangling traversal <code>var.nope</code></td>
+<td><code>iac-eval</code> scope resolution</td>
+<td>&quot;Reference to undeclared variable&quot;</td>
+<td>lists in-scope names; <code>EvalError::UnknownSymbol</code></td>
+</tr>
+<tr>
+<td><code>force_new</code> attr changed</td>
+<td>Phase 7 diff</td>
+<td>&quot;Resource must be replaced&quot;</td>
+<td>names triggering attr(s) from <code>PlannedChange.requires_replace</code>; Action=<code>Replace</code></td>
+</tr>
+<tr>
+<td>Drift detected</td>
+<td>Phase 7 refresh</td>
+<td>&quot;Objects have changed outside of …&quot;</td>
+<td>shows <code>P≠R</code> per attr; reconciles state to R</td>
+</tr>
+<tr>
+<td><code>count</code>+<code>for_each</code> both set</td>
+<td>loader</td>
+<td>&quot;count and for_each are mutually exclusive&quot;</td>
+<td>one block, two meta-args</td>
+</tr>
+<tr>
+<td><code>prevent_destroy</code> + Delete</td>
+<td>Phase 7 diff</td>
+<td>&quot;Instance cannot be destroyed&quot;</td>
+<td>plan rejected with the lifecycle span</td>
+</tr>
+<tr>
+<td>Parse error (unclosed <code>{</code>)</td>
+<td><code>iac-hcl</code> parser</td>
+<td>&quot;Unterminated block&quot;</td>
+<td>span at open brace; parser resyncs to next top-level block</td>
+</tr>
+<tr>
+<td>Heredoc TAG mismatch</td>
+<td><code>iac-hcl</code> lexer</td>
+<td>&quot;Unterminated heredoc&quot;</td>
+<td>span at <code>&lt;&lt;TAG</code>; expected closing TAG</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-8">8.8 Sequence: plan then apply</h3>
+<pre class="diagram"><code> Operator    iac-cli   iac-core      iac-eval   iac-graph   iac-state   iac-provider
+    │  plan     │          │             │           │           │            │
+    ├──────────►│  load    │             │           │           │            │
+    │           ├─parse───►│ (iac-hcl AST)│          │           │            │
+    │           │          ├─evaluate────►│          │           │            │
+    │           │          │◄─values+Unknown─────────│           │            │
+    │           │          ├─build graph──────────────►│         │            │
+    │           │          │◄─DAG (cycle-checked)──────│         │            │
+    │           │          ├─read prior State──────────────────►│            │
+    │           │          │◄─prior (P)────────────────────────│            │
+    │           │          ├─refresh: read_resource──────────────────────────►│
+    │           │          │◄─reality (R)───────────────────────────────────│
+    │           │          ├─plan_resource(R,C)──────────────────────────────►│
+    │           │          │◄─PlannedChange(planned, requires_replace)───────│
+    │           │  Plan    │  (three-way diff → ResourceChange/Action)        │
+    │◄──render──┤◄─────────┤                                                  │
+    │  apply    │          │                                                  │
+    ├──────────►│  lock────────────────────────────────────────►│            │
+    │           │          ├─walk reverse-topo, ≤ -parallelism                │
+    │           │          ├─apply_resource (per node, deps first)───────────►│
+    │           │          │◄─new Value (Unknowns resolved)──────────────────│
+    │           │          ├─write State incrementally (atomic+serial++)─────►│
+    │           │          │  … repeat per node; defer dependents on error    │
+    │           │  unlock──────────────────────────────────────►│            │
+    │◄──summary─┤                                                             │</code></pre>
+<p>Plan is read-only (no mutation, no state write — only refresh reads). Apply holds the <code>StateLock</code> for its whole duration, walks dependencies-before-dependents, resolves <code>Unknown</code>s top-down, and writes <code>State</code> incrementally (atomic temp+fsync+rename, <code>.backup</code> of prior serial, <code>serial++</code>) so a crash leaves old-or-valid state — never torn (STATE SAFETY invariant). <code>apply(plan)</code> then a fresh <code>plan</code> against the new state ⇒ all-<code>NoOp</code> (IDEMPOTENCY invariant).</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

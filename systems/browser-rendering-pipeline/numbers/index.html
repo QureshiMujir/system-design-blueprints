@@ -1,0 +1,358 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Browser Rendering Pipeline — Numbers · Engineering Blueprints</title><meta name="description" content="Browser Rendering Pipeline, constraints, perf targets, capacity. Build, from scratch in Rust, a per-frame browser rendering pipeline: styled DOM + viewport → composited frames through a staged document lifecycle (Style → Box/Render tree → Layout/FragmentTree →…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/web-browsers-collaboration/">Web, Browsers &amp; Collaboration</a> </li><li> <a href="/system-design-blueprints/systems/browser-rendering-pipeline/">Browser Rendering Pipeline</a> </li><li> <span aria-current="page">Numbers</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:255"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/web-browsers-collaboration/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Web, Browsers &amp; Collaboration</span></a> </p> <h1>Browser Rendering Pipeline</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~36 weeks</li> <li>3,031 lines</li> <li>blueprint #260</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/browser-rendering-pipeline/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/" aria-current="page" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Browser Rendering Pipeline — Numbers">  <p class="note warn"><strong>Design targets, not measurements.</strong> Latency and throughput rows are the budgets the blueprint sets for its own benches; memory and capacity rows are arithmetic from stated inputs, formula shown. A build's <a href="/system-design-blueprints/systems/browser-rendering-pipeline/build/">status</a> says what has actually been measured.</p> <section class="prose"><h2 id="sec-4">4. System Constraints</h2>
+<p>Hard budgets/capacities/invariants, per-frame steady-state unless noted. Violations degrade gracefully (<a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4-4">§4.4</a>), never panic (a stage never panics).</p>
+<h3 id="sec-4-1">4.1 Frame Budget Decomposition</h3>
+<p>Budget = <code>1 / vsync</code>; <code>FrameScheduler.vsync</code> interval gates <code>update_lifecycle</code>. Main stages (rp-style/rp-boxtree/rp-paint) must finish early enough that <code>Commit</code> + compositor work fits the same frame. Split @60Hz (16.6ms): main ≤10ms, Commit ≤0.5ms, compositor ≤6ms; @120Hz (8.3ms): main ≤5ms, Commit ≤0.3ms, compositor ≤3ms (per-stage rows below).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Crate</th>
+<th>Flag gate</th>
+<th>Budget @60Hz</th>
+<th>Budget @120Hz</th>
+<th>Thread</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Style (Cascade-&gt;ComputedStyle)</td>
+<td>rp-style</td>
+<td>NEEDS_STYLE</td>
+<td>3.0ms</td>
+<td>1.5ms</td>
+<td>main</td>
+</tr>
+<tr>
+<td>Layout (-&gt;FragmentTree)</td>
+<td>rp-boxtree</td>
+<td>NEEDS_LAYOUT</td>
+<td>4.0ms</td>
+<td>2.0ms</td>
+<td>main</td>
+</tr>
+<tr>
+<td>Prepaint (PropertyTrees)</td>
+<td>rp-paint</td>
+<td>NEEDS_PAINT</td>
+<td>1.0ms</td>
+<td>0.5ms</td>
+<td>main</td>
+</tr>
+<tr>
+<td>Paint (DisplayList)</td>
+<td>rp-paint</td>
+<td>NEEDS_PAINT</td>
+<td>2.0ms</td>
+<td>1.0ms</td>
+<td>main</td>
+</tr>
+<tr>
+<td>Commit (snapshot)</td>
+<td>rp-pipeline</td>
+<td>pending_commit</td>
+<td>0.5ms</td>
+<td>0.3ms</td>
+<td>main-&gt;compositor</td>
+</tr>
+<tr>
+<td>Layerize+Raster+Assemble</td>
+<td>rp-composite</td>
+<td>NEEDS_COMPOSITE</td>
+<td>6.0ms</td>
+<td>3.0ms</td>
+<td>compositor + N workers</td>
+</tr>
+<tr>
+<td><strong>Compositor-only</strong> (scroll/anim)</td>
+<td>rp-composite</td>
+<td>NEEDS_COMPOSITE only</td>
+<td><strong>&lt; 2.0ms</strong></td>
+<td><strong>&lt; 1.5ms</strong></td>
+<td>compositor (no main)</td>
+</tr>
+</tbody></table></div>
+<p>Compositor-only path re-applies a PropertyTree node (transform/scroll) to retained tiles — no Style/Layout/Paint, no <code>Commit</code> of new content. This is why it is jank-free.</p>
+<h3 id="sec-4-2">4.2 Memory &amp; Capacity Bounds</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Bound</th>
+<th>Cap / policy</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>FragmentTree</td>
+<td>O(boxes)</td>
+<td>depth &lt;= 512</td>
+<td>bounds layout recursion; DoS guard</td>
+</tr>
+<tr>
+<td>BoxTree depth</td>
+<td>O(nesting)</td>
+<td>depth &lt;= 512 -&gt; reject</td>
+<td>stack-overflow / pathological nesting</td>
+</tr>
+<tr>
+<td>DisplayList</td>
+<td>O(painted items)</td>
+<td>per-frame arena</td>
+<td>items culled by visual_rect before push</td>
+</tr>
+<tr>
+<td>PropertyTrees</td>
+<td>O(distinct states) &lt;&lt; boxes</td>
+<td>retained across frames</td>
+<td>shared PaintPropertyNode; node reuse</td>
+</tr>
+<tr>
+<td>Tile size</td>
+<td>256x256 px, 4 bpp</td>
+<td>fixed</td>
+<td>= 256KB/tile; raster granularity</td>
+</tr>
+<tr>
+<td>Tile pool</td>
+<td>bounded RAM</td>
+<td>ceiling 256MB (~1024 tiles)</td>
+<td>evict offscreen LRU when over cap</td>
+</tr>
+<tr>
+<td>Tile state</td>
+<td>Missing|Rastering|Ready</td>
+<td>offscreen -&gt; Missing on evict</td>
+<td>re-raster on demand (raster-on-demand)</td>
+</tr>
+<tr>
+<td>RasterTask queue</td>
+<td>bounded</td>
+<td>coalesce by (layer,tile); drop stale</td>
+<td>one task per dirty tile per frame</td>
+</tr>
+<tr>
+<td>raf_callbacks</td>
+<td>Vec, host-driven</td>
+<td>run-once per frame, then cleared</td>
+<td>no unbounded accumulation</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-4-3">4.3 Allocation &amp; Threading Invariants</h3>
+<ul>
+<li><strong>Steady-state composite alloc</strong> ZERO per-frame heap alloc on compositor-only path (tiles + PropertyTrees + LayerTree retained, mutated in place). <strong>Per-frame transient</strong> DisplayList + FragmentTree rebuilt only when their stage is dirty, reused (skipped) when clean. <strong>ComputedStyle</strong> Arc-shared via sharing cache, identical values dedup&#39;d not re-allocated.</li>
+<li><strong>Thread model</strong> 1 main (Style/Layout/Paint) + N raster workers (N = min(cores-1, raster queue depth)). <strong>Commit handoff</strong> single synchronized snapshot; compositor MUST NOT touch main state post-Commit → no data races (Rust ownership enforces). <strong>Property-tree sharing</strong> TransformTree applied to layers at Assemble without re-paint (decouples geometry from paint).</li>
+</ul>
+<h3 id="sec-4-4">4.4 Recovery &amp; Degradation</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Detection</th>
+<th>Response</th>
+<th>Never</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Stage exceeds budget</td>
+<td>stage timer &gt; budget</td>
+<td>finish frame; record overrun in trace</td>
+<td>partial/torn frame</td>
+</tr>
+<tr>
+<td>Frame overruns vsync</td>
+<td>elapsed &gt; interval at vsync</td>
+<td>drop frame; coalesce pending InvalidationFlags into next</td>
+<td>crash / queue backlog</td>
+</tr>
+<tr>
+<td>Burst of rAF / invalidations</td>
+<td>multiple dirties before next vsync</td>
+<td>coalesce -&gt; one lifecycle walk per vsync</td>
+<td>run lifecycle &gt; 1x/frame</td>
+</tr>
+<tr>
+<td>Tree depth &gt; 512</td>
+<td>construction check</td>
+<td>reject subtree, clamp, log</td>
+<td>unbounded recursion</td>
+</tr>
+<tr>
+<td>Tile pool over ceiling</td>
+<td>alloc vs 256MB cap</td>
+<td>evict offscreen LRU -&gt; Missing</td>
+<td>OOM</td>
+</tr>
+<tr>
+<td>Panic in any stage</td>
+<td>catch at stage boundary</td>
+<td>abort <em>that</em> frame, keep last good CompositorFrame on screen</td>
+<td>propagate panic / corrupt lifecycle</td>
+</tr>
+</tbody></table></div>
+<p>Invariant: invalidation only moves the lifecycle backward (dirties earlier stage); a frame only ever walks forward via <code>update_lifecycle</code>. A dropped frame leaves dirty bits set, so the next vsync re-runs exactly the still-dirty stages — no work lost, no double-work.</p>
+<hr>
+</section><section aria-labelledby="sec-perf"> <h2 id="sec-perf">Performance targets</h2> <div class="table-wrap"><table class="data"><caption class="sr-only">Performance targets</caption><thead><tr><th scope="col">ID</th><th scope="col">Metric</th><th scope="col">Target</th><th scope="col">Phase Gate</th></tr></thead><tbody><tr id="m-1"><td><a class="row-anchor" href="#m-1"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-1">M1</a></a></td><td>Full frame p95 @ 1080p, 1k boxes</td><td>≤ 16.6 ms</td><td>P13 (## 25): <code>frame_macro</code> bench</td></tr><tr id="m-2"><td><a class="row-anchor" href="#m-2"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-2">M2</a></a></td><td>Style stage p95 (cascade + sharing, 1k elements)</td><td>≤ 3.0 ms</td><td>P2 (## 14): <code>style_full</code> bench</td></tr><tr id="m-3"><td><a class="row-anchor" href="#m-3"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-3">M3</a></a></td><td>Layout stage p95 (block+inline FragmentTree, 1k boxes)</td><td>≤ 4.0 ms</td><td>P4 (## 16): <code>layout</code> bench</td></tr><tr id="m-4"><td><a class="row-anchor" href="#m-4"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-4">M4</a></a></td><td>Paint stage p95 (DisplayList gen, culling, 1k fragments)</td><td>≤ 3.0 ms</td><td>P7 (## 19): <code>paint</code> bench</td></tr><tr id="m-5"><td><a class="row-anchor" href="#m-5"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-5">M5</a></a></td><td>Prepaint stage p95 (PropertyTrees build, 1k fragments)</td><td>≤ 0.6 ms</td><td>P6 (## 18): <code>prepaint</code> bench</td></tr><tr id="m-6"><td><a class="row-anchor" href="#m-6"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-6">M6</a></a></td><td>Commit handoff p95 (snapshot build, Arc-clone)</td><td>≤ 0.5 ms</td><td>P10 (## 22): <code>commit_build_ms</code> counter</td></tr><tr id="m-7"><td><a class="row-anchor" href="#m-7"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-7">M7</a></a></td><td>Raster per tile p95 (256×256 RGBA via 169)</td><td>≤ 0.4 ms</td><td>P9 (## 21): <code>raster</code> bench</td></tr><tr id="m-8"><td><a class="row-anchor" href="#m-8"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-8">M8</a></a></td><td>Composite-only frame p95 (scroll/anim, NEEDS_COMPOSITE only)</td><td>≤ 2.0 ms</td><td>P10 (## 22): <code>scroll_bench</code></td></tr><tr id="m-9"><td><a class="row-anchor" href="#m-9"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-9">M9</a></a></td><td>Layerization p95 (CompositingReason + squashing, 1k chunks)</td><td>≤ 0.5 ms</td><td>P8 (## 20): <code>layerize</code> bench</td></tr><tr id="m-10"><td><a class="row-anchor" href="#m-10"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-10">M10</a></a></td><td>Incremental restyle p95 (1 dirty subtree, 100 nodes)</td><td>≤ 0.3 ms</td><td>P11 (## 23): <code>style_incr</code> bench</td></tr><tr id="m-11"><td><a class="row-anchor" href="#m-11"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-11">M11</a></a></td><td>Style-sharing hit rate (uniform sibling list, 1k elements)</td><td>≥ 70%</td><td>P2 (## 14): sharing-cache counter</td></tr><tr id="m-12"><td><a class="row-anchor" href="#m-12"><a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#m-12">M12</a></a></td><td>Tile cache hit rate (steady scroll, viewport-only dirtying)</td><td>≥ 90%</td><td>P9 (## 21): <code>tile_hits/(hits+misses)</code></td></tr></tbody></table></div> </section><section class="prose"><h2 id="sec-capacity">Back-of-Envelope Capacity Model</h2>
+<p>The numbers an expert computes before designing, each derived step-by-step from <a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4">§4</a> System Constraints (frame budget, tile size, caps). Formulas shown.</p>
+<ul>
+<li><strong>C1 — Frame budget floor.</strong> <code>1 / vsync = 1 / 60 Hz = 16.6 ms</code> (<a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4-1">§4.1</a>). At 120 Hz: <code>1/120 = 8.3 ms</code>. This is the total wall-clock all stages share.</li>
+<li><strong>C2 — Main-thread share.</strong> <a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4-1">§4.1</a> splits 16.6ms as main ≤10ms, Commit ≤0.5ms, compositor ≤6ms. Main budget = <code>10 ms = Style 3.0 + Layout 4.0 + Prepaint 1.0 + Paint 2.0</code> — the sum is the hard main ceiling; exceed it and Commit+compositor cannot also fit.</li>
+<li><strong>C3 — Bytes per tile.</strong> <code>256 × 256 px × 4 B/px (RGBA) = 262,144 B ≈ 256 KiB/tile</code> (<a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4-2">§4.2</a> tile size).</li>
+<li><strong>C4 — Tile pool capacity.</strong> <a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4-2">§4.2</a> pool ceiling 256 MB. <code>256 MB / 256 KiB = 1024 tiles</code> resident before LRU eviction (matches <a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4-2">§4.2</a> &quot;~1024 tiles&quot;). Threat Model raises the cap to <code>MAX_TILES=2048 ≈ 512 MB</code> for adversarial headroom.</li>
+<li><strong>C5 — Tiles to cover one viewport.</strong> 1080p = 1920×1080. <code>ceil(1920/256) × ceil(1080/256) = 8 × 5 = 40 tiles ≈ 10 MiB</code>. With the 1-tile prepaint skirt (Phase 9): <code>(8+2)×(5+2)=70 tiles ≈ 17.5 MiB</code> per full-viewport layer.</li>
+<li><strong>C6 — Viewport memory vs document length.</strong> Because paint culls to viewport and tiles evict by LRU (Scalability Analysis), an <em>infinite-scroll</em> page still costs only C5&#39;s ~17.5 MiB resident, <strong>independent of page height</strong> — the key constant.</li>
+<li><strong>C7 — How many composited layers fit memory.</strong> If each composited layer averages one viewport of tiles (C5 = 10 MiB), the 256 MB pool holds <code>256 / 10 ≈ 25</code> full-viewport layers; the <code>MAX_COMP_LAYERS=128</code> cap (Threat Model) assumes most layers are far smaller than a full viewport.</li>
+<li><strong>C8 — Raster throughput needed.</strong> To raster one fresh viewport (C5 = 40 tiles) inside the compositor&#39;s 6ms (<a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4-1">§4.1</a>): <code>6 ms / 40 = 150 µs/tile</code> required. Matches the <a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/blueprint/#sec-13-4">§13.4</a> stage budget (raster per-tile ≤0.5ms) with ~3× headroom → 40 tiles fit comfortably; this is why scroll prerasters only a 1-tile skirt, not the whole page.</li>
+<li><strong>C9 — Raster parallelism target.</strong> <a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4-3">§4.3</a>: <code>N raster workers = min(cores-1, queue depth)</code>. On 8 cores, N=7; 40 independent tiles / 7 workers ≈ 6 tiles/worker × 150µs ≈ 0.9ms ideal — well under the 6ms compositor slice (Performance Engineering X.6 reports ~3.4× at 4 workers, Amdahl-bound by the largest single tile).</li>
+<li><strong>C10 — Compositor-only frame cost.</strong> Scroll/anim re-applies property-tree nodes to retained tiles, no raster (<a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4-1">§4.1</a> compositor-only &lt; 2.0ms). With C5 tiles already <code>Ready</code>, cost = O(layers) transform application ≈ matrix-multiply per layer; for 64 layers this is microseconds, leaving ~90% of the 16.6ms idle (Performance Engineering X.2).</li>
+<li><strong>C11 — Style-sharing payoff.</strong> <a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/#sec-4-2">§4.2</a>/Performance X.6 target ≥70% sharing hit. On a 1000-<code>&lt;li&gt;</code> list, sharing turns 1000 cascades into ~1 unique <code>Arc&lt;ComputedStyle&gt;</code> + 999 pointer-eq hits → cascade work drops from O(n) to O(distinct styles); at 200k elem/s resolve (<a class="cite" href="/system-design-blueprints/systems/browser-rendering-pipeline/blueprint/#sec-13-4">§13.4</a>-class target) a 10k-node tree styles in ~50ms cold but ~ms warm.</li>
+<li><strong>C12 — DisplayList size bound.</strong> Paint culls to viewport; with ~50 visible fragments on a typical 1080p screen and <code>DisplayItem ≤ 64B</code> (Performance Engineering), a frame&#39;s <code>items</code> Vec is ~50×64B = ~3.2 KiB — trivially cache-resident, regardless of a 10k-node document (the culling constant, MM5).</li>
+</ul>
+<hr>
+</section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

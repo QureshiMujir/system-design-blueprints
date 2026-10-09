@@ -1,0 +1,356 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Event Loop — Numbers · Engineering Blueprints</title><meta name="description" content="Event Loop, constraints, perf targets, capacity. Event Loop (crate family elr-*, &#34;Event-Loop Runtime&#34;) is a production-grade asynchronous I/O runtime — the substrate between the operating system's poller and a user's async fn — in the lineage of…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <a href="/system-design-blueprints/systems/event-loop/">Event Loop</a> </li><li> <span aria-current="page">Numbers</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Event Loop</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux</li> <li>13 phases</li> <li>~17 weeks</li> <li>3,028 lines</li> <li>blueprint #189</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/event-loop/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/event-loop/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/event-loop/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/event-loop/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/event-loop/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/event-loop/numbers/" aria-current="page" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/event-loop/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/event-loop/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/event-loop/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/event-loop/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Event Loop — Numbers">  <p class="note warn"><strong>Design targets, not measurements.</strong> Latency and throughput rows are the budgets the blueprint sets for its own benches; memory and capacity rows are arithmetic from stated inputs, formula shown. A build's <a href="/system-design-blueprints/systems/event-loop/build/">status</a> says what has actually been measured.</p> <section class="prose"><h2 id="sec-4">4. System Constraints</h2>
+<p>Reference hardware for every gated number below: 8-core x86_64, Linux 6.1+, 16 GB RAM, kernel
+tuned for high-FD-count (<code>fs.nr_open=10000000</code>, <code>net.core.somaxconn=65535</code>, conntrack raised per
+row 18). The one defining property of this system: <strong>it must sustain order-of-a-million
+concurrent idle connections and hundreds-of-thousands of requests/sec on one host without an
+allocation on the steady-state hot path (<a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-10">P10</a>).</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Dimension</th>
+<th>Constraint</th>
+<th>Number</th>
+<th>Derivation / Source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>C1</td>
+<td>Max concurrent connections (fds), one host</td>
+<td>hard target</td>
+<td>1,000,000</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-3">M3</a> (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-31">§31</a>); RLIMIT_NOFILE ≥ 1,048,576</td>
+</tr>
+<tr>
+<td>C2</td>
+<td>Aggregate throughput, 8 cores, 1 KB msgs</td>
+<td>hard target</td>
+<td>≥ 600,000 req/s</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-2">M2</a> (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-31">§31</a>)</td>
+</tr>
+<tr>
+<td>C3</td>
+<td>Per-core throughput, 1 core, 1 KB msgs</td>
+<td>hard target</td>
+<td>≥ 100,000 req/s</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-1">M1</a> (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-31">§31</a>)</td>
+</tr>
+<tr>
+<td>C4</td>
+<td>Reactor turn p99, idle, 1M sources</td>
+<td>latency ceiling</td>
+<td>≤ 200 µs</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-6">M6</a> (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-31">§31</a>)</td>
+</tr>
+<tr>
+<td>C5</td>
+<td>Timer firing p99, 1M concurrent timers</td>
+<td>latency ceiling</td>
+<td>≤ 100 µs</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-5">M5</a> (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-31">§31</a>)</td>
+</tr>
+<tr>
+<td>C6</td>
+<td>Timer wheel base slot resolution</td>
+<td>fixed</td>
+<td>1 ms</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-7">ADR-07</a></td>
+</tr>
+<tr>
+<td>C7</td>
+<td><code>spawn</code> → first poll, p99</td>
+<td>latency ceiling</td>
+<td>≤ 1 µs</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-7">M7</a> (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-31">§31</a>); <a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-21">ADR-21</a></td>
+</tr>
+<tr>
+<td>C8</td>
+<td>TCP connect p99</td>
+<td>latency ceiling</td>
+<td>≤ 200 µs</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-4">M4</a> (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-31">§31</a>)</td>
+</tr>
+<tr>
+<td>C9</td>
+<td>Memory per idle connection</td>
+<td>derived ceiling</td>
+<td>≤ 9 KB</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-35">§35</a> #1</td>
+</tr>
+<tr>
+<td>C10</td>
+<td>RAM budget at 1M idle connections</td>
+<td>derived ceiling</td>
+<td>≤ 10 GB</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-35">§35</a> #1, #9</td>
+</tr>
+<tr>
+<td>C11</td>
+<td>Blocking-pool threads</td>
+<td>default / max</td>
+<td>n_cpu / 4×n_cpu</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-11">ADR-11</a>; <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-35">§35</a> #6</td>
+</tr>
+<tr>
+<td>C12</td>
+<td>Blocking-pool worst-case stack memory</td>
+<td>derived ceiling</td>
+<td>≤ 256 MB</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-35">§35</a> #6</td>
+</tr>
+<tr>
+<td>C13</td>
+<td>FD budget (kernel)</td>
+<td>tunable floor</td>
+<td><code>fs.nr_open</code> ≥ 10,000,000</td>
+<td>Graham 2013 (<a class="cite" href="/system-design-blueprints/systems/event-loop/study/#sec-5">§5</a>)</td>
+</tr>
+<tr>
+<td>C14</td>
+<td>Cold startup (<code>build()</code> → first accept)</td>
+<td>latency ceiling</td>
+<td>≤ 50 ms</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-12-4">§12.4</a></td>
+</tr>
+<tr>
+<td>C15</td>
+<td>Graceful shutdown window</td>
+<td>ceiling</td>
+<td>≤ 2 s soft / 10 s hard-kill</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-27">§27</a></td>
+</tr>
+<tr>
+<td>C16</td>
+<td>Crash-restart RTO</td>
+<td>availability target</td>
+<td>≤ 5 s</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#sec-25">§25</a>/<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-27">§27</a>, no persistent state</td>
+</tr>
+<tr>
+<td>C17</td>
+<td>CPU/NUMA assumption (Phase 0–11 baseline)</td>
+<td>fixed</td>
+<td>single-socket, 8-core, no NUMA</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-32">§32</a>; NUMA deferred <a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-18-8">§18.8</a></td>
+</tr>
+<tr>
+<td>C18</td>
+<td>Conntrack table headroom over C1</td>
+<td>operational tunable</td>
+<td>≥ 1,200,000 entries</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-35">§35</a> #10</td>
+</tr>
+<tr>
+<td>C19</td>
+<td>Storage amplification</td>
+<td>not applicable</td>
+<td>N/A — no persistent storage subsystem</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-1">§1</a> boundaries</td>
+</tr>
+<tr>
+<td>C20</td>
+<td>Upstream integration RTT assumption</td>
+<td>intra-DC only</td>
+<td>≤ 1 ms</td>
+<td><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-12">M12</a>–<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-14">M14</a> (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-31">§31</a>)</td>
+</tr>
+</tbody></table></div>
+<p>Every number above reappears unchanged in <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-35">§35</a> (Capacity Model) and <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-31">§31</a> (Performance Engineering);
+drift between this table and those sections is a terminology-lock defect (FM11, <a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#sec-26">§26</a>).</p>
+<hr>
+</section><section aria-labelledby="sec-31"> <h2 id="sec-31">Performance targets (§31)</h2> <div class="table-wrap"><table class="data"><caption class="sr-only">Performance targets</caption><thead><tr><th scope="col">ID</th><th scope="col">Metric</th><th scope="col">Target</th><th scope="col">Phase Gate</th></tr></thead><tbody><tr id="m-1"><td><a class="row-anchor" href="#m-1"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-1">M1</a></a></td><td>Echo throughput, single core, 1KB msgs, 1 client</td><td>≥ 100,000 req/s</td><td>Phase 6</td></tr><tr id="m-2"><td><a class="row-anchor" href="#m-2"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-2">M2</a></a></td><td>Echo throughput, 8 cores, 1KB msgs, 256 clients</td><td>≥ 600,000 req/s</td><td>Phase 6</td></tr><tr id="m-3"><td><a class="row-anchor" href="#m-3"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-3">M3</a></a></td><td>Concurrent idle TCP connections, single host</td><td>≥ 1,000,000</td><td>Phase 9</td></tr><tr id="m-4"><td><a class="row-anchor" href="#m-4"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-4">M4</a></a></td><td>TCP connect latency p99</td><td>≤ 200 µs</td><td>Phase 9</td></tr><tr id="m-5"><td><a class="row-anchor" href="#m-5"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-5">M5</a></a></td><td>Timer firing latency p99, 1M concurrent timers</td><td>≤ 100 µs</td><td>Phase 5</td></tr><tr id="m-6"><td><a class="row-anchor" href="#m-6"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-6">M6</a></a></td><td>Reactor turn latency p99, idle, 1M sources</td><td>≤ 200 µs</td><td>Phase 3</td></tr><tr id="m-7"><td><a class="row-anchor" href="#m-7"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-7">M7</a></a></td><td><code>spawn</code>-to-first-poll latency p99</td><td>≤ 1 µs</td><td>Phase 4</td></tr><tr id="m-8"><td><a class="row-anchor" href="#m-8"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-8">M8</a></a></td><td>Allocation count on the steady-state hot path (per echo round trip)</td><td>0</td><td>Phase 6</td></tr><tr id="m-9"><td><a class="row-anchor" href="#m-9"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-9">M9</a></a></td><td>24-hour soak: unhandled panics / RSS growth</td><td>0 panics / ≤ 5%</td><td>Phase 11</td></tr><tr id="m-10"><td><a class="row-anchor" href="#m-10"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-10">M10</a></a></td><td>30-day fuzz of SQE/CQE decoder, timer wheel, bounded MPSC</td><td>Pass (<code>Sealed</code> gate)</td><td>Phase 11</td></tr><tr id="m-11"><td><a class="row-anchor" href="#m-11"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-11">M11</a></a></td><td><code>io_uring</code> echo throughput, kernel 6.1+, 8 cores</td><td>≥ 1,200,000 req/s</td><td>Phase 8</td></tr><tr id="m-12"><td><a class="row-anchor" href="#m-12"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-12">M12</a></a></td><td>TLS handshake throughput vs. rank-50 project, 8 cores</td><td>≥ 5,000 handshakes/s</td><td>Phase 9</td></tr><tr id="m-13"><td><a class="row-anchor" href="#m-13"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-13">M13</a></a></td><td>HTTP/2 GET throughput vs. rank-64 project, 8 cores</td><td>≥ 200,000 req/s</td><td>Phase 9</td></tr><tr id="m-14"><td><a class="row-anchor" href="#m-14"><a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-14">M14</a></a></td><td>WebSocket message throughput vs. <a class="cite" href="/system-design-blueprints/systems/websocket-server/" title="WebSocket Server from Scratch">rank-81</a> project, 8 cores</td><td>≥ 800,000 msg/s</td><td>Phase 9</td></tr></tbody></table></div> </section><section class="prose"><h2 id="sec-35">35. Back-of-Envelope Capacity Model</h2>
+<p>Ten numbers, each derived step-by-step from <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-4">§4</a>&#39;s System Constraints, formula shown.</p>
+<ol>
+<li><strong>Memory per idle connection ≈ 8.85 KB.</strong> User-space: <code>Source</code> (~128B, Arc&#39;d) + <code>Header</code>
+(~64B, one cache line) + <code>TcpStream</code> (~256B incl. <code>OwnedHandle</code> + <code>PhantomData</code> + runtime
+handle pointer) ≈ 448B. Kernel-space: default socket buffers ~4KB rcv + ~4KB snd = 8KB
+(tunable down per the WhatsApp-writeup technique, <a class="cite" href="/system-design-blueprints/systems/event-loop/study/#sec-5">§5</a>). Total ≈ 448B + 8,192B ≈ 8.64KB; rounding
+for <code>HashMap</code> entry overhead (below, #9) brings it to ≈ 8.85KB. At C1 (1,000,000 connections):
+8.85KB × 1,000,000 ≈ <strong>8.85 GB</strong>, consistent with C10&#39;s ≤10GB budget on the 16GB reference host
+(C1, C9, C10).</li>
+<li><strong>Sustainable events/sec per core ≈ 75,000.</strong> From <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-2">M2</a> (600,000 req/s @ 8 cores) ÷ 8 cores =
+75,000 req/s/core (C2, C3). Assuming an average <code>epoll_wait</code> batch size of 64 events per call
+at this load: 75,000 ÷ 64 ≈ 1,172 <code>epoll_wait</code> calls/sec/core. At <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-6">M6</a>&#39;s ≤200µs p99 reactor-turn
+budget: 1,172 × 200µs ≈ 234ms/sec worst-case syscall-path budget, leaving ≈766ms/sec of the
+1-second budget for actual request processing — consistent with achieving 75,000 req/s/core at
+1KB message sizes (C4, C6).</li>
+<li><strong>Timer-wheel fixed memory per worker ≈ 32 KB.</strong> 8 levels × 256 slots × 16 bytes/slot (head
+pointer + padding) = 32,768 bytes, <strong>independent of live timer count</strong> (the entire <a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-7">ADR-07</a>
+argument, made numeric). At 8 workers: 8 × 32KB = <strong>256 KB</strong> total fixed wheel overhead (C6).</li>
+<li><strong>Timer-entry pool memory at 1M concurrent timers ≈ 64 MB.</strong> <code>TimerEntry</code> ≈ 64 bytes
+(<code>deadline_ms</code> 8B + <code>Waker</code> 16B + <code>next</code>/<code>prev</code> pointers 16B + padding ≈24B) × 1,000,000 ≈
+<strong>64 MB</strong> (feeds <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-5">M5</a>&#39;s benchmark fixture sizing, <a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-17-4">§17.4</a>).</li>
+<li><strong>Work-stealing deque memory ≈ 256 KB across 8 workers.</strong> A fixed power-of-two ring, capacity
+4,096 slots × 8 bytes (a <code>TaskRef</code> pointer) = 32KB per worker; × 8 workers = <strong>256 KB</strong> (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-18-2">§18.2</a>).
+Steal-attempt budget: bounded retries (e.g. 8) × 7 siblings per park cycle bounds worst-case
+steal latency before falling through to park (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-18-7">§18.7</a>).</li>
+<li><strong>Blocking-pool worst-case stack memory ≈ 256 MB.</strong> Max threads <code>4 × n_cpu</code> = 32 (C11) × 8MB
+default stack = <strong>256 MB</strong> (C12) — the number <a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-11">ADR-11</a>&#39;s adaptive-shrink-after-30s-idle policy
+exists to keep as a worst case, not a steady-state cost.</li>
+<li><strong>Waker-dispatch cost differential ≈ 10–20×.</strong> A <code>RawWaker</code> vtable call (<a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-4">P4</a>, <a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-21">ADR-21</a>) costs
+≈3–5ns (function-pointer indirection, no heap allocation) vs. a <code>Box&lt;dyn Wake&gt;</code> clone/drop pair
+at ≈50–100ns (heap alloc + dealloc). This 10–20× gap is <em>why</em> <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-7">M7</a>&#39;s ≤1µs spawn-to-first-poll
+ceiling is reachable with <a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-4">P4</a> and would not be with the boxed alternative (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-16-7">§16.7</a>).</li>
+<li><strong>io_uring fixed-buffer pool ≈ 64 MB.</strong> <code>Builder::with_io_uring_buffers(count=4096, size=16KB)</code>: 4,096 × 16KB = <strong>64 MB</strong> of pre-registered, pinned memory — the real RAM cost of
+the completion fast path (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-6">ADR-06</a>), traded against eliminating per-submission <code>iovec</code>
+translation (≈200–400ns/syscall avoided, feeding <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-11">M11</a>).</li>
+<li><strong>Reactor source-table overhead at 1M sources ≈ 60 MB.</strong> <code>HashMap&lt;Token, Arc&lt;Source&gt;&gt;</code> at load
+factor ≈0.8, entry overhead ≈48 bytes (hash + key + pointer + control byte): 1,000,000 ÷ 0.8 ×
+48B ≈ <strong>60 MB</strong> — a ≈5% tax over the connection objects themselves computed in #1&#39;s 448MB
+user-space total (448MB × 1M / 1M ≈ 448MB at scale; 60MB / 448MB ≈ 13%, refining the earlier
+&quot;modest&quot; claim to a concrete ratio here).</li>
+<li><strong>Conntrack headroom requirement ≈ 1,200,000 entries.</strong> At C1&#39;s 1,000,000 established
+connections, <code>net.netfilter.nf_conntrack_max</code> must be raised to ≥ 1,000,000 × 1.2 = <strong>1,200,000</strong>
+(20% headroom, C18) to avoid silent connection drops under connection churn — a direct
+operational constraint derived from C1, following the C10M-manifesto tuning angle (<a class="cite" href="/system-design-blueprints/systems/event-loop/study/#sec-5">§5</a>).</li>
+</ol>
+<hr>
+</section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

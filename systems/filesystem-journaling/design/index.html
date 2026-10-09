@@ -1,0 +1,329 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Filesystem Journaling Layer — Design · Engineering Blueprints</title><meta name="description" content="Filesystem Journaling Layer, lld: core types, repo tree, file inventory. Build a pluggable, crash-consistent block-journaling layer — the JBD2 / XFS-log / ZIL lineage — that sits between a higher-level filesystem (the metadata + data producer) and a raw block device. The…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/filesystem-journaling/">Filesystem Journaling Layer</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Filesystem Journaling Layer</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~15 weeks</li> <li>2,268 lines</li> <li>blueprint #110</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/filesystem-journaling/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/filesystem-journaling/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/filesystem-journaling/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/filesystem-journaling/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/filesystem-journaling/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/filesystem-journaling/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/filesystem-journaling/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/filesystem-journaling/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/filesystem-journaling/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Filesystem Journaling Layer — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/filesystem-journaling/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>struct TxnId(u64)              // monotonic (I6); durable in superblock; never reused
+struct BlockId(u64)            // final-location block number on the data device
+struct RecordId(u64)           // identifies one record within a transaction
+struct JournalBlockId(u64)     // index within the circular journal ring
+
+const BLOCK_SIZE_DEFAULT: u32 = 4096
+const JOURNAL_SIZE_DEFAULT: u64 = 128 * 1024 * 1024   // 128 MiB
+const JOURNAL_SIZE_MIN: u64 = 4 * 1024 * 1024         // 4 MiB</code></pre><pre class="code"><code>enum JournalMode { Journal, Ordered, Writeback }         // §8.4
+enum TxnState { Running, Locked, Committing, Committed, Checkpointed, Aborted }  // §8.1</code></pre><pre class="code"><code>enum JournalRecord {
+    Descriptor { txn: TxnId, sequence: u32, tags: Vec&lt;DescriptorTag&gt;, crc: u32 },
+    Data       { txn: TxnId, payload: Bytes },              // == block size
+    Commit     { txn: TxnId, committed_at: i64, crc_over_txn: u32 },
+    Revoke     { txn: TxnId, blocks: Vec&lt;BlockId&gt;, crc: u32 },
+}
+
+struct DescriptorTag { block: BlockId, journal: JournalBlockId, flags: u16, crc: u32 }
+
+mod tag_flags {
+    const ESCAPED:  u16 = 1 &lt;&lt; 0    // I11
+    const LAST_TAG: u16 = 1 &lt;&lt; 1
+    const MORE:     u16 = 1 &lt;&lt; 2    // descriptor continues in next journal block (§8.7)
+}</code></pre><pre class="code"><code>struct CommitRecord {
+    magic: u32, record_kind: u8, txn: TxnId, committed_at: i64,
+    data_block_count: u32, revoke_block_count: u32,
+    crc_over_txn: u32,   // CRC32C over descriptor + every data block (I4)
+    crc_self: u32,       // CRC32C over the record&#39;s own preceding fields
+}</code></pre><pre class="code"><code>struct JournalSuperblock {
+    magic: u32, version: u32, block_size: u32, journal_blocks: u64,
+    first_block: JournalBlockId, head: JournalBlockId, tail: JournalBlockId,
+    last_committed: TxnId, oldest_uncheckpointed: TxnId, mode: JournalMode,
+    features_compat: u32, features_incompat: u32, features_ro_compat: u32,
+    uuid: [u8; 16], crc: u32,
+}</code></pre><pre class="code"><code>offset  size  field
+0       4     magic               0xc03b3998
+4       4     version             2
+8       4     block_size
+12      8     journal_blocks
+20      8     first_block
+28      8     head
+36      8     tail
+44      8     last_committed
+52      8     oldest_uncheckpointed
+60      1     mode
+64      4     features_compat
+68      4     features_incompat
+72      4     features_ro_compat
+76      16    uuid
+92      4     crc                 (CRC32C over offsets 0..92)
+96      ...   reserved, zero-filled to block_size</code></pre><pre class="code"><code>Descriptor (one block):    0:1 discriminant=0x01 | 4:8 txn | 12:4 sequence
+                            | 16:4 tag_count | 20:.. tags (30B each) | last:4 crc
+Tag (30 bytes):             0:8 block | 8:8 journal | 16:2 flags | 18:4 crc | 22:8 pad
+Commit (one block):         0:1 discriminant=0x03 | 4:8 txn | 12:8 committed_at
+                            | 20:4 data_block_count | 24:4 revoke_block_count
+                            | 28:4 crc_over_txn | 32:4 crc_self | 36:.. reserved
+Revoke (one block):         0:1 discriminant=0x04 | 4:8 txn | 12:4 block_count
+                            | 16:.. blocks (8B each) | last:4 crc</code></pre><pre class="code"><code>trait JournalService: Send + Sync {
+    fn begin_txn(&amp;self) -&gt; Result&lt;TxnHandle&gt;
+    fn write_metadata(&amp;self, txn: &amp;TxnHandle, block: BlockId, payload: Bytes) -&gt; Result&lt;()&gt;
+    fn write_data(&amp;self, txn: &amp;TxnHandle, block: BlockId, payload: Bytes) -&gt; Result&lt;()&gt;
+    fn revoke_blocks(&amp;self, txn: &amp;TxnHandle, blocks: &amp;[BlockId]) -&gt; Result&lt;()&gt;
+    fn commit_txn(&amp;self, txn: TxnHandle) -&gt; Result&lt;TxnId&gt;
+    fn abort_txn(&amp;self, txn: TxnHandle) -&gt; Result&lt;()&gt;
+    fn wait_checkpoint(&amp;self, txn: TxnId) -&gt; Result&lt;()&gt;
+    fn recover(&amp;self) -&gt; Result&lt;RecoveryReport&gt;
+}
+
+trait BlockDevice: Send + Sync {
+    fn block_size(&amp;self) -&gt; u32
+    fn capacity_blocks(&amp;self) -&gt; u64
+    fn read(&amp;self, block: BlockId, buf: &amp;mut [u8]) -&gt; Result&lt;()&gt;
+    fn write(&amp;self, block: BlockId, buf: &amp;[u8]) -&gt; Result&lt;()&gt;
+    fn flush(&amp;self) -&gt; Result&lt;()&gt;                          // I13, the sole durability primitive
+    fn discard(&amp;self, block: BlockId, count: u64) -&gt; Result&lt;()&gt;   // default no-op
+}
+
+struct TxnHandle {
+    id: TxnId, opened_at: Instant,
+    journal: Arc&lt;dyn JournalService&gt;,
+    blocks: Mutex&lt;TxnBlocks&gt;,          // !Send by construction (§8.1)
+}
+struct TxnBlocks {
+    metadata: IndexMap&lt;BlockId, Bytes&gt;,
+    data:     IndexMap&lt;BlockId, Bytes&gt;,
+    revoked:  IndexSet&lt;BlockId&gt;,
+}</code></pre><pre class="code"><code>trait ModeStrategy: Send + Sync {
+    fn name(&amp;self) -&gt; JournalMode
+    fn pre_commit_data_writes(&amp;self, txn: &amp;TxnBlocks) -&gt; ModeAction
+    fn data_in_journal(&amp;self) -&gt; bool
+}
+enum ModeAction {
+    WriteAndFlush(Vec&lt;(BlockId, Bytes)&gt;),     // ordered
+    JournalAlongside(Vec&lt;(BlockId, Bytes)&gt;),  // journal
+    None,                                      // writeback
+}</code></pre><pre class="code"><code>struct RecoveryReport {
+    txns_scanned: u64, txns_replayed: u64, txns_skipped: u64,
+    blocks_replayed: u64, blocks_revoked: u64, torn_writes: u64,
+    took: Duration,
+}</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>Filesystem-Journaling/
+|-- README.md                       # project overview, quickstart
+|-- FINAL_BLUEPRINT.md              # this document
+|-- BUILD_PLAN.md                   # phase status tracker
+|-- CHANGELOG.md                    # Keep-a-Changelog format
+|-- BLUEPRINT_LOG.md                # amendments to this spec
+|-- CONTRIBUTING.md
+|-- CODE_OF_CONDUCT.md
+|-- SECURITY.md                     # vuln disclosure + PGP fingerprint
+|-- LICENSE                         # Apache-2.0 (ADR-18)
+|-- Makefile                        # bootstrap/build/test/lint/conformance/bench/fuzz
+|-- Cargo.toml                      # workspace manifest
+|-- rust-toolchain.toml             # pins 1.75
+|-- Dockerfile                      # multi-stage build + runtime
+|-- docker-compose.yml              # daemon + Prometheus sidecar
+|-- deny.toml                       # dependency/license audit (§28)
+|-- .github/workflows/              # ci/conformance/chaos/security/release .yml (§27,§28)
+|-- crates/
+|   |-- jbd-core/                   # §11 types: TxnId, BlockId, records, state
+|   |-- jbd-block/                  # BlockDevice trait + in-memory/file-backed backends
+|   |-- jbd-journal/                # circular log: head/tail, append, scan
+|   |-- jbd-txn/                    # transaction manager
+|   |-- jbd-commit/                 # commit thread
+|   |-- jbd-group-commit/           # group-commit window manager
+|   |-- jbd-recover/                # recovery: superblock read, revocation set, scan
+|   |-- jbd-replay/                 # replay: apply transactions to the block device
+|   |-- jbd-checksum/               # CRC32C wrappers
+|   |-- jbd-mode-ordered/           # ordered-mode strategy
+|   |-- jbd-mode-journal/           # journal-mode strategy
+|   |-- jbd-mode-writeback/         # writeback-mode strategy
+|   |-- jbd-proto/                  # on-disk record encode/decode (bincode + serde)
+|   |-- jbd-snapshot/               # rank-111 SnapshotHook integration
+|   |-- jbd-metrics/                # Prometheus exporters
+|   |-- jbd-conformance/            # conformance suite + buckets
+|   |-- jbd-fuzz/                   # fuzz targets: record decoder, recovery scan
+|   |-- jbd-bench/                  # benchmarks
+|   |-- jbd-cli/                    # dump / fsck-journal / replay / resize / migrate
+|   `-- jbd-bin/                    # `jbd` binary hosting the CLI + daemon</code></pre><pre class="diagram"><code>|-- conformance/
+|   |-- runner/                     # bucket runner + report generator
+|   `-- corpora/
+|       |-- record-decode/          # malformed records
+|       |-- recovery-scan/          # journal images at every recoverable state
+|       |-- group-commit/           # concurrent-writer scenarios
+|       |-- mode-ordered/           # ordered-mode persistence properties
+|       |-- mode-journal/           # data-in-journal persistence properties
+|       |-- mode-writeback/         # metadata-only persistence properties
+|       |-- revocation/             # block-freed-then-reallocated scenarios
+|       |-- torn-writes/            # partial journal writes at arbitrary offsets
+|       |-- wrap-around/            # journal-full + checkpoint scenarios
+|       `-- chaos/                  # fault-injected block-device decorators
+|-- benchmarks/
+|   |-- commit_throughput.rs
+|   |-- recovery_time.rs
+|   |-- wal_amplification.rs
+|   `-- checksum_overhead.rs
+|-- docs/
+|   |-- adr/                        # one file per §9 ADR row
+|   |-- runbooks/
+|   |   |-- corruption-on-mount.md
+|   |   |-- journal-full.md
+|   |   |-- external-journal-loss.md
+|   |   `-- replay-divergence.md
+|   |-- threat-model/
+|   |-- performance/
+|   `-- failure-analysis/
+|-- benchmarks-results/             # historical benchmark JSON
+|-- examples/
+|   |-- hello-journal.md
+|   |-- mode-comparison.md
+|   `-- external-journal.md
+|-- templates/
+|   |-- adr.md
+|   |-- postmortem.md
+|   `-- runbook.md
+|-- scripts/
+|   `-- fixture-gen.sh
+|-- tools/
+|   `-- corpus-mutate.rs            # generates malformed-record fixtures
+|-- notes/
+|   `-- recovery-derivations.md
+|-- papers/
+|   `-- reading-notes.md
+`-- legal/
+    `-- third-party-notices.md</code></pre> </section><section aria-labelledby="sec-38"> <h2 id="sec-38">File inventory <small class="muted">(Appendix A · 73 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File / Directory</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>README.md</code></td><td>project overview, quickstart</td></tr><tr><td><code>FINAL_BLUEPRINT.md</code></td><td>this specification</td></tr><tr><td><code>BUILD_PLAN.md</code></td><td>phase status tracker</td></tr><tr><td><code>CHANGELOG.md</code></td><td>Keep-a-Changelog history</td></tr><tr><td><code>BLUEPRINT_LOG.md</code></td><td>amendments to this spec</td></tr><tr><td><code>CONTRIBUTING.md</code></td><td>contribution process</td></tr><tr><td><code>CODE_OF_CONDUCT.md</code></td><td>community standards</td></tr><tr><td><code>SECURITY.md</code></td><td>vulnerability disclosure + PGP fingerprint</td></tr><tr><td><code>LICENSE</code></td><td>Apache-2.0 text (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-18">ADR-18</a>)</td></tr><tr><td><code>Makefile</code></td><td>bootstrap/build/test/lint/conformance/bench/fuzz targets</td></tr><tr><td><code>Cargo.toml</code></td><td>workspace manifest</td></tr><tr><td><code>rust-toolchain.toml</code></td><td>pins toolchain 1.75</td></tr><tr><td><code>Dockerfile</code></td><td>multi-stage build + runtime image</td></tr><tr><td><code>docker-compose.yml</code></td><td>daemon + Prometheus sidecar</td></tr><tr><td><code>deny.toml</code></td><td>dependency/license audit config (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-28">§28</a>)</td></tr><tr><td><code>.github/workflows/ci.yml</code></td><td>build + unit test pipeline</td></tr><tr><td><code>.github/workflows/conformance.yml</code></td><td>20-bucket conformance pipeline (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-27">§27</a>)</td></tr><tr><td><code>.github/workflows/chaos.yml</code></td><td>fuzz + fault-injection pipeline</td></tr><tr><td><code>.github/workflows/security.yml</code></td><td><code>cargo audit</code> + <code>deny.toml</code> gate</td></tr><tr><td><code>.github/workflows/release.yml</code></td><td>build, sign, publish</td></tr><tr><td><code>crates/jbd-core/</code></td><td><code>TxnId</code>/<code>BlockId</code>/<code>JournalRecord</code>/state types (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-11-1">§11.1</a>–11.7)</td></tr><tr><td><code>crates/jbd-block/</code></td><td><code>BlockDevice</code> trait + in-memory/file-backed backends (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-11-8">§11.8</a>)</td></tr><tr><td><code>crates/jbd-journal/</code></td><td>circular log: head/tail, append, scan (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-13">§13</a>)</td></tr><tr><td><code>crates/jbd-txn/</code></td><td>transaction manager (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-1">§8.1</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-11-8">§11.8</a>)</td></tr><tr><td><code>crates/jbd-commit/</code></td><td>commit thread (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-14">§14</a>)</td></tr><tr><td><code>crates/jbd-group-commit/</code></td><td>group-commit window manager (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-2">§14.2</a>)</td></tr><tr><td><code>crates/jbd-recover/</code></td><td>recovery: superblock read, revocation set, scan (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-18">§18</a>)</td></tr><tr><td><code>crates/jbd-replay/</code></td><td>replay: apply transactions to the block device (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-3">§18.3</a>)</td></tr><tr><td><code>crates/jbd-checksum/</code></td><td>CRC32C wrappers (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-21-2">§21.2</a>)</td></tr><tr><td><code>crates/jbd-mode-ordered/</code></td><td>ordered-mode strategy (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-15">§15</a>)</td></tr><tr><td><code>crates/jbd-mode-journal/</code></td><td>journal-mode strategy (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-16">§16</a>)</td></tr><tr><td><code>crates/jbd-mode-writeback/</code></td><td>writeback-mode strategy (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-17">§17</a>)</td></tr><tr><td><code>crates/jbd-proto/</code></td><td>on-disk record encode/decode (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-11-6">§11.6</a>–11.7)</td></tr><tr><td><code>crates/jbd-snapshot/</code></td><td><a class="cite" href="/system-design-blueprints/systems/backup-snapshot/" title="Backup / Snapshot System">rank-111</a> <code>SnapshotHook</code> integration (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-22-2">§22.2</a>)</td></tr><tr><td><code>crates/jbd-metrics/</code></td><td>Prometheus exporters (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-25-1">§25.1</a>)</td></tr><tr><td><code>crates/jbd-conformance/</code></td><td>conformance suite + buckets (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-27">§27</a>)</td></tr><tr><td><code>crates/jbd-fuzz/</code></td><td>fuzz targets: record decoder, recovery scan (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-27">§27</a>)</td></tr><tr><td><code>crates/jbd-bench/</code></td><td>benchmarks (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-29">§29</a>)</td></tr><tr><td><code>crates/jbd-cli/</code></td><td><code>jbd</code> subcommands: dump/fsck-journal/replay/resize/migrate (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-20">§20</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-22">§22</a>)</td></tr><tr><td><code>crates/jbd-bin/</code></td><td><code>jbd</code> binary hosting the CLI + daemon (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-12-3">§12.3</a>)</td></tr><tr><td><code>conformance/runner/</code></td><td>bucket runner + report generator</td></tr><tr><td><code>conformance/corpora/record-decode/</code></td><td>malformed-record fixtures (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-12-5">§12.5</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-21-5">§21.5</a>)</td></tr><tr><td><code>conformance/corpora/recovery-scan/</code></td><td>journal images per recoverable state (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-5">§18.5</a>)</td></tr><tr><td><code>conformance/corpora/group-commit/</code></td><td>concurrent-writer scenarios (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-5">§14.5</a>)</td></tr><tr><td><code>conformance/corpora/mode-ordered/</code></td><td>ordered-mode persistence fixtures (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-15-5">§15.5</a>)</td></tr><tr><td><code>conformance/corpora/mode-journal/</code></td><td>journal-mode persistence fixtures (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-16-5">§16.5</a>)</td></tr><tr><td><code>conformance/corpora/mode-writeback/</code></td><td>writeback-mode persistence fixtures (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-17-5">§17.5</a>)</td></tr><tr><td><code>conformance/corpora/revocation/</code></td><td>free-then-reallocate scenarios (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-5">§19.5</a>)</td></tr><tr><td><code>conformance/corpora/torn-writes/</code></td><td>partial-write-at-offset fixtures (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-5">§18.5</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-21-5">§21.5</a>)</td></tr><tr><td><code>conformance/corpora/wrap-around/</code></td><td>journal-full + checkpoint fixtures (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-13-5">§13.5</a>)</td></tr><tr><td><code>conformance/corpora/external-journal/</code></td><td>dual-device placement fixtures (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-20-5">§20.5</a>)</td></tr><tr><td><code>conformance/corpora/snapshot/</code></td><td>snapshot/COW-map/restore fixtures (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-22-5">§22.5</a>)</td></tr><tr><td><code>conformance/corpora/chaos/</code></td><td>fault-injected <code>BlockDevice</code> decorator scenarios (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-27">§27</a>)</td></tr><tr><td><code>benchmarks/commit_throughput.rs</code></td><td>txns/sec at varying group-commit windows (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-3">M3</a>)</td></tr><tr><td><code>benchmarks/recovery_time.rs</code></td><td>ms-per-MB of journal at recovery (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-4">M4</a>)</td></tr><tr><td><code>benchmarks/wal_amplification.rs</code></td><td>bytes-to-journal / bytes-to-filesystem ratio (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-5">M5</a>)</td></tr><tr><td><code>benchmarks/checksum_overhead.rs</code></td><td>CRC32C cost as % of journal throughput (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-6">M6</a>)</td></tr><tr><td><code>docs/adr/</code></td><td>one file per <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a> ADR row</td></tr><tr><td><code>docs/runbooks/journal-full.md</code></td><td>journal-full remediation procedure (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-25-3">§25.3</a>)</td></tr><tr><td><code>docs/runbooks/corruption-on-mount.md</code></td><td>superblock/record corruption procedure (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-25-3">§25.3</a>)</td></tr><tr><td><code>docs/runbooks/external-journal-loss.md</code></td><td>external device loss procedure (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-20-10">§20.10</a>)</td></tr><tr><td><code>docs/runbooks/replay-divergence.md</code></td><td>recovery-divergence diagnostic procedure (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-10">§18.10</a>)</td></tr><tr><td><code>examples/hello-journal.md</code></td><td>walkthrough of the Phase-0 smoke test (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-12-5">§12.5</a>)</td></tr><tr><td><code>examples/mode-comparison.md</code></td><td>benchmark comparison across the three modes</td></tr><tr><td><code>examples/external-journal.md</code></td><td>external-journal-device walkthrough</td></tr><tr><td><code>templates/adr.md</code></td><td>ADR authoring template</td></tr><tr><td><code>templates/postmortem.md</code></td><td>incident postmortem template</td></tr><tr><td><code>templates/runbook.md</code></td><td>runbook authoring template</td></tr><tr><td><code>scripts/fixture-gen.sh</code></td><td>generates conformance corpus fixtures</td></tr><tr><td><code>tools/corpus-mutate.rs</code></td><td>generates malformed-record fixtures programmatically</td></tr><tr><td><code>notes/recovery-derivations.md</code></td><td>working notes behind <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a>&#39;s capacity model</td></tr><tr><td><code>papers/reading-notes.md</code></td><td>notes on <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-5">§5</a>&#39;s Required Reading</td></tr><tr><td><code>legal/third-party-notices.md</code></td><td>third-party license notices</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

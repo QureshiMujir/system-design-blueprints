@@ -1,0 +1,456 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>GPU Kernel Runtime (CUDA-like) from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="GPU Kernel Runtime (CUDA-like) from Scratch, hld: §3 overview + §8 domain model. Build, from scratch, a CPU-hosted CUDA-like GPU kernel runtime and functional simulator: a PTX-like virtual ISA interpreted on the CPU, a thread/warp/block/grid execution hierarchy, a grid scheduler…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/gpu-kernel-runtime/">GPU Kernel Runtime (CUDA-like) from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>GPU Kernel Runtime (CUDA-like) from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>10 phases</li> <li>~21 weeks</li> <li>2,429 lines</li> <li>blueprint #180</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/gpu-kernel-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/gpu-kernel-runtime/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/gpu-kernel-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/gpu-kernel-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/gpu-kernel-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/gpu-kernel-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/gpu-kernel-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/gpu-kernel-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/gpu-kernel-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:GPU Kernel Runtime (CUDA-like) from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend side: client programs
+%% legend rt: core runtime, driver, scheduler, backend
+%% legend ingest: IR layer and supporting components
+%% legend store: memory manager
+    C[&quot;&lt;b&gt;Client Programs (kernel sources)&lt;/b&gt;&lt;br/&gt;vector-add | reduction | matmul&lt;br/&gt;conformance | CLI&quot;]
+    RT[&quot;&lt;b&gt;Host Runtime API (gpu-runtime)&lt;/b&gt;&lt;br/&gt;launch() | memcpy&lt;br/&gt;stream create/sync&lt;br/&gt;event record/wait&quot;]
+    DR[&quot;&lt;b&gt;Virtual Driver / Command Queue&lt;/b&gt;&lt;br/&gt;&lt;b&gt;(gpu-driver)&lt;/b&gt;&lt;br/&gt;command buffers | queue submission&lt;br/&gt;dispatch packets | DMA&quot;]
+    SC[&quot;&lt;b&gt;Grid Scheduler (gpu-scheduler)&lt;/b&gt;&lt;br/&gt;block dispatch | warp formation&lt;br/&gt;divergence masks | barriers&lt;br/&gt;occupancy accounting&quot;]
+    MM[&quot;&lt;b&gt;Memory Manager&lt;/b&gt;&lt;br/&gt;(gpu-memory)&lt;br/&gt;global/shared/local/const alloc,&lt;br/&gt;UVA, coalescing model&quot;]
+    EX[&quot;&lt;b&gt;Execution Backend&lt;/b&gt;&lt;br/&gt;(gpu-emulator)&lt;br/&gt;instruction interpreter&lt;br/&gt;register files, warp stepping&lt;br/&gt;deterministic replay&quot;]
+    IR[&quot;&lt;b&gt;PTX-like IR Layer (gpu-ir, gpu-parser)&lt;/b&gt;&lt;br/&gt;kernel language -&gt; lexer/parser&lt;br/&gt;-&gt; SSA CFG -&gt; verifier&quot;]
+    PR[&quot;&lt;b&gt;Profiler / Instrumentation&lt;/b&gt;&lt;br/&gt;&lt;b&gt;(gpu-profiler)&lt;/b&gt;&lt;br/&gt;timeline tracing | occupancy metrics&lt;br/&gt;bandwidth stats&quot;]
+    C --&gt; RT --&gt; DR --&gt; SC
+    SC --&gt; MM
+    SC --&gt; EX
+    MM --&gt; IR
+    EX --&gt; IR
+    IR --&gt; PR
+    classDef side stroke-width:1.5px
+    classDef rt stroke-width:1.5px
+    classDef ingest stroke-width:1.5px
+    classDef store stroke-width:1.5px
+    class C side
+    class RT,DR,SC,EX rt
+    class IR,PR ingest
+    class MM store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch side"></span>client programs</li><li><span class="swatch rt"></span>core runtime, driver, scheduler, backend</li><li><span class="swatch ingest"></span>IR layer and supporting components</li><li><span class="swatch store"></span>memory manager</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>+----------------------------------------------------------------------+
+|                    Client Programs (kernel sources)                  |
+|         vector-add | reduction | matmul | conformance | CLI          |
++------------------------------------+-----------------------------------+
+                                     v
++----------------------------------------------------------------------+
+|                   Host Runtime API (gpu-runtime)                     |
+|      launch() | memcpy | stream create/sync | event record/wait      |
++------------------------------------+-----------------------------------+
+                                     v
++----------------------------------------------------------------------+
+|              Virtual Driver / Command Queue (gpu-driver)             |
+|   command buffers | queue submission | dispatch packets | DMA        |
++------------------------------------+-----------------------------------+
+                                     v
++----------------------------------------------------------------------+
+|                   Grid Scheduler (gpu-scheduler)                     |
+|   block dispatch | warp formation | divergence masks | barriers      |
+|                   occupancy accounting                               |
++---------------------+----------------------------+---------------------+
+                      |                            |
+                      v                            v
+       +----------------------+       +--------------------------------+
+       | Memory Manager       |       | Execution Backend              |
+       | (gpu-memory)         |       | (gpu-emulator)                 |
+       | global/shared/local/ |       | instruction interpreter        |
+       | const alloc, UVA,    |       | register files, warp stepping  |
+       | coalescing model     |       | deterministic replay            |
+       +-----------+----------+       +---------------+------------------+
+                   |                                  |
+                   +------------------+----------------+
+                                      v
++----------------------------------------------------------------------+
+|                 PTX-like IR Layer (gpu-ir, gpu-parser)                |
+|    kernel language -&gt; lexer/parser -&gt; SSA CFG -&gt; verifier            |
++----------------------------------------------------------------------+
+                                      |
+                                      v
++----------------------------------------------------------------------+
+|            Profiler / Instrumentation (gpu-profiler)                  |
+|       timeline tracing | occupancy metrics | bandwidth stats          |
++----------------------------------------------------------------------+</code></pre></details>
+<p><strong>Host Runtime API</strong> — exposes CUDA-like host semantics: launch configuration, device
+allocation, stream/event control, synchronization; the only surface client code calls
+(P3, <a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/trade-offs/#adr-2">ADR-02</a>).</p>
+<p><strong>Virtual Driver / Command Queue</strong> — accepts host API calls as dispatch packets on a
+per-stream command buffer, submits them to queues in enqueue order (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-9">I9</a>, <a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-12">I12</a>); models the
+DMA engine as an explicit-latency copy (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/trade-offs/#adr-17">ADR-17</a>).</p>
+<p><strong>Grid Scheduler</strong> — owns block dispatch, warp formation, occupancy accounting (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-15">I15</a>),
+divergence-mask bookkeeping (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-13">I13</a>), and barrier rendezvous (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-3">I3</a>); the single component
+that must &quot;think in warps&quot; (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/study/#sec-30">MM1</a>).</p>
+<p><strong>Memory Manager</strong> — implements the five memory spaces (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/architecture/#sec-8">§8</a>), unified virtual addressing,
+host↔device transfer, and the coalescing-accounting model (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/study/#sec-30">MM4</a>) that drives bandwidth
+telemetry.</p>
+<p><strong>Execution Backend</strong> — the CPU interpreter that steps one warp-instruction at a time
+per active lane (P1, P2); the only component that actually &quot;executes&quot; IR.</p>
+<p><strong>PTX-like IR Layer</strong> — canonical kernel representation; every frontend (only
+<code>gpu-parser</code> today) lowers into it (P5); the verifier (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-7">I7</a>) is the single gate between
+untrusted kernel source and the scheduler/emulator.</p>
+<p><strong>Profiler / Instrumentation</strong> — first-class observability (P9): timeline traces,
+occupancy metrics, and memory-bandwidth statistics consumed by <code>gpu-cli</code>.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-thread-hierarchy">Thread Hierarchy</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+    G[&quot;&lt;b&gt;Grid&lt;/b&gt;&quot;]
+    B[&quot;&lt;b&gt;Block&lt;/b&gt;&lt;br/&gt;0 .. gridDim.{x,y,z}-1&quot;]
+    W[&quot;&lt;b&gt;Warp&lt;/b&gt;&lt;br/&gt;0 .. ceil(blockDim/32)-1&quot;]
+    T[&quot;&lt;b&gt;Thread&lt;/b&gt;&lt;br/&gt;lane 0..31&quot;]
+    SM[&quot;&lt;b&gt;Shared Memory&lt;/b&gt;&lt;br/&gt;block-scoped&quot;]
+    GM[&quot;&lt;b&gt;Global / Constant Memory&lt;/b&gt;&lt;br/&gt;grid-scoped&quot;]
+    G --&gt; B
+    B --&gt; W
+    W --&gt; T
+    B --&gt; SM
+    G --&gt; GM</pre><figcaption><p class="diagram-note">Drawn from the text diagram in “Thread Hierarchy”.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>Grid
+ +-- Block (0 .. gridDim.{x,y,z}-1)
+ |    +-- Warp (0 .. ceil(blockDim/32)-1)
+ |    |    +-- Thread (lane 0..31)
+ |    +-- Shared Memory (block-scoped)
+ +-- Global / Constant Memory (grid-scoped)</code></pre></details>
+<h3 id="sec-8-ptx-like-virtual-isa-instruction-classes">PTX-like Virtual ISA — Instruction Classes</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Mnemonic Class</th>
+<th>Example Form</th>
+<th>Semantics</th>
+<th>State Space Touched</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>mov</code></td>
+<td><code>mov.u32 rD, rA</code></td>
+<td>register-to-register move</td>
+<td>register</td>
+</tr>
+<tr>
+<td><code>add</code> / <code>sub</code> / <code>mul</code> / <code>mad</code></td>
+<td><code>add.u32 rD, rA, rB</code></td>
+<td>arithmetic, dest = op(src, src)</td>
+<td>register</td>
+</tr>
+<tr>
+<td><code>ld</code></td>
+<td><code>ld.global.u32 rD, [addr]</code></td>
+<td>load from a named state space</td>
+<td>global/shared/const/local</td>
+</tr>
+<tr>
+<td><code>st</code></td>
+<td><code>st.shared.u32 [addr], rA</code></td>
+<td>store to a named state space</td>
+<td>global/shared/local</td>
+</tr>
+<tr>
+<td><code>setp</code></td>
+<td><code>setp.lt.u32 p, rA, rB</code></td>
+<td>predicate-register comparison</td>
+<td>register (predicate)</td>
+</tr>
+<tr>
+<td><code>bra</code></td>
+<td><code>bra.uni target</code> / <code>bra target</code></td>
+<td>uniform or divergent branch</td>
+<td>control flow</td>
+</tr>
+<tr>
+<td><code>bar</code></td>
+<td><code>bar.sync 0</code></td>
+<td>block-scoped barrier rendezvous</td>
+<td>control flow (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-3">I3</a>)</td>
+</tr>
+<tr>
+<td><code>cvt</code></td>
+<td><code>cvt.f32.u32 rD, rA</code></td>
+<td>type conversion</td>
+<td>register</td>
+</tr>
+<tr>
+<td><code>ret</code></td>
+<td><code>ret</code></td>
+<td>kernel/function return</td>
+<td>control flow</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-kernel-language-grammar-ebnf-illustrative-subset">Kernel-Language Grammar (EBNF, illustrative subset)</h3>
+<pre class="diagram"><code>kernel_decl   = &quot;kernel&quot; ident &quot;(&quot; param_list &quot;)&quot; &quot;{&quot; block+ &quot;}&quot; ;
+param_list    = [ param { &quot;,&quot; param } ] ;
+param         = ident &quot;:&quot; type ;
+type          = &quot;u32&quot; | &quot;f32&quot; | &quot;ptr&quot; state_space ;
+state_space   = &quot;global&quot; | &quot;shared&quot; | &quot;const&quot; | &quot;local&quot; ;
+block         = label &quot;:&quot; instr* terminator ;
+label         = ident ;
+instr         = mnemonic operand_list ;
+terminator    = &quot;bra&quot; ident | &quot;bra.uni&quot; ident | &quot;ret&quot; | &quot;bar.sync&quot; int ;
+operand_list  = [ operand { &quot;,&quot; operand } ] ;
+operand       = register | immediate | address ;
+register      = &quot;r&quot; digit+ | &quot;p&quot; digit+ ;
+address       = &quot;[&quot; register [ &quot;+&quot; immediate ] &quot;]&quot; ;</code></pre>
+<h3 id="sec-8-kernel-launch-lifecycle-state-transition-table">Kernel Launch Lifecycle — State-Transition Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Current State</th>
+<th>Event</th>
+<th>Next State</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Submitted</code></td>
+<td>verifier accepts IR (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-7">I7</a>)</td>
+<td><code>Queued</code></td>
+<td>enters command queue (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/build/#sec-18">§18</a>)</td>
+</tr>
+<tr>
+<td><code>Submitted</code></td>
+<td>verifier rejects</td>
+<td><code>Rejected</code></td>
+<td>terminal, <code>GpuError</code> surfaced to caller</td>
+</tr>
+<tr>
+<td><code>Queued</code></td>
+<td>occupancy pass succeeds (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-15">I15</a>)</td>
+<td><code>Scheduled</code></td>
+<td>blocks assigned to simulated SM slots</td>
+</tr>
+<tr>
+<td><code>Queued</code></td>
+<td>occupancy pass fails (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-5">I5</a>/<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-4">I4</a>)</td>
+<td><code>Rejected</code></td>
+<td>terminal</td>
+</tr>
+<tr>
+<td><code>Scheduled</code></td>
+<td>warps formed (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-1">I1</a>)</td>
+<td><code>Running</code></td>
+<td>scheduler begins dispatching instructions</td>
+</tr>
+<tr>
+<td><code>Running</code></td>
+<td>all blocks complete</td>
+<td><code>Completed</code></td>
+<td>event(s) waiting on this launch may signal (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-10">I10</a>)</td>
+</tr>
+<tr>
+<td><code>Running</code></td>
+<td>barrier watchdog timeout (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-3">I3</a>)</td>
+<td><code>Faulted</code></td>
+<td>terminal, <a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#fm-1">FM-1</a></td>
+</tr>
+<tr>
+<td><code>Running</code></td>
+<td>verifier-missed runtime fault (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-6">I6</a>/<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-2">I2</a>)</td>
+<td><code>Faulted</code></td>
+<td>terminal, <code>GpuError</code> surfaced</td>
+</tr>
+<tr>
+<td><code>Faulted</code> / <code>Completed</code> / <code>Rejected</code></td>
+<td>—</td>
+<td>terminal</td>
+<td>no further transitions</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-worked-example-vector-add-warp-trace">Worked Example — Vector-Add Warp Trace</h3>
+<p>Kernel <code>vecadd(a: ptr global, b: ptr global, c: ptr global)</code>, launched with
+<code>gridDim=(1,1,1)</code>, <code>blockDim=(32,1,1)</code> (exactly one warp, no divergence):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Instruction</th>
+<th>Effect (all 32 lanes active, mask=0xFFFFFFFF)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><code>ld.global.u32 r1, [a + tid*4]</code></td>
+<td>each lane loads its <code>a[tid]</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>ld.global.u32 r2, [b + tid*4]</code></td>
+<td>each lane loads its <code>b[tid]</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>add.u32 r3, r1, r2</code></td>
+<td>each lane computes <code>a[tid]+b[tid]</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>st.global.u32 [c + tid*4], r3</code></td>
+<td>each lane stores its <code>c[tid]</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>ret</code></td>
+<td>warp retires, block completes</td>
+</tr>
+</tbody></table></div>
+<p>Coalescing classification (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-14">I14</a>): step 1/2/4 access <code>base + tid*4</code> — a unit-stride,
+32-lane pattern — classified <code>Coalesced</code> (single memory transaction per warp).</p>
+<h3 id="sec-8-malformed-input-example">Malformed-Input Example</h3>
+<p>Kernel source declaring <code>ld.global.u32 r1, [a]</code> where <code>a</code> is declared <code>ptr shared</code> in
+the parameter list: the parser accepts the syntax (structurally valid), but the IR
+verifier (<a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-7">I7</a>) rejects it at lowering time — <code>ld.global</code> on a <code>shared</code>-space pointer is a
+state-space mismatch, raised as <code>GpuError::StateSpaceMismatch</code>, not silently reinterpreted
+as a global address.</p>
+<h3 id="sec-8-failure-path-example">Failure-Path Example</h3>
+<p>A kernel with two divergent branches whose reconvergence points are <em>not</em> the same
+immediate-dominator block (a verifier bug or a hand-crafted adversarial IR sample, <a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#t-1">T1</a>)
+reaches the scheduler. <a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#inv-13">I13</a>&#39;s dominator-tree check at verify time is the intended gate;
+if it is bypassed (fuzzing target, <a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/build/#sec-20">§20</a>), the scheduler&#39;s mask-restoration logic executes
+lanes that should remain masked, corrupting shared-memory state — this is <a class="cite" href="/system-design-blueprints/systems/gpu-kernel-runtime/reliability/#fm-2">FM-2</a>, and the
+only way to have caught it earlier is the differential fixture corpus (P14).</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

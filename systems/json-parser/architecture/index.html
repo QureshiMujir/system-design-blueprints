@@ -1,0 +1,922 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>JSON Parser — Architecture · Engineering Blueprints</title><meta name="description" content="JSON Parser, hld: §3 overview + §8 domain model. This blueprint specifies a from-scratch, production-grade JSON parser and serializer in C++20, targeting spec-exactness against RFC 8259 and ECMA-404, bit-exact IEEE 754-2019 number round-tripping…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/json-parser/">JSON Parser</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>JSON Parser</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">C/C++</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~16 weeks</li> <li>3,054 lines</li> <li>blueprint #23</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/json-parser/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/json-parser/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/json-parser/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/json-parser/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/json-parser/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/json-parser/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/json-parser/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/json-parser/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/json-parser/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/json-parser/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:JSON Parser — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code> UNTRUSTED INPUT BOUNDARY ============================================
+ |  Input Adapter (buffer/mmap/chunked reader)  -- owns/borrows bytes  |
+ =======================================================================
+                 |
+      +----------v-----------+       +----------------------+
+      | SIMD Structural Scan |------&gt;| UTF-8 Validator      |
+      | (stage 1, bitmask)   |       | (scalar + SIMD)      |
+      +----------+-----------+       +----------+-----------+
+                 |                              |
+      +----------v-----------+                  |
+      |     Tokenizer         |&lt;-----------------+
+      | (scalar, uses indices)|
+      +----------+-----------+
+                 |
+      +----------v-----------+     iterative deep path
+      |  Parser (recursive   |&lt;---------------------------+
+      |  descent, depth-lim.)|                            |
+      +----------+-----------+                             |
+                 |                                          |
+      +----------v-----------+      +----------------------+
+      |   Value Builder       |-----&gt;| Arena Allocator      |
+      +----------+-----------+      +----------+-----------+
+                 |                             |
+      +----------v-----------+      +----------v-----------+
+      |   DOM Value Tree      |      | String Unescaper      |
+      +----------+-----------+      +----------+-----------+
+                 |                             |
+      +----------v-----------+      +----------v-----------+
+      | Number Converter       |      | SAX Event Emitter     |
+      +----------+-----------+      +----------+-----------+
+                 |                             |
+      +----------v-----------------------------v-----------+
+      |         Serializer (escaper + pretty-printer)        |
+      +----------+---------------------------------------- -+
+                 |
+      +----------v-----------+
+      | Limits Enforcer       |  (cross-cuts every box above)
+      +----------+-----------+
+                 |
+      +----------v-----------+
+      | JSON Pointer / Patch  |  (Phase 11, operates on Value Tree)
+      +-----------------------+</code></pre>
+<p>Input Adapter: the single point where untrusted bytes enter the system; owns a contiguous buffer
+or borrows a caller-provided one, and is the only component permitted to perform I/O. SIMD
+Structural Scanner: stage 1 of the simdjson design — classifies each byte as structural,
+whitespace, or string-interior using vectorized comparisons and prefix-XOR quote tracking, never
+interprets values. UTF-8 Validator: independently verifies byte well-formedness (RFC 3629) before
+any string content is trusted; runs scalar or SIMD depending on <a class="cite" href="/system-design-blueprints/systems/json-parser/trade-offs/#adr-8">ADR-08</a>. Tokenizer: consumes the
+structural index (or scans byte-by-byte on the scalar path) to emit <code>Token</code>s with <code>SourceLocation</code>
+spans into the input buffer — it does not allocate. Parser: recursive-descent by default, switches
+to the iterative deep-path parser (Phase 9) once nesting exceeds a low static threshold, enforcing
+the depth limit before recursing (<a class="cite" href="/system-design-blueprints/systems/json-parser/reliability/#inv-2">I2</a>). Value Builder: turns a stream of tokens/parser calls into
+<code>Value</code> nodes, requesting storage from the Arena Allocator. Arena Allocator: bump-allocates fixed
+blocks for the lifetime of one <code>Document</code>; the sole heap-allocation path for DOM mode. DOM Value
+Tree: the tagged-union <code>Value</code> graph rooted at <code>Document</code>; owns no bytes directly — string leaves
+either borrow the input buffer (zero-copy) or point into arena-owned unescape buffers. String
+Unescaper: converts escape sequences to UTF-8 bytes lazily, only when a view is materialized or
+when escapes are present. Number Converter: implements the exact decision table of <a class="cite" href="/system-design-blueprints/systems/json-parser/build/#sec-16">§16</a> (integer
+fast path, Eisel-Lemire, big-integer slow path). SAX Event Emitter: alternative to the Value
+Builder — emits <code>SaxEvent</code>s to a caller-provided handler with no DOM construction, enabling
+constant-memory streaming. Serializer: walks a <code>Value</code> tree or receives SAX-shaped calls and
+produces bytes, applying the escaping decision table (<a class="cite" href="/system-design-blueprints/systems/json-parser/build/#sec-20">§20</a>) and optional pretty-printing. Limits
+Enforcer: cross-cutting component consulted by the tokenizer, parser, and value builder before any
+allocation or recursion, holding the <code>Limits</code> struct (depth, document size, string length, number
+length). JSON Pointer/Patch: Phase 11 layer operating purely on the completed <code>Value</code> tree, never
+on raw bytes. Buffer ownership: the Input Adapter is the sole owner of the byte buffer for the
+lifetime of a <code>Document</code>; every <code>StringView</code> in the DOM is a borrow with a lifetime obligation
+documented in <a class="cite" href="/system-design-blueprints/systems/json-parser/design/#sec-11">§11</a>.</p>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Grammar (EBNF, per RFC 8259)</h3>
+<pre class="diagram"><code>value      = ws , ( object | array | string | number | &quot;true&quot; | &quot;false&quot; | &quot;null&quot; ) , ws ;
+object     = &quot;{&quot; , ws , [ member , { &quot;,&quot; , member } ] , ws , &quot;}&quot; ;
+member     = string , ws , &quot;:&quot; , value ;
+array      = &quot;[&quot; , ws , [ value , { &quot;,&quot; , value } ] , ws , &quot;]&quot; ;
+string     = quotation-mark , { char } , quotation-mark ;
+char       = unescaped | escape ;
+number     = [ &quot;-&quot; ] , int , [ frac ] , [ exp ] ;
+int        = &quot;0&quot; | ( digit1-9 , { digit } ) ;
+frac       = &quot;.&quot; , digit , { digit } ;
+exp        = ( &quot;e&quot; | &quot;E&quot; ) , [ &quot;-&quot; | &quot;+&quot; ] , digit , { digit } ;
+ws         = { %x20 | %x09 | %x0A | %x0D } ;</code></pre>
+<p>Structural characters (six, per RFC 8259 section 2): <code>{</code> <code>}</code> <code>[</code> <code>]</code> <code>:</code> <code>,</code>. Whitespace (three
+plus space, per RFC 8259 section 2): space (0x20), tab (0x09), line feed (0x0A), carriage return
+(0x0D) — no others, including no BOM. What the specification permits versus what implementations
+commonly get wrong: RFC 8259 permits arbitrary nesting depth and arbitrary-precision numbers
+textually (no grammar-level limit) — implementations commonly get this wrong by either accepting
+unbounded nesting (<a class="cite" href="/system-design-blueprints/systems/json-parser/reliability/#t-1">T1</a>) or silently truncating number precision without a documented policy (P3).
+RFC 8259 leaves duplicate object keys as implementation-defined (section 4) — implementations
+commonly get this wrong by choosing silently and divergently (<a class="cite" href="/system-design-blueprints/systems/json-parser/reliability/#inv-10">I10</a>, <a class="cite" href="/system-design-blueprints/systems/json-parser/reliability/#t-6">T6</a>).</p>
+<h3 id="sec-8-2">8.2 Tokenizer State-Transition Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Input Class</th>
+<th>Next State</th>
+<th>Action</th>
+<th>Error Edge</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Start</td>
+<td>ws</td>
+<td>Start</td>
+<td>skip</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Start</td>
+<td><code>{</code> <code>}</code> <code>[</code> <code>]</code> <code>:</code> <code>,</code></td>
+<td>Structural</td>
+<td>emit token</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Start</td>
+<td><code>&quot;</code></td>
+<td>InString</td>
+<td>begin span</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Start</td>
+<td><code>-</code> or digit</td>
+<td>InNumber</td>
+<td>begin span</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Start</td>
+<td><code>t</code>/<code>f</code>/<code>n</code></td>
+<td>InLiteral</td>
+<td>begin span</td>
+<td><code>ErrorCode::UnexpectedToken</code> on mismatch</td>
+</tr>
+<tr>
+<td>Start</td>
+<td>EOF</td>
+<td>Done</td>
+<td>emit EOF</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Start</td>
+<td>other</td>
+<td>—</td>
+<td>—</td>
+<td><code>ErrorCode::UnexpectedToken</code></td>
+</tr>
+<tr>
+<td>InString</td>
+<td>unescaped char (0x20–0x10FFFF, not <code>&quot;</code>/<code>\</code>, not 0x00–0x1F)</td>
+<td>InString</td>
+<td>extend span</td>
+<td>control char → <code>ErrorCode::InvalidControlChar</code></td>
+</tr>
+<tr>
+<td>InString</td>
+<td><code>\</code></td>
+<td>InEscape</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>InString</td>
+<td><code>&quot;</code></td>
+<td>Start</td>
+<td>emit String token</td>
+<td>—</td>
+</tr>
+<tr>
+<td>InString</td>
+<td>EOF</td>
+<td>—</td>
+<td>—</td>
+<td><code>ErrorCode::UnterminatedString</code></td>
+</tr>
+<tr>
+<td>InEscape</td>
+<td><code>&quot;</code> <code>\</code> <code>/</code> <code>b</code> <code>f</code> <code>n</code> <code>r</code> <code>t</code></td>
+<td>InString</td>
+<td>append decoded byte</td>
+<td>—</td>
+</tr>
+<tr>
+<td>InEscape</td>
+<td><code>u</code></td>
+<td>InUnicodeEscape</td>
+<td>expect 4 hex</td>
+<td>—</td>
+</tr>
+<tr>
+<td>InEscape</td>
+<td>other</td>
+<td>—</td>
+<td>—</td>
+<td><code>ErrorCode::InvalidEscape</code></td>
+</tr>
+<tr>
+<td>InUnicodeEscape</td>
+<td>4 hex digits</td>
+<td>InString or PendingSurrogate</td>
+<td>decode <code>\uXXXX</code></td>
+<td>fewer than 4 hex → <code>ErrorCode::InvalidUnicodeEscape</code></td>
+</tr>
+<tr>
+<td>PendingSurrogate (high surrogate seen)</td>
+<td><code>\uDC00</code>–<code>\uDFFF</code></td>
+<td>InString</td>
+<td>combine per section 8.2 formula</td>
+<td>anything else → <code>ErrorCode::LoneSurrogate</code></td>
+</tr>
+<tr>
+<td>InNumber</td>
+<td>digit, <code>.</code>, <code>e</code>/<code>E</code>, <code>+</code>/<code>-</code> per number grammar</td>
+<td>InNumber</td>
+<td>extend span, enforce digit-count limit</td>
+<td>grammar violation → <code>ErrorCode::InvalidNumber</code>; length exceeded → <code>ErrorCode::NumberTooLong</code></td>
+</tr>
+<tr>
+<td>InNumber</td>
+<td>terminator (structural/ws/EOF)</td>
+<td>Start</td>
+<td>emit Number token</td>
+<td>—</td>
+</tr>
+<tr>
+<td>InLiteral</td>
+<td>matches remaining chars of <code>true</code>/<code>false</code>/<code>null</code></td>
+<td>InLiteral or Start</td>
+<td>extend / emit on completion</td>
+<td>mismatch → <code>ErrorCode::UnexpectedToken</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 String Escape Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Escape</th>
+<th>Meaning</th>
+<th>Decoded Byte(s)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>\&quot;</code></td>
+<td>quotation mark</td>
+<td>U+0022</td>
+</tr>
+<tr>
+<td><code>\\</code></td>
+<td>backslash</td>
+<td>U+005C</td>
+</tr>
+<tr>
+<td><code>\/</code></td>
+<td>solidus</td>
+<td>U+002F</td>
+</tr>
+<tr>
+<td><code>\b</code></td>
+<td>backspace</td>
+<td>U+0008</td>
+</tr>
+<tr>
+<td><code>\f</code></td>
+<td>form feed</td>
+<td>U+000C</td>
+</tr>
+<tr>
+<td><code>\n</code></td>
+<td>line feed</td>
+<td>U+000A</td>
+</tr>
+<tr>
+<td><code>\r</code></td>
+<td>carriage return</td>
+<td>U+000D</td>
+</tr>
+<tr>
+<td><code>\t</code></td>
+<td>horizontal tab</td>
+<td>U+0009</td>
+</tr>
+<tr>
+<td><code>\uXXXX</code></td>
+<td>BMP code point or surrogate half</td>
+<td>combine per below if surrogate</td>
+</tr>
+</tbody></table></div>
+<p>Surrogate-pair combining rule: if the decoded <code>\uXXXX</code> value <code>hi</code> is in [0xD800, 0xDBFF], the next
+token must be <code>\uXXXX</code> with value <code>lo</code> in [0xDC00, 0xDFFF]; the combined code point is
+<code>0x10000 + ((hi - 0xD800) &lt;&lt; 10) + (lo - 0xDC00)</code>. A high surrogate not followed by a matching low
+surrogate, or a low surrogate not preceded by a high surrogate, is a lone surrogate
+(<code>ErrorCode::LoneSurrogate</code>).</p>
+<p>Worked example — astral-plane character U+1F600 (GRINNING FACE): encoded in the JSON text as
+<code>😀</code>. <code>hi = 0xD83D</code>, <code>lo = 0xDE00</code>. Combined: <code>0x10000 + ((0xD83D - 0xD800) &lt;&lt; 10) + (0xDE00 - 0xDC00) = 0x10000 + (0x3D &lt;&lt; 10) + 0x200 = 0x10000 + 0xF400 + 0x200 = 0x1F600</code>. The
+unescaper emits this as the 4-byte UTF-8 sequence <code>F0 9F 98 80</code>.</p>
+<h3 id="sec-8-4">8.4 UTF-8 Well-Formedness Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Sequence Length</th>
+<th>Byte 1 Range</th>
+<th>Byte 2 Range</th>
+<th>Byte 3 Range</th>
+<th>Byte 4 Range</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>0x00–0x7F</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>ASCII</td>
+</tr>
+<tr>
+<td>2</td>
+<td>0xC2–0xDF</td>
+<td>0x80–0xBF</td>
+<td>—</td>
+<td>—</td>
+<td>0xC0–0xC1 rejected (overlong)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>0xE0</td>
+<td>0xA0–0xBF</td>
+<td>0x80–0xBF</td>
+<td>—</td>
+<td>tightened byte-2 range rejects overlong</td>
+</tr>
+<tr>
+<td>3</td>
+<td>0xE1–0xEC</td>
+<td>0x80–0xBF</td>
+<td>0x80–0xBF</td>
+<td>—</td>
+<td></td>
+</tr>
+<tr>
+<td>3</td>
+<td>0xED</td>
+<td>0x80–0x9F</td>
+<td>0x80–0xBF</td>
+<td>—</td>
+<td>tightened byte-2 range rejects surrogate range U+D800–U+DFFF</td>
+</tr>
+<tr>
+<td>3</td>
+<td>0xEE–0xEF</td>
+<td>0x80–0xBF</td>
+<td>0x80–0xBF</td>
+<td>—</td>
+<td></td>
+</tr>
+<tr>
+<td>4</td>
+<td>0xF0</td>
+<td>0x90–0xBF</td>
+<td>0x80–0xBF</td>
+<td>0x80–0xBF</td>
+<td>tightened byte-2 range rejects overlong</td>
+</tr>
+<tr>
+<td>4</td>
+<td>0xF1–0xF3</td>
+<td>0x80–0xBF</td>
+<td>0x80–0xBF</td>
+<td>0x80–0xBF</td>
+<td></td>
+</tr>
+<tr>
+<td>4</td>
+<td>0xF4</td>
+<td>0x80–0x8F</td>
+<td>0x80–0xBF</td>
+<td>0x80–0xBF</td>
+<td>tightened byte-2 range caps at U+10FFFF</td>
+</tr>
+</tbody></table></div>
+<p>Worked accept: <code>E2 82 AC</code> (U+20AC EURO SIGN) — byte 1 in 0xE1–0xEC range, bytes 2–3 in 0x80–0xBF —
+accepted. Worked reject (overlong): <code>E0 80 80</code> — byte 1 is 0xE0, byte 2 (0x80) falls outside the
+required 0xA0–0xBF range for that leading byte — rejected as an overlong encoding of U+0000.
+Worked reject (surrogate): <code>ED A0 80</code> — byte 1 is 0xED, byte 2 (0xA0) falls outside the required
+0x80–0x9F range — rejected because it would encode U+D800, a surrogate code point with no valid
+UTF-8 representation.</p>
+<h3 id="sec-8-5">8.5 Number Grammar and Conversion</h3>
+<p>Integer-versus-double decision table:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Textual Form</th>
+<th>No <code>.</code>/<code>e</code>/<code>E</code></th>
+<th>Fits in int64</th>
+<th>Decision</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>42</code></td>
+<td>yes</td>
+<td>yes</td>
+<td><code>NumberKind::Integer</code>, exact int64</td>
+</tr>
+<tr>
+<td><code>99999999999999999999</code></td>
+<td>yes</td>
+<td>no (overflows int64)</td>
+<td><code>NumberKind::Double</code>, converted via slow path if needed</td>
+</tr>
+<tr>
+<td><code>3.14</code></td>
+<td>no</td>
+<td>n/a</td>
+<td><code>NumberKind::Double</code></td>
+</tr>
+<tr>
+<td><code>1e10</code></td>
+<td>no</td>
+<td>n/a</td>
+<td><code>NumberKind::Double</code></td>
+</tr>
+<tr>
+<td><code>-0</code></td>
+<td>yes</td>
+<td>yes (special-cased)</td>
+<td><code>NumberKind::Double</code>, value negative zero, sign bit preserved (see below)</td>
+</tr>
+</tbody></table></div>
+<p>Exact-conversion procedure (named steps): (1) <code>classify</code> — scan the number span once to determine
+integer-vs-double per the table above without allocating; (2) <code>fast_int</code> — for integer-classified
+spans within int64 range, multiply-add with overflow checking, done; (3) <code>eisel_lemire</code> — for
+double-classified spans, attempt the Eisel-Lemire fast path (Lemire 2021): look up the binary
+power-of-ten in a precomputed table, perform a 128-bit multiply, round; succeeds for the documented
+~99.5% of real-world inputs; (4) <code>slow_path</code> — on Eisel-Lemire&#39;s documented failure signal, fall
+back to a correctly-rounded arbitrary-precision decimal-to-binary conversion (Gay 1990); (5)
+<code>finalize</code> — apply sign, and for the <code>-0</code> case, preserve the IEEE 754 negative-zero sign bit rather
+than normalizing to positive zero.</p>
+<p>Worked example (beyond 2^53): <code>9007199254740993</code> (2^53 + 1) is not exactly representable as a
+double; the slow path (or Eisel-Lemire, which agrees with it) rounds to the nearest representable
+double, <code>9007199254740992.0</code>, via round-half-to-even.</p>
+<p>Worked example (slow path required): <code>2.2250738585072014e-308</code> sits at the subnormal boundary
+where Eisel-Lemire&#39;s fast-path table lookup is documented to be insufficiently precise; the
+big-integer slow path is invoked and produces the correctly-rounded subnormal result.</p>
+<p>Worked example (huge exponent): <code>1e400</code> exceeds double&#39;s finite range (max finite exponent ~308);
+per <a class="cite" href="/system-design-blueprints/systems/json-parser/trade-offs/#adr-15">ADR-15</a> this converts to <code>+Infinity</code> only if <code>ParseOptions::allow_infinity_on_overflow</code> is set,
+otherwise it is rejected with <code>ErrorCode::NumberOutOfRange</code> — the default is reject, because
+<code>Infinity</code> is not itself a valid JSON literal and silently producing one violates P1.</p>
+<p>Worked example (<code>-0</code>): the literal <code>-0</code> parses to <code>NumberKind::Double</code> with value negative zero;
+<code>-0 == 0</code> numerically but the sign bit differs, and serialization (<a class="cite" href="/system-design-blueprints/systems/json-parser/build/#sec-17">§17</a>) must reproduce <code>-0</code>
+exactly, not <code>0</code>, to satisfy <a class="cite" href="/system-design-blueprints/systems/json-parser/reliability/#inv-4">I4</a>.</p>
+<h3 id="sec-8-6">8.6 SIMD Structural-Scan Bitmask Pipeline</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Operation</th>
+<th>Output</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Load 64-byte chunk into vector register(s)</td>
+<td>raw bytes</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Compare against <code>&quot;</code> byte, produce quote bitmask</td>
+<td><code>quote_mask</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Compare against <code>\</code> byte, compute odd-length-backslash-run mask via carry-chain, XOR into quote mask</td>
+<td><code>escaped_quote_mask</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Prefix-XOR-scan <code>quote_mask</code> (adjusted for escapes) to produce &quot;inside string&quot; region mask</td>
+<td><code>in_string_mask</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Compare against the six structural bytes, AND with NOT <code>in_string_mask</code></td>
+<td><code>structural_mask</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>Compare against the four whitespace bytes, AND with NOT <code>in_string_mask</code></td>
+<td><code>whitespace_mask</code></td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>pext</code>/iterate-and-clear the <code>structural_mask</code> to emit byte offsets into the structural-index array</td>
+<td><code>structural_indices[]</code></td>
+</tr>
+</tbody></table></div>
+<p>Worked 64-byte example (abbreviated to the load-bearing 16 bytes): input <code>{&quot;a&quot;:1,&quot;b&quot;:&quot;\&quot;x\&quot;&quot;}</code>.
+Byte 0 <code>{</code> → structural. Bytes 1,4 <code>&quot;</code> → quote boundaries, not inside a backslash run, toggle
+<code>in_string_mask</code>. Byte 11 is <code>\</code> immediately followed by <code>&quot;</code> at byte 12 — the escaped quote is
+excluded from <code>quote_mask</code> by the backslash-run parity check in stage 3, so it does not toggle
+<code>in_string_mask</code> a third time; the scanner correctly keeps bytes 12–14 (<code>x\&quot;</code> content) inside the
+string region rather than terminating early.</p>
+<h3 id="sec-8-7">8.7 DOM Value Bit-Layout Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Bits</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>tag</td>
+<td>3</td>
+<td><code>ValueTag</code>: Null, Bool, Integer, Double, ShortString, String, Array, Object (8 variants fit in 3 bits)</td>
+</tr>
+<tr>
+<td>inline_flag</td>
+<td>1</td>
+<td>1 = payload stored inline in the union; 0 = payload is an indirect <code>Arena</code> offset</td>
+</tr>
+<tr>
+<td>payload</td>
+<td>60</td>
+<td>inline: bool/short-string bytes/small-int; indirect: 32-bit arena block index + 28-bit intra-block offset</td>
+</tr>
+</tbody></table></div>
+<p>Inline-versus-indirect storage rule: <code>Null</code>, <code>Bool</code>, and strings ≤ 7 bytes (<code>ShortString</code>) store
+their payload inline in the 60 payload bits, avoiding an arena allocation entirely; <code>Integer</code> and
+<code>Double</code> store the full 64-bit value inline via a second machine word (the tagged union is 16
+bytes total, tag+flag+padding in the first 8, full-width payload in the second, to satisfy 8-byte
+alignment); <code>String</code> (&gt;7 bytes), <code>Array</code>, and <code>Object</code> store an indirect arena reference. Alignment
+and padding: the 16-byte <code>Value</code> is 8-byte aligned; the 3 tag bits and 1 inline flag occupy the low
+4 bits of word 1, with 60 bits of word 1 unused when word 2 carries the full payload (accepted
+padding cost, traded for branch-free tag dispatch — <a class="cite" href="/system-design-blueprints/systems/json-parser/trade-offs/#adr-9">ADR-09</a>).</p>
+<h3 id="sec-8-8">8.8 Arena Allocation Model</h3>
+<p>Blocks are fixed-size (<a class="cite" href="/system-design-blueprints/systems/json-parser/numbers/#sec-4">§4</a>: 64 KiB), bump-allocated within a block, and chained in a singly-linked
+list owned by <code>Document</code>. An allocation request larger than one block gets its own
+dedicated oversized block. Reset (on parse failure, P7) discards the entire block chain without
+per-node destructors, an O(blocks) operation, not O(nodes).</p>
+<h3 id="sec-8-9">8.9 Streaming Event Catalogue</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Event</th>
+<th>Payload</th>
+<th>Emitted When</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>StartObject</code></td>
+<td>none</td>
+<td><code>{</code> consumed</td>
+</tr>
+<tr>
+<td><code>EndObject</code></td>
+<td>none</td>
+<td>matching <code>}</code> consumed</td>
+</tr>
+<tr>
+<td><code>StartArray</code></td>
+<td>none</td>
+<td><code>[</code> consumed</td>
+</tr>
+<tr>
+<td><code>EndArray</code></td>
+<td>none</td>
+<td>matching <code>]</code> consumed</td>
+</tr>
+<tr>
+<td><code>Key</code></td>
+<td><code>StringView</code></td>
+<td>object member name parsed</td>
+</tr>
+<tr>
+<td><code>StringValue</code></td>
+<td><code>StringView</code></td>
+<td>string value parsed</td>
+</tr>
+<tr>
+<td><code>NumberValue</code></td>
+<td><code>NumberValue</code> (tagged Integer/Double)</td>
+<td>number parsed</td>
+</tr>
+<tr>
+<td><code>BoolValue</code></td>
+<td><code>bool</code></td>
+<td><code>true</code>/<code>false</code> parsed</td>
+</tr>
+<tr>
+<td><code>NullValue</code></td>
+<td>none</td>
+<td><code>null</code> parsed</td>
+</tr>
+<tr>
+<td><code>Error</code></td>
+<td><code>ParseError</code></td>
+<td>any rejection; terminal event</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-10">8.10 Serializer Escaping Decision Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input Byte / Codepoint</th>
+<th>Compact Mode</th>
+<th>Pretty Mode</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>&quot;</code></td>
+<td><code>\&quot;</code></td>
+<td><code>\&quot;</code></td>
+<td>mandatory</td>
+</tr>
+<tr>
+<td><code>\</code></td>
+<td><code>\\</code></td>
+<td><code>\\</code></td>
+<td>mandatory</td>
+</tr>
+<tr>
+<td>0x00–0x1F</td>
+<td><code>\u00XX</code> (or named short escape for <code>\n</code>,<code>\t</code>,<code>\r</code>,<code>\b</code>,<code>\f</code>)</td>
+<td>same</td>
+<td>mandatory per RFC 8259</td>
+</tr>
+<tr>
+<td><code>/</code></td>
+<td>unescaped</td>
+<td>unescaped</td>
+<td><a class="cite" href="/system-design-blueprints/systems/json-parser/trade-offs/#adr-18">ADR-18</a>: never escape solidus, legal and unambiguous</td>
+</tr>
+<tr>
+<td>non-ASCII valid UTF-8</td>
+<td>pass through raw bytes</td>
+<td>pass through raw bytes</td>
+<td><code>EscapeMode::Minimal</code> (default); <code>EscapeMode::AsciiOnly</code> escapes as <code>\uXXXX</code> (with surrogate pair for astral)</td>
+</tr>
+<tr>
+<td>all other printable ASCII</td>
+<td>unescaped</td>
+<td>unescaped</td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-11">8.11 JSON Pointer Grammar and Patch Semantics</h3>
+<pre class="diagram"><code>json-pointer   = *( &quot;/&quot; reference-token ) ;
+reference-token = *( unescaped / escaped ) ;
+unescaped      = %x00-2E / %x30-7D / %x7F-10FFFF ;   (* excludes &quot;/&quot; and &quot;~&quot; *)
+escaped        = &quot;~&quot; ( &quot;0&quot; / &quot;1&quot; ) ;                 (* &quot;~0&quot; -&gt; &quot;~&quot;, &quot;~1&quot; -&gt; &quot;/&quot; *)</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Patch Op</th>
+<th>Required Members</th>
+<th>Semantics</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>add</code></td>
+<td><code>path</code>, <code>value</code></td>
+<td>insert at path, or append if path&#39;s last segment is <code>-</code> for an array</td>
+</tr>
+<tr>
+<td><code>remove</code></td>
+<td><code>path</code></td>
+<td>delete member/element at path</td>
+</tr>
+<tr>
+<td><code>replace</code></td>
+<td><code>path</code>, <code>value</code></td>
+<td>remove then add at same path</td>
+</tr>
+<tr>
+<td><code>move</code></td>
+<td><code>from</code>, <code>path</code></td>
+<td>remove at <code>from</code>, add at <code>path</code></td>
+</tr>
+<tr>
+<td><code>copy</code></td>
+<td><code>from</code>, <code>path</code></td>
+<td>add at <code>path</code> a copy of the value at <code>from</code></td>
+</tr>
+<tr>
+<td><code>test</code></td>
+<td><code>path</code>, <code>value</code></td>
+<td>assert value at path equals given value; patch fails atomically if not</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-12">8.12 Malformed-Input Examples (JSONTestSuite-drawn)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Fixture</th>
+<th>Input (abridged)</th>
+<th>Rejection Reason</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>n_object_trailing_comma.json</code></td>
+<td><code>{&quot;a&quot;:1,}</code></td>
+<td>trailing comma not permitted by section 2 grammar</td>
+</tr>
+<tr>
+<td><code>n_number_leading_zero.json</code></td>
+<td><code>01</code></td>
+<td><code>int</code> production forbids leading zero (section 6)</td>
+</tr>
+<tr>
+<td><code>n_number_nan.json</code></td>
+<td><code>NaN</code></td>
+<td>not a grammar literal</td>
+</tr>
+<tr>
+<td><code>n_number_infinity.json</code></td>
+<td><code>Infinity</code></td>
+<td>not a grammar literal</td>
+</tr>
+<tr>
+<td><code>n_object_unquoted_key.json</code></td>
+<td><code>{a:1}</code></td>
+<td>member name must be a <code>string</code></td>
+</tr>
+<tr>
+<td><code>n_string_lone_surrogate.json</code></td>
+<td><code>&quot;\uD800&quot;</code></td>
+<td>lone surrogate, no combining pair (section 8.2)</td>
+</tr>
+<tr>
+<td><code>n_string_overlong_utf8.json</code></td>
+<td>raw <code>C0 80</code> byte sequence</td>
+<td>overlong encoding, table in section 8.4</td>
+</tr>
+<tr>
+<td><code>n_string_unterminated.json</code></td>
+<td><code>&quot;abc</code></td>
+<td>no closing quotation mark</td>
+</tr>
+<tr>
+<td><code>n_number_bad_exponent.json</code></td>
+<td><code>1e</code></td>
+<td>exponent requires ≥1 digit</td>
+</tr>
+<tr>
+<td><code>n_number_bad_frac.json</code></td>
+<td><code>.5</code></td>
+<td>leading digit required before <code>.</code></td>
+</tr>
+<tr>
+<td><code>i_structure_500_nested_arrays.json</code> (scaled to 10,000)</td>
+<td><code>[[[...]]]</code> × 10,000</td>
+<td>exceeds default depth limit 512 (implementation-defined per spec, this blueprint documents reject)</td>
+</tr>
+<tr>
+<td>adversarial 100 MB single string</td>
+<td><code>&quot;aaaa....a&quot;</code> (100 MB)</td>
+<td>exceeds <code>Limits::max_string_length</code> (<a class="cite" href="/system-design-blueprints/systems/json-parser/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>duplicate keys</td>
+<td><code>{&quot;a&quot;:1,&quot;a&quot;:2}</code></td>
+<td>implementation-defined (section 4); this blueprint&#39;s documented policy is <a class="cite" href="/system-design-blueprints/systems/json-parser/reliability/#inv-10">I10</a></td>
+</tr>
+</tbody></table></div>
+<p>Failure-path example: parsing <code>{&quot;a&quot;: tru}</code> — tokenizer enters <code>InLiteral</code> expecting <code>true</code>, matches
+<code>t</code>,<code>r</code>,<code>u</code> then encounters <code>}</code> instead of <code>e</code>; emits <code>ErrorCode::UnexpectedToken</code> at the byte
+offset of <code>}</code>, with a <code>SourceLocation</code> line/column derived from a running newline count; the
+<code>ParseResult</code> is <code>Error</code>, the partially-built arena for this parse is discarded (<a class="cite" href="/system-design-blueprints/systems/json-parser/reliability/#inv-7">I7</a>), and no
+partial <code>Value</code> is returned to the caller.</p>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

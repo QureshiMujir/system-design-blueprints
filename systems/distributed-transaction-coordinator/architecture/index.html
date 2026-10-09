@@ -1,0 +1,313 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Transaction Coordinator (TrueTime-style) — Architecture · Engineering Blueprints</title><meta name="description" content="Distributed Transaction Coordinator (TrueTime-style), hld: §3 overview + §8 domain model. This project builds, from scratch in Python, a distributed transaction coordinator that provides externally-consistent (linearizable at the transaction level) transactions across sharded data, in the…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/distributed-transaction-coordinator/">Distributed Transaction Coordinator (TrueTime-style)</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Distributed Transaction Coordinator (TrueTime-style)</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Python</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~28 weeks</li> <li>1,882 lines</li> <li>blueprint #196</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-transaction-coordinator/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-transaction-coordinator/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-transaction-coordinator/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-transaction-coordinator/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-transaction-coordinator/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-transaction-coordinator/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-transaction-coordinator/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-transaction-coordinator/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-transaction-coordinator/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Transaction Coordinator (TrueTime-style) — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                        +----------------------+
+                        |   Client / Driver     |
+                        +-----------+-----------+
+                                    |  begin/read/write/commit
+                                    v
+========================== 2PC BOUNDARY (coordinator &lt;-&gt; participant) ============
+              +-------------------------------------------+
+              |            Transaction Coordinator          |
+              |---------------------------------------------|
+              |  Txn State Machine | 2PC Orchestrator        |
+              |  Lock Manager (cross-shard wound-wait)       |
+              |  Timestamp Oracle client  | Clock Monitor    |
+              |  2PC Log (durable prepare/commit/abort)      |
+              |  Recovery Manager (in-doubt resolution)      |
+              +---------------+---------------+-------------+
+                              |  prepare/commit/abort RPC (per shard)
+             +----------------+----------------+
+             v                                 v
+   +-------------------+             +-------------------+
+   |  Participant A     |    ...      |  Participant N     |
+   |  (shard owner)     |             |  (shard owner)     |
+   +---------+-----------+             +---------+-----------+
+======= CONSENSUS BOUNDARY (intra-shard replication) =========================
+             |                                   |
+   +---------v---------+               +---------v---------+
+   | Consensus Group A  |               | Consensus Group N  |
+   | (Paxos/Raft-style) |               | (Paxos/Raft-style) |
+   +---------+---------+               +---------+---------+
+             |                                   |
+   +---------v---------+               +---------v---------+
+   |  MVCC Store A       |              |  MVCC Store N       |
+   |  (versions + GC)     |             |  (versions + GC)     |
+   +---------------------+              +---------------------+
+
+          +------------------------------------------+
+          |     TrueTime / HLC Clock Service           |
+          |  TT.now() -&gt; [earliest, latest], epsilon    |
+          +------------------------------------------+
+                (consulted by coordinator + participants)</code></pre>
+<p>Client / Driver: begins transactions, issues reads/writes, calls commit; retries under coordinator failover without turning an ambiguous outcome into a silent abort.</p>
+<p>Transaction Coordinator: owns the transaction state machine (Pending -&gt; Prepared -&gt; Committed/Aborted, plus In-Doubt), drives 2PC across participant shards, consults the Timestamp Oracle for commit timestamps, and enforces commit-wait before releasing locks or acknowledging the client.</p>
+<p>Participant shards: each is a replicated consensus group (Paxos/Raft-style) fronting an MVCC store; a participant never single-point-fails because its prepare and commit votes are themselves consensus writes, replicated before being acted on.</p>
+<p>MVCC storage per shard: keeps a version chain per key tagged with commit timestamps; snapshot reads at timestamp <code>t</code> return the newest version with <code>commit_ts &lt;= t</code> with no locking.</p>
+<p>TrueTime/HLC clock service: exposes <code>TT.now() -&gt; [earliest, latest]</code> with bounded width <code>2*epsilon</code>; the coordinator uses it for the start rule (pick <code>s &gt;= TT.now().latest</code>) and the commit-wait rule (wait until <code>TT.now().earliest &gt; s</code>).</p>
+<p>Lock manager: per-participant lock table implementing wound-wait; locks are held from acquisition through the end of commit-wait, never released early.</p>
+<p>Timestamp oracle: the coordinator-side component that assigns provisional and final commit timestamps from TrueTime intervals and enforces monotonicity across coordinator epochs.</p>
+<p>2PC log: the coordinator&#39;s durable, append-only record of every prepare vote and commit/abort decision; the sole source of truth for recovery.</p>
+<p>Recovery manager: on coordinator or participant restart, scans the 2PC log (coordinator side) or consensus log (participant side) to resolve in-doubt transactions to the logged decision, never to a locally-guessed one.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-truetime-api">TrueTime API</h3>
+<p><code>TT.now() -&gt; TTInterval(earliest, latest)</code>, with the guarantee <code>latest - earliest &lt;= 2*epsilon</code> for a configured bound <code>epsilon</code>. Two derived rules:</p>
+<ul>
+<li>Start rule: a transaction&#39;s candidate commit timestamp <code>s</code> is chosen such that <code>s &gt;= TT.now().latest</code> at the moment of choosing.</li>
+<li>Commit-wait rule: the coordinator must wait until <code>TT.now().earliest &gt; s</code> before releasing locks or exposing the commit to readers.</li>
+</ul>
+<p>Worked external-consistency example: transaction <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#t-1">T1</a> finishes (releases locks) at absolute real time <code>t_end(T1)</code>. Because of commit-wait, <code>TT.now().earliest &gt; s1</code> held at <code>t_end(T1)</code>, so <code>s1 &lt; TT.now().earliest</code> at every real time <code>&gt;= t_end(T1)</code>. Transaction <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#t-2">T2</a>, starting at real time <code>t_start(T2) &gt;= t_end(T1)</code>, picks <code>s2 &gt;= TT.now().latest &gt;= TT.now().earliest &gt; s1</code>. Hence <code>s2 &gt; s1</code>, establishing <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#inv-1">I1</a> directly from the two rules — the proof requires no assumption beyond the bounded-interval guarantee.</p>
+<p>Hybrid Logical Clock (HLC) comparison: HLC (<code>(physical, logical)</code> pairs, as CockroachDB uses) provides causality tracking without special clock hardware, but has no bounded-uncertainty guarantee — external consistency under HLC alone requires either a conservatively large fixed uncertainty window or accepting occasional read restarts when a transaction observes a timestamp from &quot;the future&quot; of its own clock. TrueTime&#39;s advantage is a <em>bounded and monitored</em> epsilon; HLC&#39;s advantage is zero special hardware. See <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/trade-offs/#sec-36">§36</a> for this tradeoff as an alternative architecture.</p>
+<h3 id="sec-8-2pc-protocol-sequence-table">2PC Protocol (sequence table)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Coordinator</th>
+<th>Participant</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>send PREPARE(txn, writes) to all participants</td>
+<td>receive PREPARE</td>
+</tr>
+<tr>
+<td>2</td>
+<td>—</td>
+<td>validate locks, durably log intent via consensus write, reply VOTE(commit|abort)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>collect votes; if all COMMIT, assign commit_ts</td>
+<td>—</td>
+</tr>
+<tr>
+<td>4</td>
+<td>append COMMIT decision to 2PC log (durable)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>5</td>
+<td>send COMMIT(txn, commit_ts) to all participants</td>
+<td>receive COMMIT, apply via consensus write, ack</td>
+</tr>
+<tr>
+<td>6</td>
+<td>commit-wait until <code>TT.now().earliest &gt; commit_ts</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td>7</td>
+<td>release locks, ack client</td>
+<td>release locks</td>
+</tr>
+</tbody></table></div>
+<p>Worked cross-shard commit: transaction touches shards A and B. Coordinator sends PREPARE to A and B in parallel; both log the prepare via their own consensus group and vote COMMIT; coordinator picks <code>commit_ts = TT.now().latest</code> at decision time, durably logs COMMIT, fans out COMMIT to A and B, then commit-waits before releasing locks and acking the client.</p>
+<p>Worked coordinator-failure recovery: coordinator crashes after step 4 (COMMIT durably logged) but before step 5 completes at participant B. A new coordinator (or the same one restarting) replays the 2PC log, finds a logged COMMIT decision for the transaction, and re-drives step 5 to B — B was already committed at A, so this preserves <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#inv-2">I2</a> and <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#inv-6">I6</a> without asking A or B to re-vote.</p>
+<h3 id="sec-8-mvcc-model">MVCC Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Representation</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Version</td>
+<td><code>(key, commit_ts, value)</code></td>
+<td>immutable once written</td>
+</tr>
+<tr>
+<td>Snapshot read at <code>t</code></td>
+<td>scan version chain for <code>max(commit_ts) &lt;= t</code></td>
+<td>never blocks on locks</td>
+</tr>
+<tr>
+<td>Write intent</td>
+<td>provisional version tagged PENDING</td>
+<td>invisible to readers until COMMIT applied</td>
+</tr>
+<tr>
+<td>GC</td>
+<td>remove versions older than the oldest active snapshot timestamp</td>
+<td>never remove a version a live snapshot may still need</td>
+</tr>
+</tbody></table></div>
+<p>Worked snapshot read: a read-only transaction picks <code>read_ts = TT.now().latest</code> (no commit-wait needed — it writes nothing), and for each key returns the newest version with <code>commit_ts &lt;= read_ts</code>, ignoring PENDING intents entirely.</p>
+<p>Isolation level achieved: external consistency plus one-copy serializability, which sits at the strict-serializable point of the Berenson/Adya hierarchy — strictly above snapshot isolation (which permits write skew) and above plain serializability (which does not order w.r.t. real time).</p>
+<p>Lock model: exclusive locks for writes, shared for reads-that-must-block (rare, given snapshot reads); wound-wait assigns each transaction a start-timestamp-derived priority — an older transaction wounds (aborts) a younger one holding a conflicting lock rather than waiting, which is deadlock-free by construction (no cycle can form when all edges point from younger to older).</p>
+<h3 id="sec-8-transaction-lifecycle-state-machine">Transaction Lifecycle State Machine</h3>
+<pre class="diagram"><code>   BEGIN
+     |
+     v
+  PENDING --prepare fails/any NO vote--&gt; ABORTED
+     |
+     | all PREPARE votes COMMIT
+     v
+  PREPARED --coordinator crash before decision--&gt; IN_DOUBT --replay resolves--&gt; COMMITTED|ABORTED
+     |
+     | commit_ts assigned, decision logged
+     v
+  COMMITTED --commit-wait--&gt; (locks released, visible)</code></pre>
+<p>Failure edges: PENDING -&gt; ABORTED on any participant timeout or NO vote; PREPARED -&gt; IN_DOUBT on coordinator crash before the decision is durably logged (resolved on recovery per <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#inv-6">I6</a>, never left standing); COMMITTED is terminal and irreversible (<a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#inv-13">I13</a>); ABORTED is terminal.</p>
+<h3 id="sec-8-malformed-hard-examples">Malformed / Hard Examples</h3>
+<ul>
+<li>Coordinator crash between prepare and commit, leaving participants in-doubt — resolved per <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#inv-6">I6</a> via 2PC log replay (§ Phase 7).</li>
+<li>A clock-uncertainty spike inflating commit-wait — <code>clock_monitor</code> extends the wait per <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#inv-5">I5</a> rather than truncating it, at a latency cost (§ Phase 10).</li>
+<li>A wound-wait cycle attempt — broken within one detection interval per <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#inv-10">I10</a> (§ Phase 8).</li>
+<li>A snapshot read racing a commit — the read observes the pre-commit version because the intent is PENDING until the consensus-replicated COMMIT lands (§ Phase 9).</li>
+<li>A participant&#39;s consensus group losing quorum mid-2PC — the coordinator&#39;s PREPARE or COMMIT RPC times out; the transaction remains PREPARED/IN_DOUBT until quorum is restored, never guessed at (§ Phase 7-8).</li>
+<li>A clock that violates its epsilon bound — the single correctness-critical failure; <code>clock_monitor</code> trips the fail-safe and halts new commits cluster-wide until the bound is re-established (§ Phase 10, <a class="cite" href="/system-design-blueprints/systems/distributed-transaction-coordinator/reliability/#inv-11">I11</a>).</li>
+</ul>
+<p>Failure-path example: participant B&#39;s consensus group loses its leader mid-PREPARE. The coordinator&#39;s RPC to B times out; the transaction stays PREPARED at A (locks held) and un-decided at B. The coordinator retries PREPARE to B on a bounded backoff; if B&#39;s group re-elects within the transaction&#39;s max-duration budget, PREPARE proceeds normally; if not, the coordinator aborts and sends ABORT to A, releasing A&#39;s locks — no commit_ts is ever assigned for an outcome that did not reach all-COMMIT votes.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

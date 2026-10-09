@@ -1,0 +1,338 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Taint Analysis Engine from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Taint Analysis Engine from Scratch, hld: §3 overview + §8 domain model. Build a production-grade static and hybrid taint analysis engine performing interprocedural, context-sensitive, field-sensitive, flow-sensitive, and partially path-sensitive dataflow analysis over…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/security-cryptography/">Security &amp; Cryptography</a> </li><li> <a href="/system-design-blueprints/systems/taint-analysis-engine/">Taint Analysis Engine from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:118"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/security-cryptography/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Security &amp; Cryptography</span></a> </p> <h1>Taint Analysis Engine from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~21 weeks</li> <li>1,903 lines</li> <li>blueprint #231</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/taint-analysis-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/taint-analysis-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/taint-analysis-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/taint-analysis-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/taint-analysis-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/taint-analysis-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/taint-analysis-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/taint-analysis-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/taint-analysis-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/taint-analysis-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Taint Analysis Engine from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>+----------------------------------------------------------------------------------+
+|                              Client Interfaces (untrusted)                       |
+|  CLI | LSP Adapter | CI Runner | REST API | Batch Coordinator                    |
++------------------------------------------+----------------------------------------+
+                                           |  (trust boundary: input validation)
+                                           v
++----------------------------------------------------------------------------------+
+|                          Analysis Orchestrator (trusted core)                     |
+|  Session Manager | Work Scheduler | Replay Controller | Resource Governor         |
++------------------------------------------+----------------------------------------+
+                     |                                              |
+                     v  (persistence boundary)                      v (concurrency boundary)
++-------------------------------------+       +------------------------------------+
+|          Frontend Pipeline          |       |         Persistence Layer          |
+|  Parser | AST | Symbols | CFG | SSA |       |  WAL | Snapshot Store | Cache      |
++-------------------+-----------------+       +------------------+-----------------+
+                    |                                            |
+                    v                                            v
++----------------------------------------------------------------------------------+
+|                     Interprocedural Graph Core (immutable after seal)            |
+|  Call Graph (CHA/RTA) | Points-To Graph (Andersen/Steensgaard) | Heap Regions     |
++------------------------------------------+----------------------------------------+
+                                           |
+                                           v
++----------------------------------------------------------------------------------+
+|                    Taint Propagation Engine (IFDS/IDE, exploded supergraph)       |
+|  Source Resolver | PathEdge/SummaryEdge Solver | Sanitizer Engine | Sink Matcher  |
++------------------------------------------+----------------------------------------+
+                                           |
+                                           v
++----------------------------------------------------------------------------------+
+|                                Result Processing                                 |
+|  Findings | Deduplicator | Severity Engine | SARIF Export | Trace Renderer        |
++------------------------------------------+----------------------------------------+
+                                           |
+                                           v
++----------------------------------------------------------------------------------+
+|                             Observability Platform                               |
+|  Metrics | Structured Logs | Traces | Profilers | Failure Recorder               |
++----------------------------------------------------------------------------------+</code></pre>
+<p><strong>Client Interfaces</strong> — untrusted boundary; protocol normalization, request admission,
+configuration validation, artifact upload, result streaming; isolates external consumers from
+internal IR evolution (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/blueprint/#sec-25">§25</a>).</p>
+<p><strong>Analysis Orchestrator</strong> — trusted core; owns deterministic scheduling, replay IDs (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-11">I11</a>),
+cancellation propagation, memory quotas (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/numbers/#sec-4">§4</a>), work stealing, concurrency budgeting.</p>
+<p><strong>Frontend Pipeline</strong> — transforms source programs into normalized SSA-backed IR; parsing
+recovery, AST canonicalization, symbol resolution, CFG generation, dominance analysis, SSA
+insertion (Phases 1–2, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-13">§13</a>–<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-14">§14</a>).</p>
+<p><strong>Persistence Layer</strong> — persistence boundary; stores replay logs, incremental caches, graph
+snapshots, findings metadata, deterministic execution manifests; crash-recovery guarantees
+(Phase 7, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-19">§19</a>).</p>
+<p><strong>Interprocedural Graph Core</strong> — concurrency boundary; canonical call graph, points-to graph,
+heap-region model. All taint propagation traverses these graphs; <strong>immutable after sealing</strong>
+(<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-10">I10</a>).</p>
+<p><strong>Taint Propagation Engine</strong> — executes IFDS/IDE fixpoint propagation with configurable taint
+semantics; field sensitivity via access paths, heap abstractions, taint kinds, sanitizer effects,
+context windows (Phase 5, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-17">§17</a>).</p>
+<p><strong>Result Processing</strong> — normalizes findings, deduplication, severity mapping, sink aggregation,
+export formatting (Phase 9, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-21">§21</a>).</p>
+<p><strong>Observability Platform</strong> — distributed traces, propagation counters, queue-depth metrics,
+scheduler diagnostics, heap-pressure visibility, replay correlation (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/blueprint/#sec-24">§24</a>).</p>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<p>Core entity chain:</p>
+<pre class="diagram"><code>Source -&gt; Propagation Edge (Access Path) -&gt; Sanitizer -&gt; Sink</code></pre>
+<p>IR node types (canonical, reused <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/design/#sec-11">§11</a>, Phase 2 <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-14">§14</a>, Appendix A):</p>
+<p><code>AssignNode</code> · <code>BranchNode</code> · <code>PhiNode</code> · <code>CallNode</code> · <code>ReturnNode</code> · <code>HeapLoadNode</code> ·
+<code>HeapStoreNode</code> · <code>LiteralNode</code>.</p>
+<p>Access-path grammar (EBNF; bounded by <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-8">I8</a> to depth k, default k=5, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/trade-offs/#adr-19">ADR-19</a>):</p>
+<pre class="code language-ebnf" data-lang="ebnf"><code>access_path   ::= base field_chain
+base          ::= identifier | &quot;this&quot;
+field_chain   ::= ( &quot;.&quot; field | &quot;[&quot; index &quot;]&quot; )*
+field         ::= identifier
+index         ::= identifier | integer | &quot;*&quot;        (* &quot;*&quot; = any-index summary *)</code></pre>
+<p>Taint states (lattice, IDE-valued per Sagiv-Reps-Horwitz 1996; ⊥ = Untainted, ⊤ = merged
+Unknown):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Untainted</code></td>
+<td>safe</td>
+</tr>
+<tr>
+<td><code>Tainted(UserInput)</code></td>
+<td>attacker-controlled</td>
+</tr>
+<tr>
+<td><code>Sanitized(SQL)</code></td>
+<td>escaped for SQL context only</td>
+</tr>
+<tr>
+<td><code>Sanitized(HTML)</code></td>
+<td>escaped for HTML context only</td>
+</tr>
+<tr>
+<td><code>Unknown</code></td>
+<td>analysis uncertainty (fail-closed, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-11">P11</a>)</td>
+</tr>
+</tbody></table></div>
+<p>Propagation sequence (Phase-by-phase, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-12">§12</a>–<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-21">§21</a>):</p>
+<pre class="diagram"><code>Parser -&gt; AST -&gt; CFG -&gt; SSA -&gt; CallGraph -&gt; PointsTo -&gt; IFDS/IDE Fixpoint -&gt; Findings -&gt; SARIF</code></pre>
+<p>Worked example (SQL injection):</p>
+<pre class="diagram"><code>user_input = request.get(&quot;id&quot;)           // AssignNode, source: HttpRequestParam
+query = &quot;SELECT * FROM t WHERE id=&quot; + user_input   // AssignNode, access path: query
+execute(query)                            // CallNode, sink: SqlExecute</code></pre>
+<p>Detected flow (PathEdge chain through the exploded supergraph, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-17">§17</a>):</p>
+<pre class="diagram"><code>request.get(HttpRequestParam) --Assign--&gt; query --Call(execute)--&gt; SqlExecute[sink]</code></pre>
+<p>State-transition table (sanitizer effect application, Phase 6, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-18">§18</a>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input State</th>
+<th>Sanitizer Applied</th>
+<th>Output State</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Tainted(UserInput)</code></td>
+<td><code>SQL_ESCAPE</code></td>
+<td><code>Sanitized(SQL)</code></td>
+</tr>
+<tr>
+<td><code>Tainted(UserInput)</code></td>
+<td><code>HTML_ESCAPE</code></td>
+<td><code>Sanitized(HTML)</code></td>
+</tr>
+<tr>
+<td><code>Tainted(UserInput)</code></td>
+<td><code>NONE</code></td>
+<td><code>Tainted(UserInput)</code></td>
+</tr>
+<tr>
+<td><code>Sanitized(SQL)</code></td>
+<td><code>HTML_ESCAPE</code> (SQL context sink)</td>
+<td><code>Sanitized(SQL)</code> (unaffected — not a SQL sink)</td>
+</tr>
+</tbody></table></div>
+<p>Malformed-input example: unresolved dynamic dispatch on <code>execute</code> (reflection) — analysis
+emits <code>Tainted(UserInput)</code> at <code>Unknown</code> confidence rather than dropping the edge (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-11">P11</a>, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#t-1">T1</a>).</p>
+<p>Failure-path example: corrupted AST span on <code>query</code> assignment (parser bomb, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#t-1">T1</a>) — parser
+epoch (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-14">I14</a>) rejects the file, emits a <code>parser_epoch_mismatch_total</code> telemetry event, and the
+file is quarantined from the shard rather than crashing the worker (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#fm-5">FM-5</a>).</p>
+<p>Second worked example (reflected XSS, exercising field-sensitive access paths, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/trade-offs/#adr-19">ADR-19</a>):</p>
+<pre class="diagram"><code>resp.headers[&quot;X-User&quot;] = request.get(&quot;name&quot;)      // HeapStoreNode, access path: resp.headers[&quot;X-User&quot;]
+render_template(resp)                              // CallNode, sink: HttpResponseWrite</code></pre>
+<p>Detected flow: <code>request.get(HttpRequestParam)</code> propagates via <code>HeapStoreNode</code> into access path
+<code>resp.headers[&quot;*&quot;]</code> (index summarized under <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-8">I8</a> k-limiting) then reaches <code>HttpResponseWrite</code>
+unsanitized — verdict <code>Tainted(UserInput)</code>, distinct sink class from the SQL example, same
+<code>AccessPath</code> machinery (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/design/#sec-11">§11</a>).</p>
+<p>Access-path wire layout (Protobuf, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/trade-offs/#adr-3">ADR-03</a>; forward-compatible per <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-7">I7</a>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Wire Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>base_node_id</code></td>
+<td>fixed64</td>
+<td>NodeId of the access-path root</td>
+</tr>
+<tr>
+<td><code>field_tokens</code></td>
+<td>repeated string</td>
+<td>bounded to k entries (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-8">I8</a>); overflow merges to <code>&quot;*&quot;</code></td>
+</tr>
+<tr>
+<td><code>depth</code></td>
+<td>uint32</td>
+<td>redundant with <code>len(field_tokens)</code>, kept for O(1) k-limit checks</td>
+</tr>
+<tr>
+<td><code>taint_state</code></td>
+<td>enum</td>
+<td><code>TaintState</code> discriminant (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/design/#sec-11">§11</a>)</td>
+</tr>
+<tr>
+<td><code>schema_version</code></td>
+<td>uint32</td>
+<td><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-7">I7</a> versioning; unknown versions trigger compatibility mode</td>
+</tr>
+</tbody></table></div>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-1">P1</a> — Determinism over throughput.</strong> Every analysis run must be replayable from identical inputs. Tradeoff: forgoes nondeterministic work-stealing gains for reproducibility. Operational implication: replay IDs (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-11">I11</a>) gate every release. Violate it and CI findings diffs become unauditable noise.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-2">P2</a> — Bounded resource usage.</strong> No unbounded queues or recursive traversals. Tradeoff: precision loss via access-path k-limiting (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/trade-offs/#adr-19">ADR-19</a>). Violate it and a single adversarial repo OOMs the cluster (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#t-7">T7</a>).</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-3">P3</a> — Crash-only worker semantics.</strong> Workers may terminate abruptly without corrupting global state. Tradeoff: no graceful-shutdown code paths to maintain. Violate it and ad-hoc cleanup introduces the exact corruption crash-only design exists to avoid (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/study/#sec-30">MM7</a>).</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-4">P4</a> — Immutable graph sealing.</strong> Graph mutation prohibited after publication (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-10">I10</a>). Tradeoff: incremental updates require new graph generations, not in-place edits. Violate it and concurrent readers observe torn graph state.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-5">P5</a> — Observability by default.</strong> Every propagation stage emits metrics and traces. Tradeoff: telemetry cardinality must be actively capped (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#t-5">T5</a>). Violate it and failures are undiagnosable in production.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-6">P6</a> — Explicit ownership.</strong> Shared mutable state minimized; graphs are <code>Arc</code>-shared immutable structures. Tradeoff: some structural-sharing overhead vs raw pointers. Violate it and data races reappear despite Rust&#39;s borrow checker (unsafe escape hatches).</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-7">P7</a> — Replayability first.</strong> Reconstructable execution traces mandatory (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-11">I11</a>). Tradeoff: WAL write volume scales with propagation event count. Violate it and post-incident forensics is impossible (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#sec-23">§23</a>).</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-8">P8</a> — Versioned schemas everywhere.</strong> Storage and wire evolution must remain compatible (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/blueprint/#sec-25">§25</a>). Tradeoff: every schema change carries a migration cost. Violate it and rolling upgrades break mid-fleet.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-9">P9</a> — No hidden sanitizers.</strong> Sanitizer effects require explicit declaration in the rule catalog (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-18">§18</a>). Tradeoff: unmodeled third-party sanitizers cause false positives until catalogued. Violate it and silent under-sanitization produces false negatives (a security bug in a security tool).</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-10">P10</a> — Backpressure everywhere.</strong> Queue admission tied to memory quotas (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/numbers/#sec-4">§4</a>). Tradeoff: admission control adds latency under load. Violate it and unbounded queue growth causes <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/reliability/#fm-4">FM-4</a>.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-11">P11</a> — Fail closed on parser ambiguity.</strong> Ambiguous semantics produce warnings and downgraded trust, never silent best-guess resolution. Tradeoff: more <code>Unknown</code>-taint findings requiring triage. Violate it and a missed dynamic dispatch target becomes a silent false negative.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-12">P12</a> — Stable finding identity.</strong> Findings maintain deterministic IDs across runs, keyed on structural path, not line number (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/study/#sec-30">MM8</a>). Tradeoff: ID computation requires structural hashing, not a simple counter. Violate it and every CI run looks like all-new findings.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-13">P13</a> — Precision is a dial, not a switch.</strong> Points-to and context-sensitivity are configurable per analysis profile (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/trade-offs/#adr-17">ADR-17</a>). Tradeoff: more configuration surface to test. Violate it and the engine either can&#39;t scale (Andersen-only) or can&#39;t triage precisely (Steensgaard-only).</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/architecture/#p-14">P14</a> — Sealed interprocedural summaries over re-derivation.</strong> Function summaries are computed once and cached (summary edges, <a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-17">§17</a>), never re-derived per call site. Tradeoff: summary cache invalidation complexity (<a class="cite" href="/system-design-blueprints/systems/taint-analysis-engine/build/#sec-19">§19</a>). Violate it and analysis time grows with call-site count instead of function count.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

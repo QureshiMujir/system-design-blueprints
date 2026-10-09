@@ -1,0 +1,325 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Artifact / Build Cache Server — Architecture · Engineering Blueprints</title><meta name="description" content="Artifact / Build Cache Server, hld: §3 overview + §8 domain model. a from-scratch remote build cache server implementing the Bazel-compatible Remote Execution API (REAPI) subset — specifically the caching services only (no remote execution). Two logical stores: 1.…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/artifact-build-cache-server/">Artifact / Build Cache Server</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Artifact / Build Cache Server</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~23 weeks</li> <li>2,599 lines</li> <li>blueprint #272</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/artifact-build-cache-server/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Artifact / Build Cache Server — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>    build clients (Bazel / Buck2 / sccache-style)              operators — abc CLI
+  gRPC: ByteStream · CAS · ActionCache · Capabilities  HTTP: /ac /cas    stats/gc/verify
+             |                                  |                  |
+             v                                  v                  v
+  ┌────────────────── abc-grpc ──────────────┐    ┌──── abc-http ────┐
+  │ ByteStream Read/Write/QueryWriteStatus    │    │ GET/PUT/HEAD     │
+  │ CAS FindMissing/Batch*/GetTree            │    │  /ac/{h} /cas/{h}│
+  │ ActionCache Get/Update · Capabilities     │    └────────┬─────────┘
+  └───────┬───────────────────────┬───────────┘             │
+          v                        v                         v
+       abc-cas                   abc-ac  (ActionDigest → ActionResult;
+  put/get/contains/         verifies outputs ∈ CAS = completeness invariant)
+  find-missing / GetTree            │
+          │  every blob: hash-verify (abc-digest) + optional zstd (abc-zstd)
+          v
+       abc-store ── memory LRU ─▶ local disk (sharded ab/cd/&lt;hash&gt;) ─▶ remote/object tier
+          │  index: size · atime · refcount · compressor · tier
+          v
+       abc-gc  (LRU + size watermark high/low; AC→CAS mark-sweep; never evict in-flight)</code></pre>
+<p><strong>abc-grpc:</strong> tonic-generated stubs + hand-written service logic; owns request parsing, resource-name parsing, auth middleware, backpressure on streaming RPCs, gRPC status-code mapping. Trust boundary: all inputs untrusted. Dispatches to abc-cas, abc-ac, abc-store via trait objects.</p>
+<p><strong>abc-http:</strong> axum router; implements Bazel <code>--remote_cache=http://</code> protocol (GET/PUT/HEAD on <code>/ac/{hash}</code> and <code>/cas/{hash}</code>); delegates to same abc-cas/abc-ac. TLS via rustls. Token or mTLS auth. Read-only / proxy mode flags.</p>
+<p><strong>abc-cas:</strong> orchestrates CAS RPCs; calls abc-store for the actual blob IO; calls abc-digest for streaming verify; calls abc-zstd for compressed-blobs resource paths. Returns <code>AbcError::DigestMismatch</code> on mismatch; never stores bad blob.</p>
+<p><strong>abc-ac:</strong> holds the ActionDigest → ActionResult map (tokio RwLock over a BTreeMap + optional disk persistence). Completeness check on get/update: every referenced blob digest must be <code>contains()</code>-true in abc-cas; if not, return NOT_FOUND (avoids serving stale results). Honors <code>do_not_cache</code>.</p>
+<p><strong>abc-store:</strong> the storage engine. Three tiers — in-memory LRU (<code>DashMap</code> + doubly-linked LRU list), local disk (sharded by first two hex bytes → <code>ab/cd/&lt;hash&gt;</code>), optional remote/object tier. Metadata index (<code>BlobMeta</code>) tracks size, atime, refcount, compressor, tier. Crash-safe via write-temp + atomic rename + optional fsync. Tier promotion on read-hit; demotion by LRU.</p>
+<p><strong>abc-digest:</strong> stateless; streaming SHA-256 (+ SHA-512, BLAKE3) via <code>sha2</code>/<code>blake3</code> crates; produces <code>Digest {hash, size_bytes}</code>; verify() re-hashes and compares; hex encoding/decoding.</p>
+<p><strong>abc-zstd:</strong> wraps <code>zstd</code> crate; compress/decompress in streaming chunks; owns the compressed-blobs resource-name framing; enforces decompress-then-verify order (digest always identifies uncompressed bytes).</p>
+<p><strong>abc-gc:</strong> background tokio task; polls usage vs Watermark {high, low}; when usage &gt; high → LRU eviction loop until usage &lt; low; AC→CAS reachability sweep marks live CAS entries then removes unreferenced ones; refcount guards prevent eviction of in-flight uploads and recently-accessed blobs.</p>
+<p><strong>abc-cli:</strong> clap-based; <code>abcd serve</code> (starts gRPC + HTTP listeners); <code>abc stats</code> (live metrics); <code>abc gc</code> (trigger GC); <code>abc verify</code> (re-hash all on-disk blobs); <code>abc import/export</code> (bulk blob transfer); <code>abc bench</code> (throughput micro-benchmark).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Digest</h3>
+<pre class="diagram"><code>Digest {
+  hash:       String   // lowercase hex, SHA-256=64 chars / SHA-512=128 / BLAKE3=64
+  size_bytes: i64      // exact byte count of uncompressed content; -1 = unknown (proto default, MUST be set)
+}</code></pre>
+<ul>
+<li>Identity: <code>(hash, size_bytes)</code> pair; size is cheap integrity guard + collision barrier.</li>
+<li>Two digests are equal iff both fields are equal (bytewise hash compare + integer compare).</li>
+<li>The zero-size blob <code>{sha256(&quot;&quot;), 0}</code> is a valid, well-known digest that must be accepted.</li>
+<li>Malformed: <code>hash=&quot;&quot;</code>, <code>size_bytes&lt;0</code>, hex-invalid chars, wrong length for declared function → INVALID_ARGUMENT.</li>
+</ul>
+<h3 id="sec-8-2">8.2 Merkle Directory Tree</h3>
+<pre class="diagram"><code>Directory {
+  files:       Vec&lt;FileNode&gt;       // sorted by name ascending
+  directories: Vec&lt;DirectoryNode&gt;  // sorted by name ascending
+  symlinks:    Vec&lt;SymlinkNode&gt;    // sorted by name ascending
+}
+FileNode     { name: String, digest: Digest, is_executable: bool }
+DirectoryNode{ name: String, digest: Digest }   // digest of serialized child Directory
+SymlinkNode  { name: String, target: String }</code></pre>
+<ul>
+<li>Each <code>DirectoryNode.digest</code> = digest of the proto-serialized <code>Directory</code> message of the child.</li>
+<li>Tree root = <code>Action.input_root_digest</code> = digest of the root <code>Directory</code>.</li>
+<li>Identical subtrees deduplicate: same subdirectory content → same digest → same CAS blob.</li>
+<li>Well-formedness: no <code>.</code> or <code>..</code> name; no <code>/</code> in name; sorted by name; no duplicate names within a list.</li>
+<li>Upload: DFS post-order (children before parent); each <code>Directory</code> is a distinct CAS blob.</li>
+<li>GetTree: server walks from root digest, returns <code>Directory</code> messages in BFS order, pagination via <code>page_token</code>.</li>
+</ul>
+<h3 id="sec-8-3">8.3 Action → ActionResult Model</h3>
+<pre class="diagram"><code>Command {
+  arguments:              Vec&lt;String&gt;       // argv[0..n]
+  environment_variables:  Vec&lt;EnvVar&gt;       // { name, value }
+  output_paths:           Vec&lt;String&gt;       // declared outputs
+}
+Action {
+  command_digest:      Digest    // digest of serialized Command
+  input_root_digest:   Digest    // digest of root Directory
+  timeout:             Duration
+  do_not_cache:        bool
+}
+ActionResult {
+  output_files:       Vec&lt;OutputFile&gt;       // { path, digest, is_executable }
+  output_directories: Vec&lt;OutputDirectory&gt;  // { path, tree_digest }
+  exit_code:          i32
+  stdout_digest:      Option&lt;Digest&gt;
+  stderr_digest:      Option&lt;Digest&gt;
+  execution_metadata: ExecMeta              // { worker, queued_at, exec_completed_at }
+}</code></pre>
+<ul>
+<li>AC key = <code>Digest(serialize(Action))</code>.</li>
+<li>Completeness check: every <code>OutputFile.digest</code>, <code>OutputDirectory.tree_digest</code>, <code>stdout_digest</code>, <code>stderr_digest</code> must be present in CAS.</li>
+<li><code>do_not_cache=true</code> → skip AC update; serve normally for this invocation.</li>
+</ul>
+<h3 id="sec-8-4">8.4 ByteStream Resource Name Grammar (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>resource-name     ::= upload-name | blob-name | compressed-upload | compressed-blob
+
+upload-name       ::= instance-name &quot;/uploads/&quot; uuid &quot;/blobs/&quot; digest-path
+blob-name         ::= instance-name &quot;/blobs/&quot; digest-path
+compressed-upload ::= instance-name &quot;/uploads/&quot; uuid &quot;/compressed-blobs/zstd/&quot; digest-path
+compressed-blob   ::= instance-name &quot;/compressed-blobs/zstd/&quot; digest-path
+
+instance-name     ::= segment (&quot;/&quot; segment)*        (* may be empty string *)
+digest-path       ::= hash &quot;/&quot; size-bytes
+hash              ::= [0-9a-f]+                     (* length = digest function output bits / 4 *)
+size-bytes        ::= [0-9]+
+uuid              ::= [0-9a-f-]{36}                 (* RFC 4122 v4 *)
+segment           ::= [A-Za-z0-9._~!$&amp;&#39;()*+,;=:@%-]+</code></pre>
+<p>Parsing rules:</p>
+<ul>
+<li>Split on <code>/</code>; find literal <code>uploads</code> or <code>blobs</code> or <code>compressed-blobs</code> sentinel positions.</li>
+<li><code>compressed-blobs</code> implies <code>Compressor::Zstd</code>; digest still identifies uncompressed content.</li>
+<li>Empty instance name = default tenant.</li>
+<li>Malformed resource name → <code>AbcError::InvalidResourceName</code> → gRPC INVALID_ARGUMENT.</li>
+</ul>
+<h3 id="sec-8-5">8.5 gRPC Service Message Schemas (proto-ish)</h3>
+<pre class="diagram"><code>// ContentAddressableStorage service
+FindMissingBlobs  { instance_name, blob_digests: Vec&lt;Digest&gt; }
+  → FindMissingBlobsResponse { missing_blob_digests: Vec&lt;Digest&gt; }
+
+BatchUpdateBlobs  { instance_name, requests: Vec&lt;{digest, data: bytes, compressor}&gt; }
+  → BatchUpdateBlobsResponse { responses: Vec&lt;{digest, status}&gt; }
+
+BatchReadBlobs    { instance_name, digests: Vec&lt;Digest&gt;, acceptable_compressors }
+  → BatchReadBlobsResponse { responses: Vec&lt;{digest, data, compressor, status}&gt; }
+
+GetTree           { instance_name, root_digest, page_size, page_token }
+  → GetTreeResponse { directories: Vec&lt;Directory&gt;, next_page_token }
+
+// ActionCache service
+GetActionResult   { instance_name, action_digest, inline_stdout, inline_stderr }
+  → ActionResult (or NOT_FOUND)
+
+UpdateActionResult{ instance_name, action_digest, action_result, results_cache_policy }
+  → ActionResult
+
+// Capabilities service
+GetCapabilities   { instance_name }
+  → ServerCapabilities { cache_capabilities: CacheCapabilities, ... }
+CacheCapabilities { digest_functions, action_cache_update_capabilities,
+                    cache_priority_capabilities, max_batch_total_size_bytes,
+                    symlink_absolute_path_strategy, supported_compressors,
+                    supported_batch_update_compressors }
+
+// ByteStream service (google.bytestream)
+Write  (stream) { resource_name, write_offset, data: bytes, finish_write: bool }
+  → WriteResponse { committed_size }
+Read             { resource_name, read_offset, read_limit }
+  → (stream) ReadResponse { data: bytes }
+QueryWriteStatus { resource_name }
+  → QueryWriteStatusResponse { committed_size, complete: bool }</code></pre>
+<h3 id="sec-8-6">8.6 Sequence Diagrams</h3>
+<p><strong>CAS upload (ByteStream Write):</strong></p>
+<pre class="diagram"><code>Client                     abc-grpc                abc-cas              abc-store
+  |--Write(upload-name)--&gt;  |                         |                     |
+  |  (chunks streaming)     |--stream_to_temp()------&gt;|                     |
+  |                         |                         |--write_temp(digest)&gt;|
+  |  finish_write=true      |                         |--verify(digest)----&gt;|
+  |                         |                         |  DigestMismatch?    |
+  |                         |                         |  atomic_rename()  -&gt;|
+  |&lt;--WriteResponse-------&gt; |                         |                     |
+       committed_size                                 refcount--</code></pre>
+<p><strong>AC get (completeness check):</strong></p>
+<pre class="diagram"><code>Client              abc-grpc          abc-ac              abc-cas
+  |--GetActionResult-&gt;|                  |                   |
+  |                   |--ac.get(ad)-----&gt;|                   |
+  |                   |                 |--completeness loop&gt;|
+  |                   |                 | cas.contains(d)?   |
+  |                   |                 |&lt;--true/false-------|
+  |                   |                 |  one missing → evict AC entry
+  |&lt;--ActionResult----|                 |  all present → return AR
+  |   (or NOT_FOUND)</code></pre>
+<h3 id="sec-8-7">8.7 Worked Examples</h3>
+<p><strong>Valid SHA-256 digest:</strong> <code>{ hash: &quot;e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&quot;, size_bytes: 0 }</code> — empty blob.</p>
+<p><strong>Valid upload resource name:</strong> <code>myproject/uploads/550e8400-e29b-41d4-a716-446655440000/blobs/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/0</code></p>
+<p><strong>Valid compressed upload:</strong> <code>myproject/uploads/550e8400-e29b-41d4-a716-446655440000/compressed-blobs/zstd/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/0</code></p>
+<p><strong>Malformed examples (→ INVALID_ARGUMENT):</strong></p>
+<ul>
+<li><code>hash=&quot;&quot;</code> — empty hash.</li>
+<li><code>size_bytes=-1</code> — negative.</li>
+<li><code>hash=&quot;GGGG...&quot;</code> — non-hex chars.</li>
+<li>resource name missing <code>/blobs/</code> sentinel.</li>
+<li>Directory with unsorted file entries.</li>
+<li>Directory with duplicate <code>FileNode.name</code>.</li>
+</ul>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

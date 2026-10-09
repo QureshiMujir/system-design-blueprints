@@ -1,0 +1,687 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>DOM Event System — Architecture · Engineering Blueprints</title><meta name="description" content="DOM Event System, hld: §3 overview + §8 domain model. A from-scratch, spec-exact WHATWG DOM event dispatch engine in Rust — given a target and an event, decide which listeners run, in what order, what propagates, and whether the default is prevented …"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/web-browsers-collaboration/">Web, Browsers &amp; Collaboration</a> </li><li> <a href="/system-design-blueprints/systems/dom-event-system/">DOM Event System</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:255"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/web-browsers-collaboration/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Web, Browsers &amp; Collaboration</span></a> </p> <h1>DOM Event System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~13 weeks</li> <li>2,993 lines</li> <li>blueprint #261</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/dom-event-system/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/dom-event-system/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/dom-event-system/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/dom-event-system/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/dom-event-system/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/dom-event-system/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/dom-event-system/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/dom-event-system/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/dom-event-system/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/dom-event-system/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:DOM Event System — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend side: the host (UI, JS engine, timers)
+%% legend rt: event loop and dispatch (hot path)
+%% legend ingest: path, core types, tree, signals
+%% legend trust: trust / concurrency / persistence notes
+  H([&quot;&lt;b&gt;Host&lt;/b&gt;&lt;br/&gt;UI/compositor (input)&lt;br/&gt;JS engine (callbacks, .dispatchEvent)&lt;br/&gt;timers&quot;])
+  LOOP[&quot;&lt;b&gt;evt-loop&lt;/b&gt;&lt;br/&gt;EventLoop · TaskQueue[source]&lt;br/&gt;microtask checkpoint&lt;br/&gt;trusted-event gate · fire_event&quot;]
+  DISP[&quot;&lt;b&gt;evt-dispatch&lt;/b&gt;&lt;br/&gt;dispatch() · capturing/at-target/bubbling&lt;br/&gt;invoke · inner_invoke&lt;br/&gt;stop/cancel/passive · activation&quot;]
+  PATH[&quot;&lt;b&gt;evt-path&lt;/b&gt;&lt;br/&gt;EventPathItem · get_the_parent&lt;br/&gt;retarget · composed_path&quot;]
+  CORE[&quot;&lt;b&gt;evt-core&lt;/b&gt;&lt;br/&gt;Event · EventFlags&lt;br/&gt;EventListener · EventTarget&quot;]
+  DOM[&quot;&lt;b&gt;evt-dom&lt;/b&gt;&lt;br/&gt;Node arena&lt;br/&gt;element/text/shadow-root/slot&lt;br/&gt;impl EventTarget&quot;]
+  SIG[&quot;&lt;b&gt;evt-signal&lt;/b&gt;&lt;br/&gt;AbortController/AbortSignal&quot;]
+  H -- &quot;trusted events: queue a task&quot; --&gt; LOOP
+  H -- &quot;synthetic events:&lt;br/&gt;.dispatchEvent (synchronous)&quot; --&gt; DISP
+  LOOP -- &quot;run a task -&gt; dispatch&quot; --&gt; DISP
+  DISP -- &quot;build path&quot; --&gt; PATH
+  DISP -- &quot;read/snapshot listeners&quot; --&gt; CORE
+  PATH -- &quot;walk tree (+ shadow/slot)&quot; --&gt; DOM
+  SIG -- &quot;signal aborts -&gt; remove listener&quot; --&gt; CORE
+  TB[&quot;&lt;b&gt;TRUST BOUNDARY&lt;/b&gt;&lt;br/&gt;everything below Host is&lt;br/&gt;untrusted-input territory&lt;br/&gt;· untrusted tree — get_the_parent may&lt;br/&gt;form deep/degenerate/cyclic-shaped&lt;br/&gt;ancestor chains&lt;br/&gt;· untrusted listeners — CallbackRef&lt;br/&gt;RE-ENTERS the API mid-dispatch&lt;br/&gt;(add/remove, nested dispatch)&lt;br/&gt;· adversarial events — uninitialized /&lt;br/&gt;already-dispatching / mismatched&lt;br/&gt;bubbles·cancelable·composed&quot;]
+  CB[&quot;&lt;b&gt;CONCURRENCY BOUNDARY&lt;/b&gt;&lt;br/&gt;· Event + listener lists are !Send by&lt;br/&gt;design (Rc + RefCell) — ONE event&lt;br/&gt;loop per thread&lt;br/&gt;· dispatch is SYNCHRONOUS +&lt;br/&gt;single-threaded, no internal locks,&lt;br/&gt;cross-thread strictly via channels&quot;]
+  PB[&quot;&lt;b&gt;PERSISTENCE BOUNDARY&lt;/b&gt;&lt;br/&gt;· NONE at runtime — all state (path,&lt;br/&gt;flags, queues, signals) is in-memory&lt;br/&gt;+ per-dispatch/per-tick&lt;br/&gt;· only evt-cli serializes scenario&lt;br/&gt;fixtures (load) + trace output&lt;br/&gt;off the hot path&quot;]
+  DOM ~~~ TB
+  SIG ~~~ CB
+  CORE ~~~ PB
+  classDef side stroke-width:1.5px
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef trust stroke-width:1.5px
+  class H side
+  class LOOP,DISP rt
+  class PATH,CORE,DOM,SIG ingest
+  class TB,CB,PB trust</pre><figcaption><ul class="diagram-legend"><li><span class="swatch side"></span>the host (UI, JS engine, timers)</li><li><span class="swatch rt"></span>event loop and dispatch (hot path)</li><li><span class="swatch ingest"></span>path, core types, tree, signals</li><li><span class="swatch trust"></span>trust / concurrency / persistence notes</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code> Host: UI/compositor (input) · JS engine (callbacks, .dispatchEvent) · timers
+        |  trusted events: queue a task               |  synthetic events: .dispatchEvent (synchronous)
+        v                                             |
+ evt-loop : EventLoop · TaskQueue[source] · microtask checkpoint · trusted-event gate · fire_event
+        |  run a task -&gt; dispatch                      |
+        v                                             v
+ evt-dispatch : dispatch() · capturing/at-target/bubbling · invoke · inner_invoke · stop/cancel/passive · activation
+    |  build path                                     |  read/snapshot listeners
+    v                                                 v
+ evt-path : EventPathItem · get_the_parent · retarget · composed_path     evt-core : Event · EventFlags · EventListener · EventTarget
+    |  walk tree (+ shadow/slot)                       ^  signal aborts -&gt; remove listener
+    v                                                 |
+ evt-dom : Node arena · element/text/shadow-root/slot · impl EventTarget   evt-signal : AbortController/AbortSignal
+
+ ====================================================================================================
+ TRUST BOUNDARY (everything below Host is untrusted-input territory):
+   · untrusted tree         — get_the_parent may form deep/degenerate/cyclic-shaped ancestor chains
+   · untrusted listeners     — CallbackRef RE-ENTERS the API mid-dispatch (add/remove, nested dispatch)
+   · adversarial events      — uninitialized / already-dispatching / mismatched bubbles·cancelable·composed
+ CONCURRENCY BOUNDARY:
+   · Event + listener lists are !Send by design (Rc + RefCell) — ONE event loop per thread
+   · dispatch is SYNCHRONOUS + single-threaded; no internal locks; cross-thread strictly via channels
+ PERSISTENCE BOUNDARY:
+   · NONE at runtime — all state (path, flags, queues, signals) is in-memory + per-dispatch/per-tick;
+     only evt-cli serializes scenario fixtures (load) + trace output off the hot path
+ ====================================================================================================</code></pre></details>
+<p>Layering: <code>Host -&gt; evt-loop -&gt; evt-dispatch -&gt; {evt-path, evt-core}</code>; <code>evt-dom</code> realizes <code>evt-core</code>&#39;s <code>EventTarget</code> under <code>evt-path</code>; <code>evt-signal</code> feeds listener teardown sideways into <code>evt-core</code>&#39;s listener list. Edges acyclic; only <code>evt-dom</code>/<code>evt-loop</code>/<code>evt-cli</code> link <code>std</code>, rest is <code>no_std + alloc</code>.</p>
+<h3 id="sec-3-1">3.1 evt-loop</h3>
+<p>Minimal HTML-style scheduler. <strong>Responsibilities:</strong> per-<code>TaskSource</code> <code>TaskQueue</code>s (<code>Dom</code>, <code>UserInteraction</code>, <code>Networking</code>, <code>Timer</code>), one <code>microtasks</code> queue, <code>perform_microtask_checkpoint</code>, host-driven <code>tick</code>, trusted-event gate, <code>fire_event</code> (UA-originated). <strong>In:</strong> host <code>queue_task</code>/<code>queue_microtask</code> + a chosen <code>Task</code>. <strong>Out:</strong> synchronous <code>dispatch</code> on a target. <strong>Invariant:</strong> task runs to completion, THEN one microtask checkpoint fully drains <code>microtasks</code> (incl. re-entrant enqueues) before next task/render; <code>fire_event</code> is the ONLY producer of <code>is_trusted = true</code>. <strong>Referenced by:</strong> Phase 10 (## 22) primarily; gate consumed by Phase 11/12 trusted-event tests.</p>
+<h3 id="sec-3-2">3.2 evt-dispatch</h3>
+<p>Dispatch state machine. <strong>Responsibilities:</strong> <code>dispatch()</code> driving <code>CapturingPhase -&gt; AtTarget -&gt; BubblingPhase</code>, <code>invoke</code>/<code>inner_invoke</code>, listener snapshotting, <code>once</code> pre-removal, <code>stop_propagation</code>/<code>stop_immediate_propagation</code>/<code>canceled</code> handling, passive <code>preventDefault</code> guard, activation-behavior + <code>legacy_pre_activation_behavior</code>/<code>legacy_canceled_activation_behavior</code> hooks. <strong>In:</strong> <code>(&amp;T: EventTarget, &amp;mut Event, legacy_target_override)</code>. <strong>Out:</strong> <code>bool</code> = <code>!canceled</code> (<code>defaultPrevented</code>); <code>Event</code> flags + <code>current_target</code>/<code>event_phase</code> mutated then reset (<code>currentTarget=null</code>, <code>eventPhase=None</code>). <strong>Invariant:</strong> path computed ONCE at start; <code>inner_invoke</code> iterates a SNAPSHOT (mid-invoke adds never run, <code>removed</code> skipped, <code>once</code> removed before callback); <code>DISPATCH</code> flag rejects re-entrant dispatch of SAME event (<code>AlreadyDispatching</code>) but permits nested dispatch of OTHER events. <strong>Referenced by:</strong> Phases 4–5 (## 16–17) core; extended by 9 (activation), 10 (loop-driven), 12 (conformance/fuzz).</p>
+<h3 id="sec-3-3">3.3 evt-path</h3>
+<p>Propagation-path computation. <strong>Responsibilities:</strong> build <code>Vec&lt;EventPathItem&gt;</code> via <code>get_the_parent</code> walk, <code>retarget(a,b)</code>, <code>composed_path</code>, shadow-including ancestor traversal, slot/slottable handling, related-target + touch-target retargeting. <strong>In:</strong> <code>build_event_path(&amp;target, &amp;event)</code> over a tree + event&#39;s <code>composed</code> flag. <strong>Out:</strong> ordered path (root..target) of <code>EventPathItem</code> carrying <code>shadow_adjusted_target</code>, <code>related_target</code>, <code>touch_target_list</code>, <code>root_of_closed_tree</code>, <code>slot_in_closed_tree</code>. <strong>Invariant:</strong> encapsulation — exposed target for item w/ invocation target A + cross-tree B is <code>retarget(B, A)</code>; non-composed events truncate path at nearest shadow-including root containing target; <code>composed_path()</code> filters by closed-tree visibility relative to <code>currentTarget</code>. <strong>Referenced by:</strong> Phase 3 (## 15) flat tree; Phase 8 (## 20) shadow retargeting; reused by 4/12.</p>
+<h3 id="sec-3-4">3.4 evt-core</h3>
+<p>Normative type layer. <strong>Responsibilities:</strong> <code>Event</code>, <code>EventPhase</code>, <code>EventFlags</code>, <code>EventListener</code> + <code>AddEventListenerOptions</code>/<code>EventListenerOptions</code>, <code>EventTarget</code> trait (listener registry + <code>get_the_parent</code> + activation hooks), <code>CallbackRef</code>, <code>EventInit</code> dictionaries, <code>Atom</code> (interned type), <code>EventError</code>, <code>add_event_listener</code>/<code>remove_event_listener</code>. <strong>In:</strong> target + <code>(ty, CallbackRef, opts)</code>. <strong>Out:</strong> mutations to a <code>ListenerListRef</code>; constructed/initialized <code>Event</code>s. <strong>Invariant:</strong> listener dedup key is <code>(type, callback identity, capture)</code> — duplicate add is a no-op; <code>passive</code>/<code>once</code>/<code>signal</code> NOT part of key; <code>preventDefault</code> sets <code>CANCELED</code> only when <code>cancelable &amp;&amp; !IN_PASSIVE_LISTENER</code>. <strong>Referenced by:</strong> every crate + phase; established in Phases 0–1 (## 12–13), extended for options in Phase 6 (## 18).</p>
+<h3 id="sec-3-5">3.5 evt-signal</h3>
+<p>Abort integration. <strong>Responsibilities:</strong> <code>AbortController</code> + <code>AbortSignal</code> (<code>aborted</code>, <code>reason</code>, <code>abort_algorithms</code>, <code>source_signals</code>/<code>dependent_signals</code>), <code>abort</code>, <code>timeout</code>, <code>any</code>, <code>throw_if_aborted</code>, follow relationship, <code>addEventListener</code>&#39;s <code>signal</code> option. <strong>In:</strong> a signal handed to a listener add, or host <code>abort</code>/<code>timeout</code> trigger. <strong>Out:</strong> abort algorithms that REMOVE the associated listener from its list. <strong>Invariant:</strong> firing once sets <code>aborted</code> + <code>reason</code> permanently and runs each abort algorithm at most once; dependent signals (<code>any</code>) abort exactly when any <code>source_signals</code> member aborts; weak refs prevent controller&lt;-&gt;signal cycle leaks. <strong>Referenced by:</strong> Phase 7 (## 19); aborts exercised under re-entrancy in Phases 5/12.</p>
+<h3 id="sec-3-6">3.6 evt-dom</h3>
+<p>Concrete reference tree. <strong>Responsibilities:</strong> <code>Node</code> arena (document, element, text, shadow root, slot) impl <code>EventTarget</code> + tree hooks; open/closed shadow trees (<code>ShadowMode</code>); slot assignment. <strong>In:</strong> programmatic tree construction + listener registration via <code>NodeRef</code>. <strong>Out:</strong> a host tree whose <code>get_the_parent</code> drives <code>evt-path</code>. <strong>Invariant:</strong> flat tree honors slot assignment + shadow encapsulation so retargeting/<code>composedPath</code> are deterministic + spec-faithful; only <code>std</code>-linked tree backing tests, CLI, conformance, fuzzing. <strong>Referenced by:</strong> Phase 2 (## 14) flat tree; Phase 8 (## 20) shadow/slots; test/conformance substrate for Phases 4–12.</p>
+<h3 id="sec-3-7">3.7 evt-cli</h3>
+<p>The <code>domevt</code> binary. <strong>Responsibilities:</strong> subcommands <code>load</code>, <code>listen</code>, <code>dispatch</code>, <code>trace</code>, <code>bench</code> over an <code>evt-dom</code> tree. <strong>In:</strong> scenario fixtures + CLI args. <strong>Out:</strong> dispatch results, per-step propagation traces, benchmark numbers. <strong>Invariant:</strong> thin host driving public API only (no privileged internals); all serialization off the dispatch hot path. <strong>Referenced by:</strong> Phase 12 (## 24) for differential traces + benchmarks; usable as debugging harness from Phase 4 onward.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — DOM Events, Dispatch, and Retargeting</h2>
+<p>Normative core: target + event ⇒ which listeners run, in what order, what propagates, is default action prevented. Types from <code>evt-core</code>/<code>evt-path</code>/<code>evt-dispatch</code>; algorithms <code>dispatch</code>, <code>invoke</code>, <code>inner invoke</code>, <code>retarget</code>, <code>event path</code>.</p>
+<h3 id="sec-8-1">8.1 Event object model</h3>
+<p><code>Event</code> (module <code>event</code>, <code>evt-core</code>) — fields + provenance:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Semantics</th>
+<th>Mutability after dispatch start</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ty</code></td>
+<td><code>Atom</code></td>
+<td>interned type; dedup key component</td>
+<td>init; immutable</td>
+</tr>
+<tr>
+<td><code>target</code></td>
+<td><code>Option&lt;OpaqueTarget&gt;</code></td>
+<td>dispatch origin (post-retarget per item, <code>shadow_adjusted_target</code>)</td>
+<td>set by <code>dispatch</code></td>
+</tr>
+<tr>
+<td><code>related_target</code></td>
+<td><code>Option&lt;OpaqueTarget&gt;</code></td>
+<td>e.g. <code>mouseout</code> peer; retargeted per path item</td>
+<td>set at init</td>
+</tr>
+<tr>
+<td><code>current_target</code></td>
+<td><code>Option&lt;OpaqueTarget&gt;</code></td>
+<td>node whose listeners run now; <code>None</code> outside dispatch</td>
+<td>per step</td>
+</tr>
+<tr>
+<td><code>event_phase</code></td>
+<td><code>EventPhase</code></td>
+<td>state machine <a class="cite" href="/system-design-blueprints/systems/dom-event-system/architecture/#sec-8-3">§8.3</a>; <code>None</code> outside dispatch</td>
+<td>per step</td>
+</tr>
+<tr>
+<td><code>flags</code></td>
+<td><code>EventFlags</code></td>
+<td>bitflags <a class="cite" href="/system-design-blueprints/systems/dom-event-system/architecture/#sec-8-2">§8.2</a></td>
+<td>per algorithm</td>
+</tr>
+<tr>
+<td><code>bubbles</code> <code>cancelable</code> <code>composed</code></td>
+<td><code>bool</code></td>
+<td>gate bubbling / <code>preventDefault</code> / shadow crossing</td>
+<td>init; immutable</td>
+</tr>
+<tr>
+<td><code>is_trusted</code></td>
+<td><code>bool</code></td>
+<td>UA-created ⇒ <code>true</code>; script <code>dispatchEvent</code> ⇒ <code>false</code> (<a class="cite" href="/system-design-blueprints/systems/dom-event-system/architecture/#sec-8-7">§8.7</a>)</td>
+<td>set by creator</td>
+</tr>
+<tr>
+<td><code>time_stamp</code></td>
+<td><code>f64</code></td>
+<td>monotonic ms at creation</td>
+<td>init; immutable</td>
+</tr>
+<tr>
+<td><code>path</code></td>
+<td><code>Vec&lt;EventPathItem&gt;</code></td>
+<td>computed ONCE at dispatch start (<a class="cite" href="/system-design-blueprints/systems/dom-event-system/architecture/#sec-8-4">§8.4</a>)</td>
+<td>built by <code>dispatch</code></td>
+</tr>
+</tbody></table></div>
+<p><code>defaultPrevented</code> ≡ <code>CANCELED ∈ flags</code>. <code>composedPath()</code> ≡ <code>composed_path(event, current_target)</code> (<a class="cite" href="/system-design-blueprints/systems/dom-event-system/architecture/#sec-8-4">§8.4</a>/<a class="cite" href="/system-design-blueprints/systems/dom-event-system/architecture/#sec-8-6">§8.6</a>).</p>
+<h3 id="sec-8-2">8.2 EventFlags state table</h3>
+<p><code>bitflags EventFlags</code> — set-by / cleared-by are the ONLY transitions:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Bit</th>
+<th>Meaning</th>
+<th>Set by</th>
+<th>Cleared by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>INITIALIZED</code></td>
+<td><code>initialize</code>/ctor ran; required to dispatch</td>
+<td>ctor, <code>init_event</code></td>
+<td>never (re-<code>init</code> keeps it)</td>
+</tr>
+<tr>
+<td><code>DISPATCH</code></td>
+<td>mid-flight; re-entry guard</td>
+<td><code>dispatch</code> entry</td>
+<td><code>dispatch</code> exit (incl. early return)</td>
+</tr>
+<tr>
+<td><code>STOP_PROPAGATION</code></td>
+<td>skip subsequent path items</td>
+<td><code>stopPropagation</code></td>
+<td><code>dispatch</code> start (per dispatch)</td>
+</tr>
+<tr>
+<td><code>STOP_IMMEDIATE_PROPAGATION</code></td>
+<td>skip remaining listeners on current target (+ implies stop)</td>
+<td><code>stopImmediatePropagation</code></td>
+<td><code>dispatch</code> start</td>
+</tr>
+<tr>
+<td><code>CANCELED</code></td>
+<td>default action prevented</td>
+<td><code>preventDefault</code> iff <code>cancelable</code> &amp; ¬<code>IN_PASSIVE_LISTENER</code></td>
+<td><code>dispatch</code> start</td>
+</tr>
+<tr>
+<td><code>IN_PASSIVE_LISTENER</code></td>
+<td>current listener passive ⇒ <code>preventDefault</code> no-op</td>
+<td><code>inner_invoke</code> before passive cb</td>
+<td><code>inner_invoke</code> after that cb</td>
+</tr>
+<tr>
+<td><code>COMPOSED</code></td>
+<td>mirror of <code>composed</code>; path may cross shadow roots</td>
+<td>ctor from <code>EventInit.composed</code></td>
+<td>never</td>
+</tr>
+</tbody></table></div>
+<p>Invariant: <code>STOP_IMMEDIATE_PROPAGATION ⇒ STOP_PROPAGATION</code> enforced at read sites (check both). <code>IN_PASSIVE_LISTENER</code> strictly scoped to one callback frame.</p>
+<h3 id="sec-8-3">8.3 Dispatch algorithm + EventPhase state machine</h3>
+<p><code>dispatch&lt;T: EventTarget&gt;(target, event, legacy_target_override) -&gt; bool</code> (returns <code>!canceled</code>). Ordered steps:</p>
+<pre class="diagram"><code>D1  if ¬INITIALIZED        -&gt; Err(Uninitialized)            // throws
+D2  if DISPATCH            -&gt; Err(AlreadyDispatching)       // InvalidStateError
+D3  set DISPATCH; clear STOP_PROPAGATION|STOP_IMMEDIATE_PROPAGATION|CANCELED
+D4  event.target = target.opaque() (or override); is_trusted unchanged
+D5  event.path = build_event_path(target, event)           // §8.4, ONCE
+D6  legacy_pre_activation_behavior() on activation target if any
+D7  CAPTURING: for item in path[root .. target)  (top-down, EXCLUDE target)
+        if STOP_PROPAGATION break;  invoke(item, event, CapturingPhase)
+D8  AT_TARGET: invoke(target_item, event, AtTarget)        // unless STOP_PROPAGATION
+D9  BUBBLING: if event.bubbles: for item in path(target .. root]  (bottom-up, EXCLUDE target)
+        if STOP_PROPAGATION break;  invoke(item, event, BubblingPhase)
+D10 event_phase = None; current_target = None
+D11 if CANCELED: legacy_canceled_activation_behavior() else activation_behavior()(event)
+D12 clear DISPATCH; return ¬CANCELED</code></pre>
+<p><code>invoke(item, event, phase)</code>: set <code>current_target = item.invocation_target</code>; compute exposed <code>target</code>/<code>related_target</code> via item&#39;s <code>shadow_adjusted_target</code>/<code>related_target</code>; select listeners matching <code>phase</code> (capture-flag ⇔ Capturing; AtTarget runs both in registration order); <code>inner_invoke</code>.</p>
+<p><code>inner_invoke(event, listeners, phase) -&gt; bool</code>: iterate a SNAPSHOT of <code>listeners</code>; per listener: skip if <code>removed</code>; skip if capture-flag mismatches <code>phase</code> (except AtTarget); if <code>once</code> remove from REAL list before calling; set <code>IN_PASSIVE_LISTENER</code> iff <code>passive</code>; run <code>callback</code>; clear <code>IN_PASSIVE_LISTENER</code>; if <code>STOP_IMMEDIATE_PROPAGATION</code> return early.</p>
+<p>EventPhase transition table (<code>None=0,Capturing=1,AtTarget=2,Bubbling=3</code>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Trigger</th>
+<th>To</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>None</code></td>
+<td><code>dispatch</code> D7, path has pre-target items</td>
+<td><code>CapturingPhase</code></td>
+</tr>
+<tr>
+<td><code>None</code></td>
+<td>D7 empty (target is root) → D8</td>
+<td><code>AtTarget</code></td>
+</tr>
+<tr>
+<td><code>CapturingPhase</code></td>
+<td>path exhausted above target → D8</td>
+<td><code>AtTarget</code></td>
+</tr>
+<tr>
+<td><code>CapturingPhase</code></td>
+<td><code>STOP_PROPAGATION</code> set</td>
+<td>(jump) <code>AtTarget</code>? no — D8 guarded; effectively <code>None</code> at D10</td>
+</tr>
+<tr>
+<td><code>AtTarget</code></td>
+<td>D9, <code>bubbles</code> true</td>
+<td><code>BubblingPhase</code></td>
+</tr>
+<tr>
+<td><code>AtTarget</code></td>
+<td><code>bubbles</code> false OR <code>STOP_PROPAGATION</code></td>
+<td><code>None</code> (D10)</td>
+</tr>
+<tr>
+<td><code>BubblingPhase</code></td>
+<td>path exhausted OR <code>STOP_PROPAGATION</code></td>
+<td><code>None</code> (D10)</td>
+</tr>
+</tbody></table></div>
+<p>Note: AtTarget always runs unless <code>STOP_PROPAGATION</code> set during capturing; <code>event_phase</code> is <code>AtTarget</code> while target listeners run regardless of capture flag.</p>
+<h3 id="sec-8-4">8.4 Listener list, get_the_parent, EventPathItem</h3>
+<p><code>EventTarget</code> trait (<code>evt-core</code>): <code>listeners() -&gt; ListenerListRef</code> (shared-mutable <code>Rc&lt;RefCell&lt;Vec&lt;EventListener&gt;&gt;&gt;</code>), <code>get_the_parent(&amp;self,&amp;Event) -&gt; Option&lt;Self&gt;</code>, <code>activation_behavior()</code>, <code>opaque()</code>.</p>
+<p><code>EventListener</code> fields: <code>ty:Atom</code>, <code>callback:CallbackRef</code>, <code>capture:bool</code>, <code>passive:Option&lt;bool&gt;</code>, <code>once:bool</code>, <code>signal:Option&lt;AbortSignalRef&gt;</code>, <code>removed:bool</code>. Dedup key = <code>(ty, callback identity, capture)</code>; duplicate add = no-op; <code>passive</code>/<code>once</code>/<code>signal</code> excluded from key.</p>
+<p><code>get_the_parent</code>: flat-tree parent during dispatch — element→parent node; slotted node&#39;s parent is its assigned slot; shadow root&#39;s parent is its host iff event composed or current target is the shadow root (else <code>None</code>, truncating path); Document→<code>None</code>.</p>
+<p><code>build_event_path(target, event)</code>: walk <code>get_the_parent</code> target→root, one <code>EventPathItem</code> per node (target first, root last); per item compute <code>shadow_adjusted_target</code>, <code>related_target</code> (via <code>retarget</code>), closed-tree gate bits.</p>
+<p><code>EventPathItem</code> fields:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>invocation_target</code></td>
+<td><code>OpaqueTarget</code></td>
+<td>node whose listeners run here (<code>current_target</code>)</td>
+</tr>
+<tr>
+<td><code>invocation_target_in_shadow_tree</code></td>
+<td><code>bool</code></td>
+<td>target lies inside a shadow tree</td>
+</tr>
+<tr>
+<td><code>shadow_adjusted_target</code></td>
+<td><code>Option&lt;OpaqueTarget&gt;</code></td>
+<td>exposed <code>event.target</code> here (<code>None</code> ⇒ unchanged); <code>Some</code> only at shadow-tree boundaries</td>
+</tr>
+<tr>
+<td><code>related_target</code></td>
+<td><code>Option&lt;OpaqueTarget&gt;</code></td>
+<td>exposed <code>relatedTarget</code> after <code>retarget(orig, invocation_target)</code></td>
+</tr>
+<tr>
+<td><code>touch_target_list</code></td>
+<td><code>Vec&lt;Option&lt;OpaqueTarget&gt;&gt;</code></td>
+<td>each touch target retargeted against <code>invocation_target</code></td>
+</tr>
+<tr>
+<td><code>root_of_closed_tree</code></td>
+<td><code>bool</code></td>
+<td>item is root of a CLOSED shadow tree</td>
+</tr>
+<tr>
+<td><code>slot_in_closed_tree</code></td>
+<td><code>bool</code></td>
+<td>item is a slot inside a closed shadow tree</td>
+</tr>
+</tbody></table></div>
+<p><code>retarget(a, b) -&gt; OpaqueTarget</code>: while <code>a</code>&#39;s root is a shadow root AND <code>b</code> not a shadow-including inclusive descendant of <code>a</code>&#39;s root → <code>a = a.root.host</code>; return <code>a</code>. Encapsulation: closed internals never leak as <code>target</code>/<code>relatedTarget</code>.</p>
+<h3 id="sec-8-5">8.5 Worked retargeting example (open + closed shadow trees)</h3>
+<p>Sample tree (<code>H?</code> host, <code>SR</code> shadow root, <code>S</code> slot; flat tree):</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: the dispatch target and its closed shadow tree
+%% legend ingest: open shadow tree and slot
+%% legend side: light DOM above the hosts
+  D[&quot;&lt;b&gt;document&lt;/b&gt;&quot;]
+  APP[&quot;&lt;b&gt;div#app&lt;/b&gt;&quot;]
+  XO[&quot;&lt;b&gt;x-outer&lt;/b&gt;&lt;br/&gt;host, OPEN&quot;]
+  SRO[&quot;&lt;b&gt;SR_o&lt;/b&gt;&lt;br/&gt;shadow root&quot;]
+  SEC[&quot;&lt;b&gt;section&lt;/b&gt;&quot;]
+  SLOT[&quot;&lt;b&gt;slot#so&lt;/b&gt;&lt;br/&gt;light child of x-outer&lt;br/&gt;projected here&quot;]
+  XI[&quot;&lt;b&gt;x-inner&lt;/b&gt;&lt;br/&gt;host, CLOSED&lt;br/&gt;light child of x-outer&quot;]
+  SRC[&quot;&lt;b&gt;SR_c&lt;/b&gt;&lt;br/&gt;shadow root&quot;]
+  BTN[&quot;&lt;b&gt;button#btn&lt;/b&gt;&lt;br/&gt;dispatch target:&lt;br/&gt;click (composed=true)&quot;]
+  D --&gt; APP
+  APP --&gt; XO
+  XO -- &quot;shadow&quot; --&gt; SRO
+  SRO --&gt; SEC
+  SEC --&gt; SLOT
+  XO -- &quot;light child&quot; --&gt; XI
+  XI -. &quot;slotted into so&quot; .-&gt; SLOT
+  XI -- &quot;shadow (CLOSED)&quot; --&gt; SRC
+  SRC --&gt; BTN
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef side stroke-width:1.5px
+  class SRC,BTN,XI rt
+  class SRO,SEC,SLOT,XO ingest
+  class D,APP side</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the dispatch target and its closed shadow tree</li><li><span class="swatch ingest"></span>open shadow tree and slot</li><li><span class="swatch side"></span>light DOM above the hosts</li></ul><p class="diagram-note">Drawn from the text diagram in §8.5.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>document
+  div#app
+    x-outer            host, OPEN  shadow -&gt; SR_o
+      SR_o
+        section
+          slot#so          (light child of x-outer projected here)
+      x-inner          host, CLOSED shadow -&gt; SR_c   (light child of x-outer -&gt; slotted into so)
+        SR_c
+          button#btn       &lt;-- dispatch target: click (composed=true)</code></pre></details>
+<p>Flat-tree ancestor chain of <code>#btn</code>: <code>btn → SR_c → x-inner → slot#so → section → SR_o → x-outer → div#app → document</code>. Path items (target→root), with <code>relatedTarget = #btn</code>&#39;s peer in <code>x-inner</code> light DOM = <code>lbl</code> (also closed):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>invocation_target</th>
+<th>shadow_adjusted_target</th>
+<th>related_target=retarget(lbl,·)</th>
+<th>root_of_closed</th>
+<th>slot_in_closed</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td><code>btn</code></td>
+<td><code>btn</code></td>
+<td><code>lbl</code></td>
+<td>false</td>
+<td>false</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>SR_c</code></td>
+<td><code>btn</code></td>
+<td><code>lbl</code></td>
+<td><strong>true</strong></td>
+<td>false</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>x-inner</code></td>
+<td><code>x-inner</code></td>
+<td><code>x-inner</code></td>
+<td>false</td>
+<td>false</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>slot#so</code></td>
+<td><code>x-inner</code></td>
+<td><code>x-inner</code></td>
+<td>false</td>
+<td>false</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>section</code></td>
+<td><code>x-inner</code></td>
+<td><code>x-inner</code></td>
+<td>false</td>
+<td>false</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>SR_o</code></td>
+<td><code>x-inner</code></td>
+<td><code>x-inner</code></td>
+<td>false</td>
+<td>false</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>x-outer</code></td>
+<td><code>x-outer</code></td>
+<td><code>x-outer</code></td>
+<td>false</td>
+<td>false</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>div#app</code></td>
+<td><code>x-outer</code></td>
+<td><code>x-outer</code></td>
+<td>false</td>
+<td>false</td>
+</tr>
+<tr>
+<td>8</td>
+<td><code>document</code></td>
+<td><code>x-outer</code></td>
+<td><code>x-outer</code></td>
+<td>false</td>
+<td>false</td>
+</tr>
+</tbody></table></div>
+<p>Reads: at <code>x-outer</code> (item 6) <code>event.target == x-outer</code>, <code>relatedTarget == x-outer</code> — closed internals <code>btn</code>/<code>lbl</code>/<code>SR_c</code> never exposed. <code>shadow_adjusted_target</code> recomputed only when crossing a host boundary (items 2, 6).</p>
+<h3 id="sec-8-6">8.6 Sequence diagram — capture → at-target → bubble with stopPropagation</h3>
+<p>Flat path <code>document → div#app → button#btn</code>; listeners: <code>div</code> capture C, <code>div</code> bubble B, <code>btn</code> AtTarget <a class="cite" href="/system-design-blueprints/systems/dom-event-system/reliability/#t-1">T1</a>,<a class="cite" href="/system-design-blueprints/systems/dom-event-system/reliability/#t-2">T2</a> (<a class="cite" href="/system-design-blueprints/systems/dom-event-system/reliability/#t-1">T1</a> calls <code>stopPropagation</code>). <code>bubbles=true</code>.</p>
+<pre class="diagram"><code>phase        currentTarget   listeners run          flags after
+Capturing -&gt; document        (none)
+Capturing -&gt; div#app         C                      -
+AtTarget  -&gt; button#btn      T1 (stopPropagation)   STOP_PROPAGATION
+AtTarget  -&gt; button#btn      T2  (still runs)       STOP_PROPAGATION
+Bubbling     div#app         SKIPPED (STOP_PROP)    -&gt; break
+Bubbling     document        SKIPPED
+END          null/None       activation_behavior()  (CANCELED? no)</code></pre>
+<p><code>stopPropagation</code> does NOT halt remaining listeners on current target (<a class="cite" href="/system-design-blueprints/systems/dom-event-system/reliability/#t-2">T2</a> runs); only <code>stopImmediatePropagation</code> skips <a class="cite" href="/system-design-blueprints/systems/dom-event-system/reliability/#t-2">T2</a>. Subsequent path items (bubbling <code>div</code>,<code>document</code>) skipped.</p>
+<h3 id="sec-8-7">8.7 Worked example — click on slotted closed-tree element; composed true vs false</h3>
+<p>Target <code>#btn</code> in <code>SR_c</code> (closed); <code>currentTarget</code> queried at two points. Path = <a class="cite" href="/system-design-blueprints/systems/dom-event-system/architecture/#sec-8-5">§8.5</a> list.</p>
+<p><code>composed = true</code>: path spans <code>btn .. document</code> (host hop at <code>SR_c</code> allowed because composed). <code>composedPath()</code> filters by closed-tree visibility relative to <code>currentTarget</code>:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th><code>currentTarget</code></th>
+<th>visible items (<code>composedPath()</code> output)</th>
+<th>hidden because</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>document</code> (outside all shadows)</td>
+<td><code>[x-outer, div#app, document]</code></td>
+<td><code>root_of_closed_tree</code>(SR_c) hides items 0–1; closed slot/host of x-inner collapse to <code>x-outer</code> exposure</td>
+</tr>
+<tr>
+<td><code>btn</code> (inside closed SR_c)</td>
+<td><code>[btn, SR_c, x-inner, slot#so, section, SR_o, x-outer, div#app, document]</code></td>
+<td>caller inside closed tree ⇒ full path visible</td>
+</tr>
+</tbody></table></div>
+<p><code>composed = false</code>: <code>get_the_parent</code> returns <code>None</code> at <code>SR_c</code> (host hop denied) ⇒ path truncated at the shadow-including root containing target: path = <code>[btn, SR_c]</code>. Dispatch never reaches <code>x-inner</code>/<code>document</code>; <code>composedPath()</code> from <code>document</code> = <code>[]</code> (document not on path); from <code>btn</code> = <code>[btn, SR_c]</code>.</p>
+<h3 id="sec-8-8">8.8 Malformed / edge cases — exact results</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Exact result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>dispatch</code> event without <code>INITIALIZED</code></td>
+<td><code>Err(EventError::Uninitialized)</code> at D1; no path built, no listeners run</td>
+</tr>
+<tr>
+<td>re-dispatch in-flight event (<code>DISPATCH</code> set)</td>
+<td><code>Err(EventError::AlreadyDispatching)</code> (InvalidStateError) at D2; original dispatch unaffected</td>
+</tr>
+<tr>
+<td><code>preventDefault</code> inside passive listener (<code>IN_PASSIVE_LISTENER</code>)</td>
+<td>no-op; <code>CANCELED</code> NOT set; emit one diagnostic (<code>passive preventDefault ignored</code>); <code>defaultPrevented</code> stays false</td>
+</tr>
+<tr>
+<td><code>preventDefault</code> when <code>¬cancelable</code></td>
+<td>no-op silently; <code>CANCELED</code> not set</td>
+</tr>
+<tr>
+<td>remove currently-running listener (self-remove)</td>
+<td>sets <code>removed=true</code> on REAL list; current <code>inner_invoke</code> SNAPSHOT still holds it but it already ran; future items skip it</td>
+</tr>
+<tr>
+<td>add listener during dispatch (same <code>current_target</code>, same phase)</td>
+<td>NOT called this <code>invoke</code> (snapshot at <code>invoke</code> entry); eligible on later path items / later dispatches</td>
+</tr>
+<tr>
+<td>add a <code>once</code> listener that fires</td>
+<td>removed from real list BEFORE its callback runs (fires exactly once even if it self-dispatches)</td>
+</tr>
+<tr>
+<td><code>AbortSignal</code> aborts mid-dispatch</td>
+<td>abort algorithm runs <code>remove_event_listener</code> → sets <code>removed=true</code>; if its <code>invoke</code> snapshot already started, skipped only if not yet reached; subsequent items never call it</td>
+</tr>
+<tr>
+<td>nested <code>dispatch</code> of a DIFFERENT event from a callback</td>
+<td>allowed; inner dispatch gets own <code>DISPATCH</code> flag + own path; outer resumes after</td>
+</tr>
+<tr>
+<td>nested <code>dispatch</code> of the SAME event from a callback</td>
+<td><code>Err(AlreadyDispatching)</code> (its <code>DISPATCH</code> still set)</td>
+</tr>
+<tr>
+<td><code>stopImmediatePropagation</code> in first AtTarget listener</td>
+<td>remaining AtTarget listeners skipped; bubbling skipped; <code>event_phase=None</code> at D10</td>
+</tr>
+<tr>
+<td>empty path (target == root, no parent)</td>
+<td>only AtTarget runs; no capturing/bubbling items</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

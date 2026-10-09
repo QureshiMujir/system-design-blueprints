@@ -1,0 +1,434 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Autoscaler — Design · Engineering Blueprints</title><meta name="description" content="Autoscaler, lld: core types, repo tree, file inventory. A from-scratch autoscaling decision + actuation engine — ingest pluggable metrics → evaluate declarative scaling policies → a periodic control loop computes a desired replica/node count via the HPA…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/autoscaler/">Autoscaler</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Autoscaler</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~26 weeks</li> <li>3,156 lines</li> <li>blueprint #269</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/autoscaler/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/autoscaler/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/autoscaler/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/autoscaler/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/autoscaler/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/autoscaler/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/autoscaler/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/autoscaler/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/autoscaler/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/autoscaler/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Autoscaler — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/autoscaler/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>/// One observed value at one monotonic instant. Copy; ~24 B.
+pub struct Sample { pub ts: Timestamp, pub value: Decimal }
+
+/// A labeled time series; ring = fixed-capacity overwrite buffer (oldest evicted),
+/// pushed concurrently (own lock); the tick reads a consistent window snapshot.
+pub struct Series {
+    pub labels: BTreeMap&lt;String, String&gt;,   // identity; BTreeMap → deterministic order
+    pub ring:   RingBuffer&lt;Sample&gt;,          // cap = window.duration / resolution + slack
+}
+
+/// What the value MEANS — selects the desired-value formula downstream.
+pub enum MetricKind {
+    Resource,   // cpu/mem PER REPLICA → averaged over ready replicas
+    Custom,     // per-object app metric (rps, depth) → AverageValue/Value
+    External,   // not tied to a replica (queue length, topic lag) → Value
+}
+
+/// Windowed reduction over a Series&#39; samples in [now-duration, now].
+pub enum Aggregation { Avg, Sum, Rate, P50, P90, P99, Max }
+
+/// Window = lookback `duration`, sampled at `resolution` (downsampling buckets raw samples before aggregating).
+pub struct Window { pub duration: Duration, pub resolution: Duration }
+
+/// Pluggable backend (resource/custom/external). Async fetch; reports its own staleness → fail-safe. Send+Sync.
+pub trait MetricSource: Send + Sync {
+    fn name(&amp;self) -&gt; &amp;str;
+    async fn fetch(&amp;self, query: &amp;MetricQuery, window: Window)
+        -&gt; Result&lt;Vec&lt;Series&gt;, MetricError&gt;;
+    fn last_scrape_age(&amp;self) -&gt; Duration;     // &gt; staleness_threshold ⇒ stale
+}
+
+/// FROZEN input to one tick: per-metric aggregate at `at`; `stale` = metrics past the staleness threshold
+/// (excluded from math, MUST NOT drive scale-DOWN). Immutable; Clone for the log.
+pub struct MetricsSnapshot {
+    pub at:         Timestamp,
+    pub per_metric: BTreeMap&lt;MetricId, AggValue&gt;,  // MetricId = (source, name, kind)
+    pub stale:      Vec&lt;MetricId&gt;,
+}</code></pre><pre class="code"><code>/// Versioned, declarative, IMMUTABLE per tick. Loaded from YAML, validated once,
+/// then read-only. `schema_version` gates back-compat (additive fields only).
+pub struct Policy {
+    pub schema_version: u32,           // bump on incompatible field semantics
+    pub target_ref:     TargetRef,     // which ScalableTarget this scales
+    pub bounds:         Bounds,
+    pub rules:          Vec&lt;ScalingRule&gt;,  // combined by MAX of per-rule desireds
+    pub sync_period:    Duration,      // tick cadence (default 15 s)
+}
+
+/// INVARIANT: min &lt;= desired &lt;= max, AND min &lt;= max (validated at load).
+pub struct Bounds { pub min: u32, pub max: u32 }
+
+/// Sum type → exhaustive match makes the control-law branches total.
+pub enum ScalingRule {
+    TargetTracking(TargetTracking),
+    Step(StepPolicy),
+    Scheduled(ScheduledPolicy),
+    Predictive(PredictivePolicy),
+}
+
+/// Hold `metric` at `target`; `tolerance` is the no-op band (default 0.1).
+pub struct TargetTracking { pub metric: MetricId, pub target: TargetType, pub tolerance: Decimal }
+
+/// How `target` is interpreted vs the current metric value.
+pub enum TargetType {
+    Utilization(Decimal),    // 0..1 fraction of requested resource (per ready replica)
+    AverageValue(Decimal),   // absolute value PER ready replica
+    Value(Decimal),          // absolute aggregate value (external metric)
+}
+
+/// Breach magnitude → replica delta (CloudWatch-style step scaling).
+pub struct StepPolicy { pub metric: MetricId, pub steps: Vec&lt;Step&gt; }
+pub struct Step { pub lower: Option&lt;Decimal&gt;, pub upper: Option&lt;Decimal&gt;, pub delta: i32 }
+
+/// Time-windowed bounds override (cron). Active window replaces `Bounds`.
+pub struct ScheduledPolicy { pub schedule: Cron, pub bounds: Bounds }
+
+/// THE HPA PROPORTIONAL ALGORITHM (pure, no clock/RNG): `ceil(current_replicas * current/target)` over READY;
+/// `|ratio-1.0| &lt;= tolerance` ⇒ return current_replicas (NoOp). Caller clamps to Bounds.
+pub fn desired_for_target_tracking(
+    current_replicas: u32,
+    current:          Decimal,
+    target:           &amp;TargetType,
+    ready:            u32,
+    tolerance:        Decimal,
+) -&gt; u32;</code></pre><pre class="code"><code>pub enum ScaleDirection { Up, Down, None }   // None = NoOp tick
+
+/// Output record of ONE tick: FROZEN snapshot + reason → fully replayable; `recommended_only` ⇒ dry-run. Clone+Serialize.
+pub struct Decision {
+    pub from:             u32,
+    pub to:               u32,
+    pub direction:        ScaleDirection,
+    pub reason:           String,            // e.g. &quot;cpu ratio 1.43 &gt; tol; max-metric=cpu&quot;
+    pub metrics:          MetricsSnapshot,
+    pub at:               Timestamp,
+    pub recommended_only: bool,
+}
+
+/// MUTABLE ring of (ts, recommended), owned by Controller. Anti-flap: DOWN = MAX over down-window (300 s,
+/// shrink only if the most aggressive recent rec agreed); UP = MIN over up-window (0 s).
+pub struct StabilizationBuffer { /* ring of (Timestamp, u32 recommended) */ }
+impl StabilizationBuffer {
+    pub fn record(&amp;mut self, ts: Timestamp, recommended: u32);
+    pub fn stabilized(&amp;self, dir: ScaleDirection, up_win: Duration, down_win: Duration, now: Timestamp) -&gt; u32;
+}
+
+/// Blocks another scale in the SAME direction for a period after `last_scale`.
+pub struct Cooldown { pub scale_up: Duration, pub scale_down: Duration, pub last_scale: Option&lt;Timestamp&gt; }
+
+/// Caps change per period AFTER stabilization (e.g. max_up = +4 or +100%/60s; max_down = -10%/60s).
+pub struct RateLimit { pub max_up_per_period: Scale, pub max_down_per_period: Scale, pub period: Duration }
+pub enum Scale { Absolute(u32), Percent(Decimal) }
+
+/// Owns ALL mutable per-target loop state; tick SERIALIZED per target (one `&amp;mut self`, no concurrent ticks).
+/// `clock` injected → deterministic, virtual-clock testable.
+pub struct Controller {
+    /* sources: Vec&lt;Box&lt;dyn MetricSource&gt;&gt;, policy: Arc&lt;Policy&gt;,
+       target: Box&lt;dyn ScalableTarget&gt;, stabilization: StabilizationBuffer,
+       cooldown: Cooldown, rate_limit: RateLimit, clock: Clock */
+}
+impl Controller {
+    /// Pipeline: scrape→snapshot→per-rule desired→MAX→clamp Bounds→stabilize→
+    /// cooldown→rate-limit→Decision→(actuate unless recommended_only). Deterministic
+    /// for identical (snapshot, policy, state, now).
+    pub async fn tick(&amp;mut self, now: Timestamp) -&gt; Result&lt;Decision, ControlError&gt;;
+}</code></pre><pre class="code"><code>/// Observed scale of the target. `ready` (not `current`) feeds the HPA math.
+pub struct ScaleStatus { pub desired: u32, pub current: u32, pub ready: u32 }
+
+/// Level-triggered actuator (268 reconcile model): controller NEVER assumes its last write took — re-reads each tick.
+pub trait ScalableTarget: Send + Sync {
+    async fn scale_status(&amp;self) -&gt; Result&lt;ScaleStatus, TargetError&gt;;
+    /// IDEMPOTENT: set_scale(n) with current==n is a target-side no-op.
+    async fn set_scale(&amp;self, desired: u32) -&gt; Result&lt;(), TargetError&gt;;
+    fn ref_id(&amp;self) -&gt; &amp;TargetRef;
+}</code></pre><pre class="code"><code>/// Online forecaster: &amp;mut observe (updates state), &amp;self forecast (pure horizon-ahead value + confidence).
+pub trait Forecaster {
+    fn observe(&amp;mut self, s: &amp;Sample);
+    fn forecast(&amp;self, horizon: Duration) -&gt; Forecast;
+}
+
+/// Predicted value; confidence 0..1 → fall back to REACTIVE desired when &lt; threshold (default 0.5).
+pub struct Forecast { pub value: Decimal, pub confidence: Decimal, pub horizon: Duration }
+
+/// Exponential weighted moving average; alpha 0..1 (higher = more reactive).
+pub struct Ewma { pub alpha: Decimal }
+
+/// Triple-exponential (level + trend + seasonal) for diurnal/weekly patterns.
+pub struct HoltWinters { /* level, trend, seasonal[period], alpha/beta/gamma */ }</code></pre><pre class="code"><code>pub struct NodeGroup { pub id: String, pub bounds: Bounds, pub current: u32, pub template: NodeTemplate }
+
+/// IDEMPOTENT cloud/provider interface (ASG/MIG-style). set_size re-asserts.
+pub trait NodeGroupProvider: Send + Sync {
+    async fn target_size(&amp;self, g: &amp;str) -&gt; Result&lt;u32, ProviderError&gt;;
+    async fn set_size(&amp;self, g: &amp;str, n: u32) -&gt; Result&lt;(), ProviderError&gt;;
+}
+
+/// Smallest `add` to a group whose template schedules all pending (bin-pack sim). One per chosen group per cluster tick.
+pub struct ScaleUpPlan { pub group: String, pub add: u32 }
+
+/// Node to drain: underutilized AND all workload reschedulable elsewhere AND budgets allow, after cordon+drain.
+pub struct ScaleDownCandidate { pub node: String, pub utilization: Decimal }</code></pre><pre class="code"><code>/// Top-level object: desired `spec` (Policy) + observed `status`.
+pub struct Autoscaler { pub spec: Policy, pub status: AutoscalerStatus }
+
+/// Observed state; the ONLY durable per-Autoscaler state (small, serde to store); Conditions report degraded/stale/frozen.
+pub struct AutoscalerStatus {
+    pub current:         u32,
+    pub desired:         u32,
+    pub last_scale_time: Option&lt;Timestamp&gt;,
+    pub conditions:      Vec&lt;Condition&gt;,        // e.g. AbleToScale, ScalingActive, MetricsStale
+    pub last_metrics:    MetricsSnapshot,
+}
+
+/// One append-only DecisionLog entry; `applied=false`+`error=Some` ⇒ actuation failed (Decision still recorded, audit).
+pub struct ScalingEvent {
+    pub at:       Timestamp,
+    pub decision: Decision,
+    pub applied:  bool,
+    pub error:    Option&lt;String&gt;,
+}</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>autoscaler/
+├── README.md                  # what/why, quickstart, arch diagram, links to docs/, non-goals
+├── CONTRIBUTING.md            # dev setup, MSRV 1.78, fmt/clippy gates, DCO, PR checklist
+├── CODE_OF_CONDUCT.md         # Contributor Covenant v2.1
+├── SECURITY.md                # trust boundary (noisy metrics + actuation authority), disclosure, CVE policy
+├── CHANGELOG.md               # Keep-a-Changelog; SemVer; per-crate sections
+├── BLUEPRINT_LOG.md             # blueprint authoring ledger (this doc&#39;s provenance)
+├── BUILD_PLAN.md              # phase-by-phase build order, dep graph, gate criteria per ## 12..## 24
+├── LICENSE                    # Apache-2.0 (full text)
+├── Makefile                   # build/test/lint/fmt/sim/fuzz/bench/conformance targets
+├── Dockerfile                 # multi-stage: cargo-chef deps cache → release ascaled (distroless runtime)
+├── docker-compose.yml         # ascaled + synthetic metric source + mock target for local e2e
+├── rust-toolchain.toml        # channel=&quot;1.78&quot;, components=[rustfmt,clippy], profile=minimal
+├── deny.toml                  # cargo-deny: license allowlist (Apache-2.0/MIT/BSD), advisory bans, dup checks
+├── Cargo.toml                 # [workspace] members + resolver=2 + shared [workspace.dependencies]/[lints]
+└── Cargo.lock                 # committed (this is a daemon, reproducible builds)</code></pre><pre class="diagram"><code>crates/
+├── asc-metrics/           # Phase 1 (## 13) — ingestion + aggregation pipeline
+│   ├── Cargo.toml         # deps: tokio, decimal, thiserror; no policy/control deps
+│   └── src/
+│       ├── lib.rs         # re-exports; MetricKind, MetricId, MetricQuery, MetricError
+│       ├── source.rs      # MetricSource trait (fetch/name/last_scrape_age), scrape orchestration
+│       ├── series.rs      # Series { labels, ring }; per-series identity by label set
+│       ├── ring_buffer.rs # RingBuffer&lt;Sample&gt;: fixed-cap, O(1) push, monotonic-ts append guard
+│       ├── aggregation.rs # Aggregation enum + apply(): Avg/Sum/Rate/P50/P90/P99/Max over a window
+│       ├── window.rs      # Window { duration, resolution }; bucket math, alignment
+│       ├── downsample.rs  # resolution rollup (raw → bucketed), retention trimming
+│       ├── staleness.rs   # last_scrape_age vs threshold → stale set; degraded signal
+│       ├── snapshot.rs    # MetricsSnapshot { at, per_metric, stale } — frozen per-tick input
+│       └── sources/       # synthetic.rs · resource.rs · custom.rs · external.rs (Phase 1/6)
+│
+└── asc-policy/            # Phase 2 (## 14) — policy model + desired math
+    ├── Cargo.toml         # deps: decimal, cron, serde, thiserror; depends on asc-metrics
+    └── src/
+        ├── lib.rs         # re-exports; TargetRef; PolicyError
+        ├── policy.rs      # Policy { target_ref, bounds, rules, sync_period }
+        ├── rule.rs        # ScalingRule enum (TargetTracking/Step/Scheduled/Predictive)
+        ├── target_tracking.rs # TargetTracking { metric, target, tolerance }; TargetType
+        ├── step.rs        # StepPolicy { metric, steps }; Step (breach magnitude → delta)
+        ├── scheduled.rs   # ScheduledPolicy { schedule: Cron, bounds }; window override
+        ├── predictive.rs  # PredictivePolicy spec (forecaster ref, blend weight, min confidence)
+        ├── bounds.rs      # Bounds { min, max }; clamp(); INVARIANT min&lt;=max
+        ├── desired.rs     # desired_for_target_tracking(): HPA ratio, ceil, per TargetType
+        └── validate.rs    # min&lt;=max, tolerance∈(0,1), non-empty rules, sane targets</code></pre><pre class="diagram"><code>crates/ (continued)
+├── asc-control/          # Phases 3-4 (## 15-16) — control loop / reconciler
+│   ├── Cargo.toml        # deps: asc-metrics, asc-policy, asc-target, tokio, decimal
+│   └── src/
+│       ├── controller.rs # Controller; async tick(now) -&gt; Decision; serialized per target
+│       ├── hpa.rs        # HPA proportional algorithm over ready replicas; tolerance NoOp band
+│       ├── multi_metric.rs # MAX across per-metric desireds; missing≠scale-down fail-safe
+│       ├── stabilization.rs # StabilizationBuffer: max-over-down-window / min-over-up-window
+│       ├── cooldown.rs   # Cooldown { scale_up, scale_down, last_scale }; per-direction block
+│       ├── rate_limit.rs # RateLimit { max_up/down_per_period, period }; clamp post-stabilization
+│       ├── decision.rs   # Decision { from,to,direction,reason,metrics,at,recommended_only }
+│       └── clock.rs      # Clock trait + injectable virtual clock (no wall-clock in math)
+│
+├── asc-target/           # Phase 5 (## 17) — scalable-target abstraction + actuators
+│   ├── Cargo.toml        # deps: tokio, thiserror; deployment_adapter feature → project 268 client
+│   └── src/
+│       ├── target.rs     # ScalableTarget trait (scale_status/set_scale idempotent/ref_id)
+│       ├── status.rs     # ScaleStatus { desired, current, ready }; readiness gating helper
+│       ├── process_pool.rs   # process-pool actuator (Phase 5 reference target)
+│       ├── deployment_adapter.rs # Deployment adapter → project 268 scale subresource (Phase 10)
+│       └── node_group.rs # node-group ScalableTarget facade (bridges asc-cluster)
+│
+└── asc-predict/          # Phase 8 (## 20) — predictive + scheduled forecasting
+    ├── Cargo.toml        # deps: decimal; pure std, no tokio (deterministic)
+    └── src/
+        ├── forecaster.rs # Forecaster trait (observe/forecast(horizon) -&gt; Forecast)
+        ├── ewma.rs       # Ewma { alpha }; exponential weighted moving avg
+        ├── holt_winters.rs # HoltWinters: level+trend+seasonal; period detection
+        ├── forecast.rs   # Forecast { value, confidence∈0..1, horizon }
+        └── blend.rs      # blend predicted+reactive; confidence-based fallback</code></pre><pre class="diagram"><code>crates/ (continued)
+├── asc-cluster/          # Phase 9 (## 21) — cluster autoscaler (node scaling)
+│   ├── Cargo.toml        # deps: asc-metrics, asc-target, tokio, thiserror
+│   └── src/
+│       ├── node_group.rs # NodeGroup { id, bounds, current, template }; NodeTemplate
+│       ├── provider.rs   # NodeGroupProvider (target_size/set_size, idempotent)
+│       ├── simulator.rs  # Simulator: bin-packing schedulability of pending demand
+│       ├── scale_up.rs   # ScaleUpPlan { group, add } — smallest add that schedules pending
+│       ├── scale_down.rs # ScaleDownCandidate { node, utilization }; movability check
+│       └── drain.rs      # cordon + drain respecting disruption budgets
+│
+├── asc-api/              # Phase 11 (## 23) — API object + state + audit
+│   ├── Cargo.toml        # deps: asc-policy, asc-control, serde, serde_yaml, thiserror
+│   └── src/
+│       ├── autoscaler.rs # Autoscaler { spec: Policy, status }; spec parse/validate
+│       ├── status.rs     # AutoscalerStatus { current,desired,last_scale_time,conditions }
+│       ├── event.rs      # ScalingEvent { at, decision, applied, error }
+│       ├── decision_log.rs # append-only, replayable DecisionLog; fsync, replay()
+│       └── conditions.rs # Condition (Ready/Degraded/AbleToScale/Frozen)
+│
+└── asc-cli/              # Phase 0+ (## 12) — binaries
+    ├── Cargo.toml        # [[bin]] ascaled + [[bin]] asctl; depends on all asc-* crates
+    └── src/
+        ├── bin/ascaled.rs # daemon: build Controller, run loop on sync_period, signal handling
+        ├── bin/asctl.rs  # CLI entrypoint; subcommand dispatch
+        └── commands/     # run.rs · plan.rs · status.rs · history.rs · policy.rs</code></pre><pre class="diagram"><code>autoscaler/ (top-level dirs)
+├── benches/              # Phase 12 — criterion benchmarks (tick_latency · aggregation · forecast)
+├── conformance/          # Phase 12 — behavioral corpus (workloads/ · scenarios/ golden sequences)
+├── sim/                  # Phase 12 — workload simulator bin (VirtualClock + LoadShapes)
+├── fuzz/                 # Phase 12 — cargo-fuzz targets (policy_validate · desired_math · stabilization)
+├── examples/             # sample YAML policies (target_tracking · multi_metric · step · scheduled · predictive)
+├── docs/                 # architecture.md · adr/ · runbooks/ · performance/targets.md · failure-analysis/
+├── templates/            # policy.yaml.tmpl, ascaled.toml.tmpl
+├── scripts/              # ci-check.sh · run-sim.sh · gen-corpus.sh
+├── tools/                # trace-viewer/ (render decision trace → timeline; not shipped)
+├── notes/                # hpa-derivation.md (ratio/ceil/ready-exclusion rationale)
+├── papers/               # references.md (links + summaries: HPA, CA, KEDA, AWS, Scryer)
+├── legal/                # NOTICE · third-party-licenses.md
+├── brand/                # logo.svg
+└── .github/workflows/    # ci.yml · fuzz.yml · bench.yml · sim.yml · release.yml</code></pre> </section><section aria-labelledby="sec-file-inventory"> <h2 id="sec-file-inventory">File inventory <small class="muted">(Appendix A · 13 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>Cargo.toml</code></td><td>Workspace manifest; the eight <code>asc-*</code> members, shared deps (tokio, rust_decimal), MSRV 1.78, edition 2021.</td></tr><tr><td><code>Cargo.lock</code></td><td>Pinned dependency graph; committed (workspace ships binaries).</td></tr><tr><td><code>rust-toolchain.toml</code></td><td>Pins toolchain 1.78; components rustfmt/clippy.</td></tr><tr><td><code>README.md</code></td><td>Project overview, the architecture diagram, quickstart for <code>ascaled</code>/<code>asctl</code>.</td></tr><tr><td><code>LICENSE</code></td><td>License text.</td></tr><tr><td><code>CONTRIBUTING.md</code></td><td>Build/test/PR conventions; the determinism + fail-safe bar.</td></tr><tr><td><code>CODEOWNERS</code></td><td>Owner: Mujir Qureshi; per-crate reviewers.</td></tr><tr><td><code>CHANGELOG.md</code></td><td>Keep-a-changelog; semver per crate.</td></tr><tr><td><code>rustfmt.toml</code></td><td>Formatting config.</td></tr><tr><td><code>clippy.toml</code></td><td>Lint thresholds; deny <code>unwrap</code> on hot path.</td></tr><tr><td><code>deny.toml</code></td><td>cargo-deny: license/advisory/ban policy.</td></tr><tr><td><code>.gitignore</code></td><td>Ignore <code>target/</code>, fuzz artifacts, sim outputs.</td></tr><tr><td><code>.editorconfig</code></td><td>Whitespace/charset rules.</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

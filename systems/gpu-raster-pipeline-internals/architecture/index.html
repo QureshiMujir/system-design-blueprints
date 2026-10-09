@@ -1,0 +1,374 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>GPU Raster Pipeline Internals — Architecture · Engineering Blueprints</title><meta name="description" content="GPU Raster Pipeline Internals, hld: §3 overview + §8 domain model. GPU Raster Pipeline Internals (191) builds a cycle-approximate model and simulator of a modern GPU's hardware rasterization pipeline, written in Rust. It is not a renderer that draws pixels for its…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/graphics-media-games/">Graphics, Media &amp; Games</a> </li><li> <a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/">GPU Raster Pipeline Internals</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:320"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/graphics-media-games/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Graphics, Media &amp; Games</span></a> </p> <h1>GPU Raster Pipeline Internals</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>12 phases</li> <li>~54 weeks</li> <li>1,852 lines</li> <li>blueprint #191</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:GPU Raster Pipeline Internals — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>+-------------------------------------------------------------------+
+|      Command Processor / Draw-Call Front End  (fixed-function)     |
+|   decode draw call | validate state | issue work to SMs/CUs        |
++------------------------------+--------------------------------------+
+                               v
++-------------------------------------------------------------------+
+|  Vertex Fetch -&gt; Vertex Shader Stage (warps, SIMT)  [PROGRAMMABLE]  |   on-chip: register file
++------------------------------+--------------------------------------+
+                               v
++-------------------------------------------------------------------+
+|   Primitive Assembly -&gt; Clipping                (fixed-function)   |
++------------------------------+--------------------------------------+
+                               v
++-------------------------------------------------------------------+
+| Rasterizer: Triangle Setup -&gt; Edge Eval -&gt; Coverage -&gt; Hi-Z (FF)    |
++------------------------------+--------------------------------------+
+                               v
++-------------------------------------------------------------------+
+|              Early-Z Test                        (fixed-function)  |
++------------------------------+--------------------------------------+
+                               v
++---------------------------------------+     +----------------------+
+| Fragment Shader Stage (warps, 2x2      |&lt;---&gt;|  Texture Units +      |  on-chip L1 tex$
+| quads, derivatives) [PROGRAMMABLE]     |     |  Texture Cache        |  -&gt; L2 -&gt; VRAM
++------------------------------+---------+     +----------------------+
+                               v
++-------------------------------------------------------------------+
+|  ROP / Output-Merger: Depth-Stencil -&gt; Blend -&gt; MSAA Resolve (FF)   |
++------------------------------+--------------------------------------+
+              on-chip vs VRAM boundary marked below this line
+              v                                        v
+   +-----------------------+              +--------------------------+
+   |  IMR: direct VRAM      |              |  TBDR: on-chip Tile      |
+   |  read-modify-write     |              |  Buffer (SRAM) -&gt; one    |
+   |  of the framebuffer    |              |  flush to VRAM per tile  |
+   +-----------------------+              +--------------------------+
+                               \                        /
+                                v                      v
+                    +---------------------------------------+
+                    |     VRAM  (off-chip, GB/s-bound)        |
+                    |     Memory Hierarchy: RF / L1 / L2 / VRAM|
+                    +---------------------------------------+</code></pre>
+<p>Command Processor / Draw-Call Front End: decodes each draw call, validates pipeline state, and issues geometry work to the modeled SMs/CUs; fixed-function, models the <a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/trade-offs/#adr-19">ADR-19</a> draw-call front end.</p>
+<p>Vertex Fetch + Vertex Shader Stage: fetches vertex attributes and runs the abstract-ISA vertex program across warps under SIMT (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-5">I5</a>); programmable, on-chip register-file resident (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/design/#sec-11">§11</a> <code>SimtCore</code>).</p>
+<p>Primitive Assembly + Clipping: assembles shaded vertices into primitives, clips against the view frustum; fixed-function, feeds the rasterizer only well-formed primitives.</p>
+<p>Rasterizer (Triangle Setup, Edge Evaluation, Coverage, Hi-Z): computes edge functions (Pineda 1988), applies the top-left fill rule (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-1">I1</a>), and uses hierarchical-Z to reject fully-occluded tiles before fragment generation; fixed-function.</p>
+<p>Early-Z: tests fragment depth before shading when the fragment shader cannot change depth/discard (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-3">I3</a>); fixed-function, bandwidth-saving.</p>
+<p>Fragment Shader Stage: runs the abstract-ISA fragment program across warps grouped into 2x2 quads so screen-space derivatives are defined (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-2">I2</a>); programmable, on-chip register-file + L1 resident.</p>
+<p>Texture Units + Texture Cache: resolve texture addresses through Morton/swizzle order, sample through the modeled cache hierarchy, and filter; on-chip L1 texture cache backed by L2/VRAM.</p>
+<p>ROP / Output-Merger: performs the depth/stencil test, then blend, then MSAA resolve in that fixed order (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-4">I4</a>); fixed-function, the final arbiter of framebuffer writes.</p>
+<p>Memory Hierarchy: register file and L1/L2 caches on-chip, VRAM off-chip; the dominant performance limiter per the roofline model (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/architecture/#sec-8">§8</a>, <a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/numbers/#sec-34">§34</a>).</p>
+<p>Tile Buffer (TBDR mode): an on-chip SRAM buffer accumulating a screen tile&#39;s fragments across the whole draw before one VRAM flush, trading on-chip capacity for VRAM bandwidth (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/build/#sec-22">§22</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Pipeline Stage Sequence</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Fixed-Function / Programmable</th>
+<th>Input Primitive</th>
+<th>Output</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Command Processor</td>
+<td>Fixed-function</td>
+<td>Draw call</td>
+<td>Validated work items issued to SMs/CUs</td>
+</tr>
+<tr>
+<td>Vertex Fetch</td>
+<td>Fixed-function</td>
+<td>Vertex indices/streams</td>
+<td>Raw vertex attributes</td>
+</tr>
+<tr>
+<td>Vertex Shader</td>
+<td>Programmable (warps)</td>
+<td>Vertex attributes</td>
+<td>Clip-space vertices</td>
+</tr>
+<tr>
+<td>Primitive Assembly</td>
+<td>Fixed-function</td>
+<td>Shaded vertices</td>
+<td>Primitives (triangles)</td>
+</tr>
+<tr>
+<td>Clipping</td>
+<td>Fixed-function</td>
+<td>Primitives</td>
+<td>Clipped, culled primitives</td>
+</tr>
+<tr>
+<td>Triangle Setup</td>
+<td>Fixed-function</td>
+<td>Clipped triangle</td>
+<td>Edge functions, bounding box</td>
+</tr>
+<tr>
+<td>Rasterization (edge eval, coverage, Hi-Z)</td>
+<td>Fixed-function</td>
+<td>Edge functions</td>
+<td>Covered fragments (quads)</td>
+</tr>
+<tr>
+<td>Early-Z</td>
+<td>Fixed-function</td>
+<td>Fragments + depth</td>
+<td>Surviving fragments</td>
+</tr>
+<tr>
+<td>Fragment Shader</td>
+<td>Programmable (warps, quads)</td>
+<td>Surviving fragments</td>
+<td>Shaded fragment color/depth</td>
+</tr>
+<tr>
+<td>Texture Units</td>
+<td>Fixed-function w/ programmable fetch requests</td>
+<td>Texture coordinates</td>
+<td>Filtered texel values</td>
+</tr>
+<tr>
+<td>ROP (depth/stencil, blend, MSAA resolve)</td>
+<td>Fixed-function</td>
+<td>Shaded fragments</td>
+<td>Framebuffer writes</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 The SIMT/Warp Execution Model</h3>
+<p>Named steps: (1) group N scalar threads (lanes) into one warp, N = warp width (32 or 64, <a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/trade-offs/#adr-5">ADR-05</a>); (2) issue one instruction per cycle to all lanes in lockstep; (3) on a data-dependent branch, compute a per-lane predicate and push an <code>ExecMask</code>; (4) execute the taken side with the mask applied, inactive lanes idle; (5) execute the not-taken side symmetrically; (6) reconverge at the immediate post-dominator, popping the mask; (7) when a warp stalls on memory, the scheduler switches to another resident warp (latency hiding, P1).</p>
+<p>Worked divergence example: a warp of 32 lanes executes <code>if (fragment.depth &lt; threshold) { A } else { B }</code>. Suppose 20 lanes take branch A and 12 take branch B. The warp executes A with a 20-active/12-masked pass, then B with a 12-active/20-masked pass — 2 total passes instead of 1, so this warp&#39;s effective throughput for this instruction is halved relative to a non-divergent warp, active-lane fraction = 20/32 then 12/32, average 0.5. This is the quantity <code>divergence_rate</code> (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-5">I5</a>) tracks.</p>
+<h3 id="sec-8-3">8.3 Occupancy Equation</h3>
+<p><code>occupancy_warps = min(register_file_size / (registers_per_thread * warp_width), shared_mem_size / shared_mem_per_block, scheduler_max_warps)</code></p>
+<p>Worked calculation: register file = 65536 32-bit registers/SM, registers_per_thread = 64, warp_width = 32 → register-limited warps = 65536 / (64*32) = 32. Shared memory = 96 KB/SM, shared_mem_per_block = 8 KB → shared-mem-limited warps-worth-of-blocks = 12 blocks, at 4 warps/block = 48 warps. Scheduler max = 64 warps/SM. <code>occupancy_warps = min(32, 48, 64) = 32</code> — register-limited (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-9">I9</a> binds at the register ceiling here).</p>
+<h3 id="sec-8-4">8.4 Triangle Setup and Edge-Function Rasterization (Pineda)</h3>
+<p>Named steps: (1) compute three edge functions <code>E_i(x,y) = (x - x_i)*(y_j - y_i) - (y - y_i)*(x_j - x_i)</code> for each triangle edge; (2) a point is inside iff all three edge functions share the reference sign (or zero, subject to the fill rule); (3) apply the top-left fill rule (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-1">I1</a>): an edge is &quot;top&quot; if horizontal and above the triangle, &quot;left&quot; if it goes downward — points exactly on a top or left edge are inside, points on a bottom or right edge are not, so shared edges between adjacent triangles are covered by exactly one; (4) compute the bounding box of the triangle and iterate candidate pixels/quads within it; (5) accumulate coverage into a sample mask (for MSAA, one bit per sample position); (6) consult hierarchical-Z: if the tile&#39;s conservative far-Z bound is nearer than the triangle&#39;s nearest depth in the tile, reject the whole tile before generating fragments (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-8">I8</a>, Greene/Kass/Miller 1993); (7) emit surviving fragments grouped into 2x2 quads (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-2">I2</a>).</p>
+<h3 id="sec-8-5">8.5 The Quad and Screen-Space-Derivative Model</h3>
+<p><code>mip_lod = log2(max(|d(u)/d(x)|, |d(u)/d(y)|, |d(v)/d(x)|, |d(v)/d(y)|) * texture_size)</code></p>
+<p>Named steps: (1) shade a 2x2 quad together even if only one lane&#39;s fragment is covered (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-2">I2</a>); (2) uncovered lanes become &quot;helper lanes&quot; — they execute the fragment shader for derivative purposes but their output is discarded; (3) compute <code>du/dx</code>, <code>du/dy</code>, <code>dv/dx</code>, <code>dv/dy</code> by finite difference across the quad; (4) feed the maximum derivative magnitude into the mip-LOD equation above (Williams 1983); (5) select or trilinearly blend between mip levels for the texture fetch.</p>
+<h3 id="sec-8-6">8.6 The Texture-Unit Model</h3>
+<p>Named steps: (1) resolve <code>(u, v)</code> plus mip level to a texel address; (2) remap the address into Morton/Z-order swizzle for 2D cache locality (Morton 1966); (3) probe the L1 texture cache; (4) on miss, fetch from L2, then VRAM, populating the cache along the way; (5) apply the configured filter (nearest/bilinear/trilinear/anisotropic) across the fetched texels. The texture-cache-locality argument: because nearby screen-space fragments (within a quad, within a warp) tend to sample nearby texels, Morton-order swizzling turns a 2D access pattern into a cache-friendly 1D one, raising the L1 hit rate far above a naive row-major layout for the same working set.</p>
+<h3 id="sec-8-7">8.7 The ROP / Output-Merger Decision Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Depth Test Result</th>
+<th>Stencil Op</th>
+<th>Blend Enabled</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Fail</td>
+<td>fail-op applied</td>
+<td>—</td>
+<td>discard fragment, no color write</td>
+</tr>
+<tr>
+<td>Pass</td>
+<td>pass-op applied</td>
+<td>false</td>
+<td>write fragment color directly</td>
+</tr>
+<tr>
+<td>Pass</td>
+<td>pass-op applied</td>
+<td>true</td>
+<td>compute blend equation, write blended color</td>
+</tr>
+<tr>
+<td>Pass (MSAA, partial coverage)</td>
+<td>pass-op applied per sample</td>
+<td>either</td>
+<td>resolve per-sample results per <a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-7">I7</a> before final write</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-8">8.8 IMR vs TBDR — Contrasted Sequence</h3>
+<p>IMR: (1) rasterize triangle, (2) shade fragments, (3) ROP reads current framebuffer pixel from VRAM, (4) ROP writes result back to VRAM — repeated per triangle touching that pixel (overdraw amplifies VRAM traffic).</p>
+<p>TBDR: (1) bin all geometry for the frame/pass into per-tile primitive lists (a full geometry pass before any pixel shading — P8), (2) for each tile, rasterize and shade using the on-chip tile buffer (SRAM) for all read-modify-write traffic, (3) resolve the tile once to VRAM (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-6">I6</a>).</p>
+<p>Bandwidth-saving math for TBDR (see also <a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/numbers/#sec-34">§34</a>): for a tile of P pixels with overdraw factor V, IMR VRAM traffic ≈ <code>P * V * bytes_per_pixel * 2</code> (one read + one write per overdraw layer); TBDR VRAM traffic ≈ <code>P * bytes_per_pixel</code> (one write, no read, regardless of V) — savings factor ≈ <code>2V</code>.</p>
+<h3 id="sec-8-9">8.9 Sort-Classification Taxonomy (Molnar et al. 1994)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Class</th>
+<th>Where Geometry Binds to Screen Region</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Sort-first</td>
+<td>Before geometry processing, at the application/scene level</td>
+<td>Distributed scene partitioning</td>
+</tr>
+<tr>
+<td>Sort-middle</td>
+<td>After geometry processing, before rasterization (binning)</td>
+<td>TBDR (P13)</td>
+</tr>
+<tr>
+<td>Sort-last</td>
+<td>After rasterization/fragment shading, at compositing</td>
+<td>Multi-GPU frame compositing</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-10">8.10 The Roofline / Bandwidth Model</h3>
+<p><code>achievable_throughput = min(peak_compute_flops, peak_bandwidth_GBps * arithmetic_intensity)</code>, where <code>arithmetic_intensity = flops / byte</code>. When a draw&#39;s arithmetic intensity is below the ridge point (<code>peak_compute_flops / peak_bandwidth_GBps</code>), the draw is bandwidth-bound and adding ALUs does not help (P10) — this is the central diagnostic <a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/trade-offs/#sec-9">§9</a>/<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/numbers/#sec-30">§30</a>/<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/numbers/#sec-34">§34</a> return to.</p>
+<h3 id="sec-8-11">8.11 Worked Example — One Triangle to Shaded MSAA Pixels</h3>
+<p>A single opaque, screen-facing triangle covering a 32x32-pixel region, 4x MSAA, 16 B/pixel-sample framebuffer format: vertex fetch loads 3 vertices (fixed-function, negligible bandwidth); the vertex shader stage runs in one warp-pass (3 lanes active of 32, heavy waste — a case for instanced/batched vertex work in later phases); primitive assembly/clipping pass with no clipping needed; triangle setup computes 3 edge functions; rasterization walks the 32x32 bounding box, evaluates coverage per quad, and Hi-Z is not conclusive (triangle fully visible, no early tile reject); early-Z passes for all covered fragments (opaque, depth-writing, no discard, <a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-3">I3</a> does not defeat); the fragment stage shades 256 quads (1024 lanes) fully active, no helper-lane waste (interior triangle, no partial quads at this scale); texture unit performs one filtered fetch per fragment, mostly L1 hits due to Morton locality; ROP performs depth-test-then-blend (blend disabled, opaque) then MSAA resolves 4 samples/pixel to 1 final value (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-7">I7</a>). Bandwidth accounting: VRAM write ≈ 1024 pixels * 16 B (post-resolve) = 16 KB; if this were IMR under 3x overdraw the VRAM read+write would triple; TBDR reduces the on-chip resolve to a single VRAM write regardless of overdraw (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/architecture/#sec-8-8">§8.8</a>).</p>
+<h3 id="sec-8-12">8.12 Malformed / Hard Examples</h3>
+<ul>
+<li>A degenerate (zero-area) triangle: all three edge function coefficients collapse, setup must detect and skip it rather than divide by zero.</li>
+<li>A divergent warp tanking throughput: a fragment shader with a data-dependent loop where lane trip-counts vary 1-64x, active-lane fraction collapses toward 1/warp_width in the worst case (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-5">I5</a>).</li>
+<li>A texture-cache-thrashing access pattern: a shader sampling with a stride equal to the cache&#39;s associativity-induced conflict stride, driving L1 hit rate toward zero despite spatial locality existing in principle.</li>
+<li>An early-Z defeat by a discard/depth-write shader: forces late-Z, doubling ROP-adjacent bandwidth relative to the early-Z path (<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-3">I3</a>).</li>
+<li>Overdraw: a scene with back-to-front unsorted transparent geometry, V &gt;&gt; 1, directly inflating the IMR bandwidth term in <a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/architecture/#sec-8-8">§8.8</a>/<a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/numbers/#sec-34">§34</a>.</li>
+<li>A tiny-triangle quad-overshading storm: sub-pixel triangles from aggressive tessellation or distant geometry, where each covered fragment still costs a full 2x2 quad, driving helper-lane fraction toward 3/4 (P3).</li>
+</ul>
+<h3 id="sec-8-13">8.13 Failure-Path Example</h3>
+<p>A malformed draw call references a texture handle that was never bound: (1) the command processor&#39;s validation step (<code>graster-cmdproc</code>) detects the missing binding at decode time; (2) the draw call is rejected before entering the pipeline (fail-fast, no partial simulation state); (3) a structured <code>PipelineStats</code> validation-failure event is emitted, tagged with the draw-call ID and the invariant class (analogous to <a class="cite" href="/system-design-blueprints/systems/gpu-raster-pipeline-internals/reliability/#inv-10">I10</a>&#39;s bounds discipline); (4) <code>graster-trace</code> still records the rejected draw call for replay so the operator can reproduce the failure; (5) the CLI surfaces a diagnostic naming the missing binding.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

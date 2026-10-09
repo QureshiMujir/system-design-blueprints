@@ -1,0 +1,334 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Password Hashing — Architecture · Engineering Blueprints</title><meta name="description" content="Password Hashing, hld: §3 overview + §8 domain model. Build a memory-safe Rust workspace implementing the four production password-hashing constructions — PBKDF2 (RFC 8018), bcrypt (Provos &#38; Mazières 1999), scrypt (RFC 7914), and Argon2 (RFC 9106, all…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/security-cryptography/">Security &amp; Cryptography</a> </li><li> <a href="/system-design-blueprints/systems/password-hashing/">Password Hashing</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:118"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/security-cryptography/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Security &amp; Cryptography</span></a> </p> <h1>Password Hashing</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~12 weeks</li> <li>2,395 lines</li> <li>blueprint #91</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/password-hashing/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/password-hashing/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/password-hashing/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/password-hashing/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/password-hashing/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/password-hashing/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/password-hashing/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/password-hashing/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/password-hashing/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/password-hashing/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Password Hashing — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌──────────────────────────────────────────────────────────────────────────┐
+│ Application layer (registration, login, breach-response tooling)         │
+└───────────────────────────────┬──────────────────────────────────────────┘
+                                 │ public API — crate `password-hash`
+┌────────────────────────────────▼─────────────────────────────────────────┐
+│ Unified API (Phase 7, §19)                                               │
+│  hash(pw, Algorithm, Params) -&gt; EncodedHash                              │
+│  verify(pw, &amp;str) -&gt; Result&lt;VerifyOutcome, AuthError&gt;   [ct_eq boundary] │
+│  verify_with_pepper(pw, pepper, &amp;str) -&gt; ...                            │
+│  PHC-string codec (Phase 6, §18)  ·  legacy parsers (parse-only, §18)   │
+└────────────────────────────────┬─────────────────────────────────────────┘
+                                 │ trust boundary: secret material crosses here
+┌────────────────────────────────▼─────────────────────────────────────────┐
+│ Algorithm layer                                                          │
+│ ┌───────────────┐ ┌───────────────┐ ┌───────────────┐ ┌────────────────┐│
+│ │ PBKDF2 (§13)  │ │ bcrypt (§14)  │ │ scrypt (§15)  │ │ Argon2i/d/id   ││
+│ │ RFC 8018      │ │ Eksblowfish   │ │ RFC 7914      │ │ (§16–17)       ││
+│ │ HMAC-driven   │ │ 64-round loop │ │ ROMix+Salsa8  │ │ RFC 9106       ││
+│ └───────────────┘ └───────────────┘ └───────────────┘ └────────────────┘│
+│         concurrency boundary: each call owns its working memory          │
+└────────────────────────────────┬─────────────────────────────────────────┘
+                                 │
+┌────────────────────────────────▼─────────────────────────────────────────┐
+│ Underlying primitives (external crates, not built here)                 │
+│  SHA-256/512 · HMAC · Blake2b (Argon2&#39;s G) · Blowfish · Salsa20/8        │
+└───────────────────────────────────────────────────────────────────────────┘</code></pre>
+<p>Four boundaries govern every downstream decision. <strong>Trust boundary</strong> (API → Algorithm layer):
+plaintext password bytes cross exactly once per call and are zeroized on drop (<a class="cite" href="/system-design-blueprints/systems/password-hashing/reliability/#inv-14">I14</a>, P14).
+<strong>Concurrency boundary</strong> (within Algorithm layer): each <code>hash()</code>/<code>verify()</code> call allocates its own
+working memory — no shared mutable state, no lock contention (I-driven design, <a class="cite" href="/system-design-blueprints/systems/password-hashing/reliability/#sec-7">§7</a>). <strong>Persistence
+boundary</strong>: the library never touches storage; <code>EncodedHash</code> is an opaque <code>String</code> the caller
+persists. <strong>Protocol boundary</strong>: the PHC string is the one wire/storage format this library
+emits; legacy formats are read-only inputs converted to <code>ParsedHash</code> and, on <code>needs_rehash</code>,
+re-emitted as PHC. The four algorithm boxes are peers, not a hierarchy — a caller picks one and
+the library never treats them as interchangeable, because their security properties differ (P1–P4).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 PHC string grammar (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>phc-string     = &quot;$&quot; algorithm-id [ &quot;$v=&quot; version ] &quot;$&quot; param-list &quot;$&quot; b64-salt &quot;$&quot; b64-hash ;
+algorithm-id   = &quot;argon2id&quot; | &quot;argon2i&quot; | &quot;argon2d&quot; | &quot;scrypt&quot; ;
+version        = 1*DIGIT ;                      (* Argon2 only; 19 = v1.3, current *)
+param-list     = param *( &quot;,&quot; param ) ;
+param          = param-name &quot;=&quot; param-value ;
+param-name     = &quot;m&quot; | &quot;t&quot; | &quot;p&quot; | &quot;ln&quot; | &quot;r&quot; ;
+param-value    = 1*DIGIT ;
+b64-salt       = 1*base64-char ;                (* unpadded standard base64 *)
+b64-hash       = 1*base64-char ;
+base64-char    = ALPHA | DIGIT | &quot;+&quot; | &quot;/&quot; ;</code></pre>
+<p>PBKDF2 has no PHC-spec entry; the de-facto Django encoding <code>pbkdf2_sha256$&lt;iters&gt;$&lt;b64salt&gt;$&lt;b64hash&gt;</code>
+is used for generation, and the Atlassian <code>{PBKDF2-HMAC-SHA256}&lt;iters&gt;:&lt;b64salt&gt;:&lt;b64hash&gt;</code> form
+is parsed (legacy, <a class="cite" href="/system-design-blueprints/systems/password-hashing/blueprint/#sec-18-3">§18.3</a>). bcrypt uses its own fixed-field grammar (<a class="cite" href="/system-design-blueprints/systems/password-hashing/architecture/#sec-8-3">§8.3</a>).</p>
+<h3 id="sec-8-2">8.2 verify() state table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Input</th>
+<th>Transition</th>
+<th>Output</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Start</code></td>
+<td>raw <code>&amp;str</code></td>
+<td>dispatch on leading <code>$</code>/<code>{</code>/prefix to <code>Identify</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>Identify</code></td>
+<td>dispatch result</td>
+<td>PHC prefix → <code>ParsePhc</code>; bcrypt <code>$2[abxy]$</code> → <code>ParseBcrypt</code>; legacy prefix → <code>ParseLegacy</code>; no match → <code>Reject</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>ParsePhc</code> / <code>ParseBcrypt</code> / <code>ParseLegacy</code></td>
+<td><code>ParsedHash</code> or <code>ParseError</code></td>
+<td>success → <code>Recompute</code>; failure → <code>Reject</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>Recompute</code></td>
+<td><code>ParsedHash</code></td>
+<td>run the matching algorithm over <code>(password, salt, params)</code></td>
+<td>recomputed digest</td>
+</tr>
+<tr>
+<td><code>Compare</code></td>
+<td>recomputed vs stored digest</td>
+<td><code>ct_eq</code> (<a class="cite" href="/system-design-blueprints/systems/password-hashing/reliability/#inv-2">I2</a>)</td>
+<td><code>bool</code> (constant-time)</td>
+</tr>
+<tr>
+<td><code>Authenticated</code></td>
+<td><code>Compare == true</code></td>
+<td>compute <code>needs_rehash</code> (<a class="cite" href="/system-design-blueprints/systems/password-hashing/reliability/#inv-14">I14</a>)</td>
+<td><code>VerifyOutcome::Authenticated{needs_rehash}</code></td>
+</tr>
+<tr>
+<td><code>Rejected</code> (auth)</td>
+<td><code>Compare == false</code></td>
+<td>—</td>
+<td><code>AuthError::WrongPassword</code></td>
+</tr>
+<tr>
+<td><code>Reject</code> (parse)</td>
+<td>malformed input</td>
+<td>—</td>
+<td><code>AuthError::Malformed</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 bcrypt encoded-record layout</h3>
+<pre class="diagram"><code>$ 2 b $ 12 $ &lt;22-char-b64-salt&gt;&lt;31-char-b64-hash&gt;
+│ │ │ │ │  │ └─ 128-bit salt, OpenBSD base64 alphabet (§8.4)
+│ │ │ │ │  └─ field boundary is positional, not delimited
+│ │ │ │ └─ cost factor, 2 ASCII digits, 04–31
+│ │ │ └─ field delimiter
+│ │ └─ minor version: a | b | x | y
+│ └─ major version literal &quot;2&quot;
+└─ format sentinel</code></pre>
+<h3 id="sec-8-4">8.4 Argon2 memory layout schema</h3>
+<pre class="diagram"><code>Memory = lanes × lane_length blocks, block = 1024 bytes
+lane_length = memory_kib / (4 * parallelism) * 4     (rounded to a multiple of 4*parallelism)
+Each lane partitioned into 4 segments of lane_length/4 blocks.
+Block[lane][segment][i] state: { filled: bool, data: [u8; 1024] }
+Fill order: pass 0..time_cost, segment 0..4, lane 0..parallelism (segments before lanes: RFC 9106 section 3.4)</code></pre>
+<h3 id="sec-8-5">8.5 Worked example (Argon2id, <code>PARAMS_2026</code>)</h3>
+<p>Input: <code>password = b&quot;correcthorsebatterystaple&quot;</code>, <code>salt</code> = 16 random bytes, <code>t=3, m=65536, p=4</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Operand</th>
+<th>Result shape</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><code>H0 = Blake2b(t, m, p, len(P), P, len(S), S, len(K), K, len(X), X)</code></td>
+<td>64-byte seed</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>H&#39;(H0‖0‖lane, 1024)</code> per lane, block 0</td>
+<td>1024-byte initial block × lanes</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>H&#39;(H0‖1‖lane, 1024)</code> per lane, block 1</td>
+<td>1024-byte initial block × lanes</td>
+</tr>
+<tr>
+<td>4</td>
+<td>fill_segment × (3 passes × 4 segments × 4 lanes)</td>
+<td>fully populated <code>Memory</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>XOR last block of each lane</td>
+<td>1024-byte final block</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>H&#39;(final_block, 32)</code></td>
+<td>32-byte raw tag</td>
+</tr>
+<tr>
+<td>7</td>
+<td>PHC-encode</td>
+<td><code>$argon2id$v=19$m=65536,t=3,p=4$&lt;b64 salt&gt;$&lt;b64 tag&gt;</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Malformed-input example</h3>
+<p>Input: <code>$argon2id$v=19$m=65536&amp;t=3,p=4$&lt;salt&gt;$&lt;hash&gt;</code> (uses <code>&amp;</code> instead of <code>,</code>, violates <a class="cite" href="/system-design-blueprints/systems/password-hashing/reliability/#inv-10">I10</a>).
+<code>parse_phc</code> reaches <code>param-list</code> production, fails to match <code>&amp;</code> against the grammar (<a class="cite" href="/system-design-blueprints/systems/password-hashing/architecture/#sec-8-1">§8.1</a>), returns
+<code>ParseError::Malformed { field: &quot;param-list&quot;, pos: 24 }</code>. <code>verify()</code> propagates
+<code>AuthError::Malformed</code> without ever reaching <code>Recompute</code> — no timing signal is leaked because no
+comparison occurred (distinguish from 8.7, where comparison does occur and must still be constant-time).</p>
+<h3 id="sec-8-7">8.7 Failure-path example</h3>
+<p>Argon2id <code>hash()</code> requested with <code>m=1048576</code> (1 GiB) on a host with 512 MiB free. <code>Memory::allocate</code>
+receives an allocator failure, returns <code>Err(Error::Alloc)</code> before any password bytes are touched
+by the fill phase (<a class="cite" href="/system-design-blueprints/systems/password-hashing/reliability/#inv-4">I4</a> guards the size, not the failure path itself). The caller sees
+<code>Error::Alloc</code>, not a panic (P13, <a class="cite" href="/system-design-blueprints/systems/password-hashing/blueprint/#sec-16-9">§16.9</a>) — the process does not abort, and no partial <code>Memory</code>
+state persists past the call (no partial write, no partial hash emitted).</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

@@ -1,0 +1,646 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>B-Tree Storage · Engineering Blueprints</title><meta name="description" content="Picture a ten-million-key dataset that must stay ordered on disk, answer a point lookup in a bounded number of page reads, scan a range in order, and never lose an acknowledged write (§4, §32 C3, M12). The blueprint lists how storage actually loses data: a pwrite that returned…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <span aria-current="page">B-Tree Storage</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>B-Tree Storage</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~15 weeks</li> <li>2,280 lines</li> <li>blueprint #184</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/b-tree-storage/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/b-tree-storage/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/b-tree-storage/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/b-tree-storage/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/b-tree-storage/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/b-tree-storage/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/b-tree-storage/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/b-tree-storage/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/b-tree-storage/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/b-tree-storage/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:B-Tree Storage"> <div class="doc-grid"> <aside class="doc-toc" data-pagefind-ignore> <details class="toc" open data-collapse-narrow> <summary>On this page</summary> <ol><li><a href="#ex-in-one-paragraph">In one paragraph</a></li><li><a href="#ex-the-problem-concretely">The problem, concretely</a></li><li><a href="#ex-how-it-works-end-to-end">How it works, end to end</a></li><li><a href="#ex-the-core-ideas">The core ideas</a></li><li><a href="#ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</a></li><li><a href="#ex-what-must-never-be-false">What must never be false</a></li><li><a href="#ex-what-breaks-in-production">What breaks in production</a></li><li><a href="#ex-the-numbers">The numbers</a></li><li><a href="#ex-how-it-compares">How it compares</a></li><li><a href="#ex-building-it-the-phase-plan">Building it — the phase plan</a></li><li><a href="#ex-questions-to-test-yourself">Questions to test yourself</a></li><li><a href="#ex-if-you-only-remember-three-things">If you only remember three things</a></li><li><a href="#ex-words-used-here">Words used here</a></li></ol> </details> </aside> <div class="doc-main"> <p class="meta doc-meta" data-pagefind-ignore> <span>Plain-words explainer</span> <span>status: checked</span> <span>written 2026-10-02</span> <span>checked by Opus 5.5 on 2026-10-07</span> <span>420 lines</span> </p>  <div class="prose explainer"><h2 id="ex-in-one-paragraph">In one paragraph</h2>
+<p>A disk-backed, page-oriented B+tree key-value engine, embedded as a library inside a host
+process: it owns one or more files and offers transactional get, put, delete and range scans
+with crash recovery, a buffer pool, a write-ahead log, latch-coupled concurrent reads and
+copy-on-write snapshots (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-1">§1</a>). It is the storage layer beneath a database, a graph store or an
+index — not a database server, not a query language, not a replicated system (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-1">§1</a>). Systems
+engineers embed it; the host operator owns supervision, backups and disk choice (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-1">§1</a>). One fixed
+point anchors the design: &quot;a transaction is durable iff its commit record is fsync&#39;d to the WAL&quot;;
+every other number is tunable against it (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-5">I5</a>).</p>
+<h2 id="ex-the-problem-concretely">The problem, concretely</h2>
+<p>Picture a ten-million-key dataset that must stay ordered on disk, answer a point lookup in a
+bounded number of page reads, scan a range in order, and never lose an acknowledged write (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>,
+<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C3, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-12">M12</a>). The blueprint lists how storage actually loses data: a <code>pwrite</code> that returned
+success but did not survive a power cut, an <code>fsync</code> skipped by a virtualised disk, a freed page
+reused before its prior write was durable (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-2">§2</a>). The simple designs each fail one requirement.
+Fixed-size record arrays cannot hold variable-length keys without rewriting the whole page on
+every insert (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-3">ADR-03</a>). Keeping everything in RAM with periodic snapshots loses the last few
+seconds of writes and assumes the data fits in memory, which this engine does not (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-34">§34</a> AA4). An
+LSM-tree&#39;s multi-level read amplification and compaction spikes conflict with the point-lookup
+and p99 read targets (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-34">§34</a> AA1).</p>
+<p>The blueprint&#39;s answers are a B+tree whose &quot;height is a logarithm&quot;, so doubling the data changes
+height by roughly one level, not proportionally (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM7</a>); a buffer pool whose eviction is
+&quot;scheduling, not memory management&quot;, because safety comes from pin counts (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM6</a>); a log that
+is the source of truth while &quot;the data file is a cache of it&quot; (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM2</a>); and snapshots that turn
+concurrency control into a garbage-collection problem (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM4</a>). The hardest part is ordering:
+writing data-file bytes before the WAL record is durable is &quot;the single invisible-data-loss bug&quot;
+(<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM2</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-18-6">§18.6</a>).</p>
+<h2 id="ex-how-it-works-end-to-end">How it works, end to end</h2>
+<p>The blueprint describes six layers that are &quot;layered, not woven&quot;: the tree never touches a raw
+byte, the buffer pool never knows what a key is, the page codec never knows what a B+tree is, and
+the pager never knows what a page means (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-3">§3</a>):</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: core engine layers (API, engine, tree, WAL)
+%% legend ingest: lower layers (buffer pool, codec)
+%% legend store: pager that touches the data file
+  API[&quot;&lt;b&gt;Public API (§21)&lt;/b&gt;&lt;br/&gt;Db::open · begin_read/begin_write&lt;br/&gt;get/put/delete/range · commit/abort&lt;br/&gt;checkpoint · vacuum · snapshot&quot;]
+  ENG[&quot;&lt;b&gt;Engine (§21)&lt;/b&gt;&lt;br/&gt;txn coordinator (1 writer,&lt;br/&gt;MVCC-free reads)&lt;br/&gt;snapshot lifecycle (root pgno +&lt;br/&gt;read-version)&lt;br/&gt;checkpoint/vacuum&quot;]
+  TREE[&quot;&lt;b&gt;Tree (§15–16, §19–20)&lt;/b&gt;&lt;br/&gt;search · insert · split&lt;br/&gt;delete · merge/borrow&lt;br/&gt;range scan · bulk load&lt;br/&gt;latch crabbing&quot;]
+  WAL[&quot;&lt;b&gt;WAL (§18)&lt;/b&gt;&lt;br/&gt;append-only, CRC32C/rec&lt;br/&gt;group commit + fsync&lt;br/&gt;redo replay · checkpoint&quot;]
+  BP[&quot;&lt;b&gt;Buffer Pool (§17)&lt;/b&gt;&lt;br/&gt;frame table, hash index, pin/unpin&lt;br/&gt;CLOCK, dirty bitmap, async flusher&quot;]
+  PC[&quot;&lt;b&gt;Page Codec (§14)&lt;/b&gt;&lt;br/&gt;header, slot array, cells&lt;br/&gt;CRC32C, overflow&quot;]
+  PG[&quot;&lt;b&gt;Pager (§13)&lt;/b&gt;&lt;br/&gt;pread/pwrite, fsync/fdatasync&lt;br/&gt;O_DIRECT, mmap RO&quot;]
+  API --&gt; ENG
+  ENG --&gt; TREE
+  ENG --&gt; WAL
+  TREE --&gt; BP
+  BP --&gt; PC
+  PC --&gt; PG
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  class API,ENG,TREE,WAL rt
+  class BP,PC ingest
+  class PG store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>core engine layers (API, engine, tree, WAL)</li><li><span class="swatch ingest"></span>lower layers (buffer pool, codec)</li><li><span class="swatch store"></span>pager that touches the data file</li></ul></figcaption></figure>
+<p>Each box is one crate: <code>btree-engine</code> (public API and engine), <code>btree-tree</code>, <code>btree-wal</code>,
+<code>btree-bufpool</code>, <code>btree-page</code> (the codec), <code>btree-pager</code>, with <code>btree-cow</code> holding snapshots and
+vacuum (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-1">§1</a>). Follow one <code>put</code> and <code>commit</code>:</p>
+<ol>
+<li><strong>Write.</strong> <code>begin_write</code> blocks if another write transaction is live (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-3">§8.3</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-3">P3</a>). A <code>put</code> never
+modifies a page in place: <code>btree-tree</code> copies the page to a new page number and copies every
+page on the path from that leaf to the root (the &quot;ridge&quot;) (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-21-2">§21.2</a>).</li>
+<li><strong>Through the pool.</strong> Every page access goes through <code>btree-bufpool</code>, which pins the frame so
+it cannot be evicted (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-3">I3</a>), verifies the CRC-32C on read (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-2">I2</a>), and evicts with a CLOCK sweep on
+a miss (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-17-2">§17.2</a>). No component but the async flusher writes the data file (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-12">P12</a>).</li>
+<li><strong>Commit.</strong> The engine appends a <code>Commit</code> record and calls <code>flush_through</code>; only when the
+fsync returns is the transaction durable (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-3">§8.3</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-1">I1</a>). Then the writer writes whichever of the
+two meta pages has the older LSN, pointing it at the new root, and fsyncs it (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-21-2">§21.2</a>).</li>
+<li><strong>Readers.</strong> <code>begin_read</code> never blocks (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-3">P3</a>). A reader holds a root page number and read
+version, so it keeps seeing its own tree while the writer moves on (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-21-2">§21.2</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-4">P4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-10">ADR-10</a>).</li>
+<li><strong>Flush.</strong> The flusher never writes a page whose LSN is ahead of the last durable WAL LSN (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-4">I4</a>).</li>
+<li><strong>Crash and reopen.</strong> Recovery picks the newer valid meta page (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-10">I10</a>), buffers each
+transaction&#39;s records, applies them only when its <code>Commit</code> is seen, and discards them on
+<code>Abort</code> — redo only, no undo, because there is one writer (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-4">§8.4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-5">ADR-05</a>). Where the scan
+starts is stated two ways: <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-4">§8.4</a> and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-18-2">§18.2</a> step 5 scan from <code>meta.last_committed_lsn + 1</code>,
+while <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-5">P5</a> and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-5">I5</a>&#39;s recovery column say replay runs from the last checkpoint (LSN).</li>
+</ol>
+<h2 id="ex-the-core-ideas">The core ideas</h2>
+<h3 id="ex-slotted-pages-and-cells-8-1">Slotted pages and cells (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-1">§8.1</a>)</h3>
+<p>A page holds a header, a slot array that grows rightwards and stays sorted by key, free space in
+the middle, cells growing leftwards from the end, and a 4-byte CRC-32C trailer (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-1">§8.1</a>). The default
+page is 4,096 B (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>). <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-1">§8.1</a> draws the header as 24 B with the 4-byte trailer separate; <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a>&#39;s
+capacity model instead uses 24 B for &quot;page-header+trailer overhead&quot; combined. A small trace of
+the three cell forms (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-1">§8.1</a>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Cell</th>
+<th>Layout</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>leaf, inline</td>
+<td><code>[u32 key_len][u32 val_len][key][val]</code></td>
+</tr>
+<tr>
+<td>leaf, overflow</td>
+<td><code>[u32 key_len][u32 0][u64 first_overflow_pgno][u64 total_len][key]</code></td>
+</tr>
+<tr>
+<td>internal</td>
+<td><code>[u32 sep_len][u32 0][u64 child_pgno][sep]</code></td>
+</tr>
+</tbody></table></div>
+<p>A value above <code>pagesize / 4</code> (1,024 B by default) goes to an overflow chain (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-19">ADR-19</a>).
+Integers are little-endian regardless of host, and the file header and both meta pages use the
+same header and trailer as every other page (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-1">§8.1</a>). A page whose <code>free_off</code> places the slot
+array past the trailer is rejected with <code>Error::PageCorrupt</code> before any cell is read: bounds are
+checked, never trusted (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-6">§8.6</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-13">P13</a>).</p>
+<h3 id="ex-fanout-is-amortisation-height-is-a-logarithm-8-5-32-mm1-mm7">Fanout is amortisation, height is a logarithm (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-5">§8.5</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM1</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM7</a>)</h3>
+<p>With suffix-truncated separators of about 12 B, an internal cell is 24 B and a page holds about
+169 children; with prefix-compressed keys and 200 B values a leaf cell is about 212 B and a leaf
+holds about 19 cells (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C1, C2). Ten million keys need about 526,316 leaves; 169³ ≈ 4.8 M is
+at least that, so three levels sit above the leaves and total height is about 4 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C3). That
+is why fanout, not height, dominates capacity planning (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM1</a>).</p>
+<p>The worked split (fanout 4, illustrative, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-5">§8.5</a>): (1) the leaf is full, so allocate leaf <code>R</code>;
+(2) copy the upper half of <code>L</code>&#39;s cells into <code>R</code>; (3) <code>R.next_sibling = L.next_sibling</code>,
+<code>L.next_sibling = R.pgno</code>; (4) separator = <code>R</code>&#39;s first key; (5) insert it into parent <code>P</code>;
+(6) if <code>P</code> is full, split it and recurse; (7) if the root split, allocate a new root and update
+the meta page&#39;s <code>root_pgno</code>. Updating the sibling link with every split (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-7">I7</a>) is what gives
+range scans their O(result) cost (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-2">ADR-02</a>).</p>
+<h3 id="ex-the-log-is-the-truth-the-file-is-a-cache-8-2-i5-mm2">The log is the truth; the file is a cache (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-2">§8.2</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM2</a>)</h3>
+<p>A WAL record header is <code>u64 lsn, u64 txn, u8 kind, 3 B pad, u32 plen, u32 crc32c</code>, then the
+payload; the CRC-32C covers <code>(lsn, txn_id, kind, plen, payload)</code> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-2">§8.2</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-12">I12</a>). Kinds are Begin,
+PageWrite, FullPage, AllocPage, FreePage, SetMeta, Commit, Abort and Checkpoint, and records
+never span a segment file (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-2">§8.2</a>). Group commit lets the first caller to <code>flush_through</code> pay one
+fsync for a whole batch while the others wait on a condvar with a 10 ms timeout (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-18-2">§18.2</a>).</p>
+<p>The blueprint gives two different fsync rates. <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a> puts fsync at about 150 µs, from which <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C6
+derives a serial ceiling of about 6,667 commits/s and a required batch of about 225 commits per
+flush to reach <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-4">M4</a>&#39;s 1,500,000 inserts/s. <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-18-2">§18.2</a> step 3 and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM8</a> give the raw rate as about
+300–1,500 fsyncs/s on the reference NVMe, citing <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>. C6 says its 225 &quot;validates&quot; <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-14">M14</a>, whose
+target is ≥ 200 commits per flush (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-28">§28</a>). A <code>kill -9</code> between the WAL write and its fsync leaves
+the record absent or present without a <code>Commit</code>; either way the transaction never happened
+(<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-7">§8.7</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-1">I1</a>).</p>
+<h3 id="ex-pinning-is-safety-eviction-is-scheduling-17-i3-mm6">Pinning is safety; eviction is scheduling (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-17">§17</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM6</a>)</h3>
+<p>A frame with a pin count above zero is never evicted (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-3">I3</a>). The CLOCK sweep skips pinned frames,
+clears and skips a set reference bit, evicts an unpinned frame whose bit is clear, and returns
+<code>Error::PoolExhausted</code> after a fully pinned sweep (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-17-2">§17.2</a>). Pin guards decrement on drop (RAII),
+the mitigation for a panic that would otherwise leak a pin (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#sec-22">§22</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#t-7">T7</a>). Which unpinned page to
+evict is a throughput and fairness choice, not a memory-safety one (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM6</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-7">ADR-07</a>).</p>
+<p>If all 16,384 default frames hold leaves, they cover about 311,296 keys, about 3.1% of the 10 M
+dataset; that &quot;hot subset&quot; is what <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-13">M13</a>&#39;s 95% hit-rate target is measured against (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C4). <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-13">M13</a>
+itself names the dataset as 2.5 GB (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-28">§28</a>), while <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C9 sizes it at about 2.1 GB.</p>
+<h3 id="ex-latch-crabbing-20-i6-p8-mm3">Latch crabbing (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-20">§20</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-8">P8</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM3</a>)</h3>
+<p>A read descent latches the child, releases the parent, and repeats, so at most two latches are
+held (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-20-2">§20.2</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-6">I6</a>). A write descent releases the parent only if the child is &quot;safe&quot;: a leaf with
+<code>free_size &gt; cell_len</code> or an internal page with <code>n_cells &lt; max - 1</code> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-20-2">§20.2</a>). Latch levels must be
+non-decreasing from root to leaf, checked by a debug-build per-thread stack (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-6">I6</a>). The blueprint
+states the bound two ways: <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-8">P8</a> says lock coupling &quot;holds at most two latches at once&quot;, while <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-8">P8</a>&#39;s
+own trade-off and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-20-2">§20.2</a> step 3 say an unsafe child keeps the parent held, so a split that
+propagates to the root holds latches up the whole path. A latch protects bytes in memory for one
+page operation; a lock protects a logical entity across a transaction (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM3</a>). Holding a latch
+across a disk read serialises every other descender behind a millisecond-scale I/O (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-20-7">§20.7</a>).</p>
+<h3 id="ex-copy-on-write-snapshots-and-vacuum-21-i9-mm4">Copy-on-write snapshots and vacuum (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-21">§21</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-9">I9</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM4</a>)</h3>
+<p>A snapshot is <code>{ root_pgno, read_version }</code>, costing one <code>u64</code> and a refcount entry (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-21-2">§21.2</a>,
+<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-10">ADR-10</a>). Pages freed by a copy-on-write commit are tagged &quot;free at version V&quot; and move to the
+active freelist only once no live snapshot&#39;s <code>read_version</code> is ≤ V (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-21-2">§21.2</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-9">I9</a>). The price is the
+ridge copy on every commit, whose cost scales with tree height, not dataset size (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-4">P4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-21-7">§21.7</a>). The
+failure is a leaked snapshot handle pinning every version since it opened, seen as
+<code>btree_snapshot_count</code> stuck high (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-6">FM-6</a>).</p>
+<h2 id="ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</h2>
+<h3 id="ex-tree-variant-b-tree-not-lsm-tree-adr-02">Tree variant: B+tree, not LSM-tree (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-2">ADR-02</a>)</h3>
+<p><strong>Chosen:</strong> a B+tree — data only in leaves plus sibling links, so a range scan is O(result)
+(<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-2">ADR-02</a>). <strong>Rejected:</strong> a classic B-tree, a B*-tree, an LSM-tree. <strong>When the rejected choice is
+right:</strong> a classic B-tree for point-lookup-only, fixed-record workloads with acute per-node space
+pressure; an LSM-tree for write-dominated, append-heavy ingestion (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-2">ADR-02</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-34">§34</a> AA1).</p>
+<h3 id="ex-recovery-redo-only-now-full-aries-later-adr-05">Recovery: redo-only now, full ARIES later (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-5">ADR-05</a>)</h3>
+<p><strong>Chosen:</strong> WAL redo only; undo is needed only once concurrent-writer rollback exists, and a
+single writer makes redo sufficient (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-5">ADR-05</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-1">I1</a>). <strong>Rejected:</strong> full ARIES — redo, undo and
+fine-grained locking — from Phase 0. <strong>When the rejected choice is right:</strong> &quot;the instant
+multi-writer txns ship&quot; (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-5">ADR-05</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-35">§35</a> row 1).</p>
+<h3 id="ex-concurrency-one-writer-many-readers-adr-08">Concurrency: one writer, many readers (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-8">ADR-08</a>)</h3>
+<p><strong>Chosen:</strong> single writer, many readers — no write-write conflict resolution, and readers never
+block (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-8">ADR-08</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-3">P3</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-4">P4</a>). <strong>Rejected:</strong> multi-writer two-phase locking; multi-writer optimistic
+concurrency. <strong>When the rejected choice is right:</strong> multi-writer 2PL wins once the single
+writer&#39;s WAL append saturates before the disk does (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-8">ADR-08</a>).</p>
+<h3 id="ex-read-isolation-copy-on-write-snapshots-not-mvcc-chains-adr-10">Read isolation: copy-on-write snapshots, not MVCC chains (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-10">ADR-10</a>)</h3>
+<p><strong>Chosen:</strong> a copy-on-write snapshot by root-page swap; cost is one <code>u64</code> plus a refcount, with
+zero reader locking (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-10">ADR-10</a>). <strong>Rejected:</strong> MVCC version chains from Phase 0; a global read-write
+lock. <strong>When the rejected choice is right:</strong> MVCC once concurrent writers must coexist with
+long-lived snapshots (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-10">ADR-10</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-35">§35</a> row 4). <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-2">ADR-02</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-5">ADR-05</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-8">ADR-08</a> and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-10">ADR-10</a> are the load-bearing
+four: overturning any one moves the whole architecture (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-9">§9</a>).</p>
+<h3 id="ex-eviction-clock-not-lru-k-adr-07">Eviction: CLOCK, not LRU-K (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-7">ADR-07</a>)</h3>
+<p><strong>Chosen:</strong> CLOCK — one reference bit per frame, one sweep cursor, no mutation on every touch
+(<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-7">ADR-07</a>). <strong>Rejected:</strong> strict LRU, LFU, random. <strong>When the rejected choice is right:</strong> LRU-K
+under strong recency skew that CLOCK&#39;s one bit cannot distinguish (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-7">ADR-07</a>).</p>
+<h3 id="ex-torn-write-protection-full-page-images-after-a-checkpoint-adr-16">Torn-write protection: full-page images after a checkpoint (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-16">ADR-16</a>)</h3>
+<p><strong>Chosen:</strong> the first write to a page after a checkpoint logs a <code>FullPage</code> image; the double-write
+buffer is deferred (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-16">ADR-16</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-18-2">§18.2</a>). <strong>Rejected:</strong> shipping a double-write buffer in Phase 0.
+<strong>When the rejected choice is right:</strong> once repair cost (full WAL replay) exceeds the buffer&#39;s
+constant-time restore under high dirty-page churn (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-16">ADR-16</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-35">§35</a> row 5).</p>
+<h3 id="ex-large-values-overflow-chains-not-a-value-log-adr-19">Large values: overflow chains, not a value log (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-19">ADR-19</a>)</h3>
+<p><strong>Chosen:</strong> an overflow-page chain, which keeps leaf fanout high so only large-value reads pay
+the extra I/O (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-19">ADR-19</a>). <strong>Rejected:</strong> always inline with splits absorbing the size; an external
+value log (WiscKey). <strong>When the rejected choice is right:</strong> an external value log for large,
+write-once or rarely read values (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-19">ADR-19</a>).</p>
+<h3 id="ex-roads-not-taken-34">Roads not taken (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-34">§34</a>)</h3>
+<p><em>An LSM-tree</em> wins for write-dominated, append-heavy ingestion that tolerates read amplification
+and compaction stalls; rejected because <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-1">M1</a> and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-9">M9</a> assume a bounded number of page fetches per
+read (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-34">§34</a> AA1).</p>
+<p><em>A Bw-tree</em> (lock-free mapping table and delta chains) wins at extreme core counts where even
+brief latch holds dominate; rejected as the default because its compare-and-swap protocol is
+much harder to make correct, and a single writer does not need lock-freedom — kept as a stretch
+path (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-34">§34</a> AA2, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-23">ADR-23</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-35">§35</a> row 3).</p>
+<p><em>A fractal tree</em> (message buffers in internal nodes) wins where write amplification must stay
+near-optimal; rejected because buffered-but-unflushed messages add a second recovery dimension
+the redo-only model does not need (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-34">§34</a> AA3).</p>
+<p><em>An in-memory store with periodic snapshots</em> wins when data fits in RAM and losing the last few
+seconds is acceptable; rejected because this engine assumes datasets larger than RAM (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-34">§34</a> AA4).</p>
+<p>The deferred register also holds B-link optimistic descent, MVCC chains, zstd page compression,
+encryption at rest and online backup, each with a named un-defer trigger (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-35">§35</a>).</p>
+<h2 id="ex-what-must-never-be-false">What must never be false</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-1">I1</a></strong> — a committed transaction survives any crash after its commit-record fsync; noticed by
+the crash-injection fixtures (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-26">§26</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-2">I2</a></strong> — every page read verifies its CRC-32C first; a failure is <code>Error::PageCorrupt</code>, and the
+page-codec fuzz target exercises it.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-3">I3</a></strong> — a pinned frame is never evicted; tested by a 1 M-pin stress test, surfaced as
+<code>Error::PoolExhausted</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-4">I4</a></strong> — the flusher never writes a page whose LSN exceeds the last durable WAL LSN; the
+<code>kill-mid-pagewrite</code> crash fixture checks it.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-5">I5</a></strong> — the WAL is the sole durability primitive and the data file may lag it without bound;
+checked by the 24 h soak (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-10">M10</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-6">I6</a></strong> — latches are taken in non-decreasing tree-level order; a debug latch-stack assertion
+panics on violation.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-7">I7</a></strong> — a leaf&#39;s sibling pointer is updated atomically with every split; the <code>range-cross-leaf</code>
+fixture checks it and <code>fsck</code> flags a broken chain.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-8">I8</a></strong> — total pages equal freelist pages plus live pages after every commit; a debug
+commit-time assertion and the <code>btree_freelist_pages</code> gauge.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-9">I9</a></strong> — a page freed by a CoW commit is not reused while a live snapshot needs it; the
+<code>snapshot-vacuum</code> fixture and the <code>btree_snapshot_count</code> gauge.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-10">I10</a></strong> — on open, the meta page with the higher verified LSN (tie broken by <code>txn_id</code>) wins;
+a two-meta-same-LSN crash fixture.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-11">I11</a></strong> — a dirty page&#39;s bytes are never partly visible to a reader; prevented by the type
+system, checked by the <code>concurrent-readers</code> fixture.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-12">I12</a></strong> — every WAL record&#39;s CRC-32C covers LSN, transaction id, kind, length and payload; a
+failure halts replay with <code>Error::WalCorrupt</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-13">I13</a></strong> — key and value sizes never exceed the ceilings without an explicit overflow chain;
+<code>KeyTooLarge</code>/<code>ValueTooLarge</code> unit tests.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-14">I14</a></strong> — replaying the same WAL range twice gives identical state, because redo applies only
+if <code>header.lsn &lt; record.lsn</code>; a 24 h soak with forced repeat-replay.</li>
+</ul>
+<h2 id="ex-what-breaks-in-production">What breaks in production</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-1">FM-1</a> — torn page write.</strong> Symptom: <code>PageCorrupt</code> after a crash. Cause: power cut mid-<code>pwrite</code>
+or a missing <code>FullPage</code> rule. Noticed by the CRC mismatch on the next read; the <code>FullPage</code>
+replay restores the image.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-2">FM-2</a> — truncated WAL tail.</strong> Symptom: <code>WalTruncated</code> on open after a crash mid-append. Noticed
+as a bad CRC or short header at the scan boundary; the tail past the last <code>Commit</code> is discarded
+(<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-14">I14</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-3">FM-3</a> — buffer-pool exhaustion.</strong> Symptom: <code>PoolExhausted</code> under load, from a pin leak, an
+undersized pool or a pathological scan. A full CLOCK sweep finds no victim; nothing recovers
+automatically — raise <code>buffer_pool_pages</code> and audit pin leaks.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-6">FM-6</a> — unbounded growth under a live snapshot.</strong> The file grows without bound because a
+leaked <code>Snapshot</code> pins every version since it opened; <code>btree_snapshot_count</code> stays high, and
+the fix is to find and close the leaked handle via a registry dump.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-7">FM-7</a> — lying disk.</strong> Committed data is missing after a power cut with no error at commit,
+because a virtualised disk ignored the flush. Nothing in-process detects it; the operator
+replaces or pre-validates the storage.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-8">FM-8</a> — group-commit stall.</strong> p99 commit latency spikes above <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-8">M8</a> when the flush leader starves
+or segment rotation contends; seen in <code>btree_wal_fsync_latency_seconds</code>, and the 10 ms condvar
+timeout forces a retry.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-9">FM-9</a> — recovery exceeds the RTO.</strong> <code>Db::open</code> runs long because checkpoints are too far apart;
+seen in <code>btree_recovery_duration_seconds</code>. Replay is never truncated for speed; tune checkpoint
+cadence down.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-10">FM-10</a> — prefix-compression corruption.</strong> A stale <code>prefix_len</code> after an insert gives a wrong
+search result; caught by the <code>BTreeMap</code> oracle test, not by a CRC, which proves only &quot;unchanged
+since written&quot; (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">§30</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM5</a>).</li>
+</ul>
+<p>Threats worth knowing (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#sec-22">§22</a>): <strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#t-1">T1</a></strong> and <strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#t-2">T2</a></strong>, malformed page or WAL bytes from bit rot or a
+crash, met by CRC-32C and bounded parsing under fuzzing; <strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#t-3">T3</a></strong>, adversarial key or value sizes
+from the caller, rejected at the API boundary (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-13">I13</a>); <strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#t-4">T4</a></strong>, <code>fsync</code> reporting success without
+durability — &quot;the one undetectable-in-process threat&quot;; <strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#t-7">T7</a></strong>, a pin leak from a panic, met by
+RAII pin guards.</p>
+<h2 id="ex-the-numbers">The numbers</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Budget / result</th>
+<th>Formula or source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Page size</td>
+<td>4,096 B default (512 B–64 KiB), locked at format time</td>
+<td><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-4">ADR-04</a></td>
+</tr>
+<tr>
+<td>Inline payload ceiling</td>
+<td>1,024 B, then an overflow chain</td>
+<td>pagesize / 4 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Point lookups, warm pool</td>
+<td>≥ 10,000,000/s (1 thread); ≥ 80,000,000/s (16 readers)</td>
+<td>target (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-1">M1</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-28">§28</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-2">M2</a>)</td>
+</tr>
+<tr>
+<td>Inserts</td>
+<td>≥ 200,000/s fsync-on-commit; ≥ 1,500,000/s group commit</td>
+<td>target (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-3">M3</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-4">M4</a>)</td>
+</tr>
+<tr>
+<td>Read latency p50 / p95 / p99, warm</td>
+<td>≤ 10 / ≤ 25 / ≤ 50 µs</td>
+<td>target (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-9">M9</a>)</td>
+</tr>
+<tr>
+<td>Commit latency p99, fsync-on-commit</td>
+<td>≤ 5 ms</td>
+<td>target (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-8">M8</a>)</td>
+</tr>
+<tr>
+<td>Startup, no replay</td>
+<td>≤ 10 ms</td>
+<td>target (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Recovery throughput</td>
+<td>≥ 50,000 WAL records/s</td>
+<td>target (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-7">M7</a>)</td>
+</tr>
+<tr>
+<td>Internal / leaf fanout</td>
+<td>≈ 169 / ≈ 19</td>
+<td>(4096 − 24) / 24; (4096 − 24) / 212 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C1, C2)</td>
+</tr>
+<tr>
+<td>Tree height, 10 M keys</td>
+<td>≈ 4</td>
+<td>10,000,000 / 19 ≈ 526,316 leaves; 169³ ≈ 4.8 M (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C3)</td>
+</tr>
+<tr>
+<td>Pool coverage</td>
+<td>≈ 311,296 keys ≈ 3.1%</td>
+<td>16,384 × 19 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C4)</td>
+</tr>
+<tr>
+<td>WAL bandwidth at <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-4">M4</a></td>
+<td>≈ 96 MB/s vs ~2,000 MB/s NVMe</td>
+<td>1,500,000 × (~40 B + 24 B) (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C5)</td>
+</tr>
+<tr>
+<td>Serial fsync ceiling; batch for <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-4">M4</a></td>
+<td>≈ 6,667 commits/s; ≈ 225 per flush</td>
+<td>1 / 150 µs; 1,500,000 × 150 µs / 1 s (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C6)</td>
+</tr>
+<tr>
+<td>Dirty pages per write transaction</td>
+<td>16,384 before a forced flush</td>
+<td>64 MiB / 4,096 B (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C7)</td>
+</tr>
+<tr>
+<td>File descriptors</td>
+<td>≤ 32</td>
+<td>96 MB/s × 5 s ≈ 480 MB ≈ 30 segments + 1 data + 1 lock (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C8)</td>
+</tr>
+<tr>
+<td>Resident dataset</td>
+<td>≈ 2.1 GB</td>
+<td>10,000,000 × 212 B (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C9)</td>
+</tr>
+<tr>
+<td>Worst-case RTO</td>
+<td>≤ 150 s</td>
+<td>480 MB / ~64 B ≈ 7.5 M records; 7,500,000 / 50,000 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C10)</td>
+</tr>
+</tbody></table></div>
+<p>Throughput, latency and startup rows are design targets gated by the benchmarks (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-28">§28</a>); the
+fanout-through-RTO rows are the blueprint&#39;s capacity arithmetic (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a>). Three inputs disagree
+inside the blueprint and are left as stated. <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a>&#39;s workload is 50 B keys and 200 B values, while
+<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-28">§28</a>&#39;s benchmark method uses 100 B keys and 1 KiB values. The fsync figure is 150 µs in <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a> and C6
+but ~300–1,500/s in <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-18-2">§18.2</a> step 3 and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM8</a>. <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-13">M13</a>&#39;s dataset is 2.5 GB, while C9 gives ≈ 2.1 GB.</p>
+<h2 id="ex-how-it-compares">How it compares</h2>
+<ul>
+<li><strong>SQLite</strong> lets the application choose a rollback journal or a WAL, trading a simpler
+single-file story for a less rigid durability contract (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/compare/#sec-31">§31</a>). It wins when embeddability and
+zero configuration matter more than a locked-down recovery model (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/compare/#sec-31">§31</a>).</li>
+<li><strong>LMDB</strong> uses mmap-backed copy-on-write with no locking on the read path, paying write
+amplification proportional to tree height on every commit (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/compare/#sec-31">§31</a>). It wins when reads vastly
+outnumber writes and the data fits the address space (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/compare/#sec-31">§31</a>).</li>
+<li><strong>InnoDB</strong> chose full ARIES (redo and undo) plus MVCC from the start, a far larger surface
+(<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/compare/#sec-31">§31</a>). It wins whenever concurrent write transactions with rollback are a hard requirement,
+which this engine defers (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/compare/#sec-31">§31</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-35">§35</a> row 1).</li>
+<li><strong>BoltDB/bbolt</strong> is the smallest copy-on-write B+tree in a garbage-collected language, trading
+peak throughput and p99 tail latency for simplicity (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/compare/#sec-31">§31</a>). It wins for embedded config and
+metadata stores where velocity matters more than raw OLTP throughput (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/compare/#sec-31">§31</a>).</li>
+<li><strong>WiredTiger</strong> has a pluggable B-tree-or-LSM core with built-in compression and an
+eviction-server thread pool, trading implementation complexity for tunable amplification (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/compare/#sec-31">§31</a>).
+It wins when one storage layer must serve both write-heavy and read-heavy collections (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/compare/#sec-31">§31</a>).</li>
+</ul>
+<h2 id="ex-building-it-the-phase-plan">Building it — the phase plan</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>What exists afterwards</th>
+<th>The proof (from §N.4)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-12">§12</a>)</td>
+<td>skeleton, governance, file header round-trip</td>
+<td><code>make test</code> passes exactly 1 test; header CRC verifies bit-identical after reopen</td>
+</tr>
+<tr>
+<td>1 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-13">§13</a>)</td>
+<td>the pager</td>
+<td>10,000-iteration write-then-read smoke test, zero flakes across 10 runs</td>
+</tr>
+<tr>
+<td>2 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-14">§14</a>)</td>
+<td>the page codec</td>
+<td>10,000 random insert/delete sequences, zero slot-order or overlap violations</td>
+</tr>
+<tr>
+<td>3 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-15">§15</a>)</td>
+<td>single-threaded B+tree</td>
+<td>10K inserts then lookups match the <code>BTreeMap</code> oracle exactly</td>
+</tr>
+<tr>
+<td>4 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-16">§16</a>)</td>
+<td>splits, merges, freelist accounting</td>
+<td>delete-to-empty after 10 M inserts leaves <code>n_pages == n_freelist_pages + 3</code> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-8">I8</a>)</td>
+</tr>
+<tr>
+<td>5 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-17">§17</a>)</td>
+<td>buffer pool</td>
+<td>1 M-pin stress test, zero leaked pins or lost dirty bits across 10 runs</td>
+</tr>
+<tr>
+<td>6 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-18">§18</a>)</td>
+<td>WAL, group commit, redo recovery</td>
+<td>crash injection at every byte boundary loses zero of 10,000 committed writes (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-12">M12</a>)</td>
+</tr>
+<tr>
+<td>7 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-19">§19</a>)</td>
+<td>range scan, prefix compression, suffix truncation</td>
+<td>≥ 30% fewer pages on the <code>user:000001</code>..<code>user:1000000</code> workload</td>
+</tr>
+<tr>
+<td>8 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-20">§20</a>)</td>
+<td>latch crabbing, concurrent reads</td>
+<td>1 M-iteration randomized test with the latch assertion on, zero panics</td>
+</tr>
+<tr>
+<td>9 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/build/#sec-21">§21</a>)</td>
+<td>CoW snapshots, checkpointing, bulk load, vacuum</td>
+<td>a snapshot held 1 hour across 1 M inserts is byte-identical</td>
+</tr>
+</tbody></table></div>
+<p>The blueprint estimates 8–10 weeks full-time for one senior engineer, or 4–6 months part-time
+(<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-1">§1</a>). <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-20-4">§20.4</a> refers to a 32-core reference host for read scaling, while <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>&#39;s reference host is
+16-core. Build card: <code>blueprints/build-cards/B-Tree-Storage.md</code>.</p>
+<h2 id="ex-questions-to-test-yourself">Questions to test yourself</h2>
+<ol>
+<li>Why does <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-5">I5</a> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#sec-7">§7</a>) make the double-write buffer (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-16">ADR-16</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-35">§35</a> row 5) a performance optimization
+rather than a correctness requirement, and under which threat (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#sec-22">§22</a> <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#t-4">T4</a>) does that distinction
+stop mattering? — <em>Hint: see <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-5">I5</a> and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#t-4">T4</a>.</em></li>
+<li>Using <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C6 and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-18-3">§18.3</a>&#39;s group-commit design, derive what happens to p99 commit latency (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-8">M8</a>)
+if the batch size in C6 is forced down to 10 commits/flush — which M# target breaks first?
+— <em>Hint: <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C6 and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-28">§28</a>.</em></li>
+<li>Using <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-9">I9</a> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#sec-7">§7</a>) and FM6 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#sec-23">§23</a>), construct the exact sequence of events that turns a correctly-
+functioning snapshot feature into an unbounded-file-growth incident, and name the metric
+(<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-24">§24</a>) that would have caught it earliest. — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-21-2">§21.2</a> step 4 and the <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-24">§24</a> alert list.</em></li>
+<li><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-4">§8.4</a>&#39;s recovery state machine has no &quot;Undo&quot; state. Using <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-5">ADR-05</a> and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-14">I14</a>, explain why that
+is correct for Phase 0 and what would have to be added to the state machine (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-4">§8.4</a>) the day
+Deferred row 1 (multi-writer) ships. — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-5">ADR-05</a> and <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-35">§35</a> row 1.</em></li>
+<li>Using <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#t-4">T4</a> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#sec-22">§22</a>), FM7 (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#sec-23">§23</a>), and the Rebello et al. 2020 citation (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-5">§5</a>), explain precisely what
+&quot;the engine cannot detect a lying disk&quot; means operationally — what does the runbook (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-24">§24</a>)
+ask an operator to do instead, and why can no in-process check substitute for it? — <em>Hint:
+<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-7">FM-7</a>&#39;s manual-recovery column.</em></li>
+</ol>
+<h2 id="ex-if-you-only-remember-three-things">If you only remember three things</h2>
+<p>A transaction is durable only when its commit record is fsynced to the WAL; the data file is a
+cache of the log and may lag it without bound (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM2</a>). Fanout, not height, dominates
+capacity planning, and ten million keys fit in a tree about four levels tall (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM1</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C3). Pin
+counts make eviction safe, and copy-on-write turns concurrency into garbage collection, so a
+leaked snapshot grows the file without bound (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-30">MM4</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#fm-6">FM-6</a>).</p>
+<h2 id="ex-words-used-here">Words used here</h2>
+<ul>
+<li><strong>Page / slotted page</strong> — the fixed-size unit of disk I/O, laid out as header, slot array and cells.</li>
+<li><strong>Cell</strong> — the variable-length key (plus value or child page number) that a slot points at.</li>
+<li><strong>Fanout</strong> — the number of children or cells one page holds.</li>
+<li><strong>Separator key</strong> — the internal-page key that bounds a child subtree, possibly suffix-truncated.</li>
+<li><strong>Overflow page</strong> — a chained page holding a value too large to fit inline.</li>
+<li><strong>Buffer pool / frame / pin</strong> — the in-memory page cache, one of its slots, and the count that blocks eviction.</li>
+<li><strong>CLOCK</strong> — the one-reference-bit approximate-LRU eviction algorithm.</li>
+<li><strong>WAL / LSN</strong> — the append-only durability log, and a record&#39;s monotonic position in it.</li>
+<li><strong>Group commit</strong> — batching many transactions&#39; fsyncs into one.</li>
+<li><strong>Redo</strong> — reapplying a committed change during recovery.</li>
+<li><strong>Latch / latch crabbing</strong> — an in-memory lock for one page operation; holding at most two at a time while descending (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/study/#sec-36">§36</a>).</li>
+<li><strong>Copy-on-write snapshot</strong> — a handle on one tree version (root page number plus read version).</li>
+<li><strong>Vacuum</strong> — the delayed reclaim of CoW pages no live snapshot needs.</li>
+<li><strong>Torn write</strong> — a page only partly written before a crash.</li>
+<li><strong>Meta page</strong> — one of two alternating pages holding the root, freelist head and last committed LSN.</li>
+</ul>
+</div> </div> </div> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

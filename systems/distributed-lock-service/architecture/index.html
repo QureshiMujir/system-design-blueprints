@@ -1,0 +1,310 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Lock Service — Architecture · Engineering Blueprints</title><meta name="description" content="Distributed Lock Service, hld: §3 overview + §8 domain model. coord is a Chubby/ZooKeeper/etcd-lock-class distributed coordination service: a hierarchical namespace of znodes (persistent, ephemeral, sequential) with one-shot watches, session-leased liveness…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/distributed-lock-service/">Distributed Lock Service</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Distributed Lock Service</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~17 weeks</li> <li>1,827 lines</li> <li>blueprint #96</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-lock-service/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-lock-service/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-lock-service/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-lock-service/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-lock-service/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-lock-service/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-lock-service/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-lock-service/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-lock-service/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-lock-service/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Lock Service — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: the lock service&#39;s own layers
+%% legend trust: session and ACL checks (control boundary)
+%% legend store: persistence layer
+%% legend side: the applications using the service
+APP[&quot;&lt;b&gt;Application layer&lt;/b&gt;&lt;br/&gt;HDFS NameNode HA, Kafka controller,&lt;br/&gt;HBase, custom...&quot;]
+SDK[&quot;&lt;b&gt;Client SDK&lt;/b&gt; (Phase 6, §18)&lt;br/&gt;connection mgmt + session reconnection&lt;br/&gt;idempotent retries (req-id)&lt;br/&gt;watch (re-)arming on reconnect&lt;br/&gt;recipes (Phase 7-8, §19-20)&quot;]
+SES[&quot;&lt;b&gt;Session layer&lt;/b&gt; (Phase 2, §14)&lt;br/&gt;heartbeat protocol&lt;br/&gt;Connecting→Connected→Jeopardy→Expired&lt;br/&gt;per-session: owned ephemeral znodes,&lt;br/&gt;registered watches&quot;]
+ACL[&quot;&lt;b&gt;ACL layer&lt;/b&gt; (Phase 9, §21)&lt;br/&gt;per-znode ACL list: world, auth,&lt;br/&gt;digest, ip&lt;br/&gt;mTLS / SASL principal resolution&quot;]
+NS[&quot;&lt;b&gt;Hierarchical namespace&lt;/b&gt; (Phase 1, §13)&lt;br/&gt;+ &lt;b&gt;watch subsystem&lt;/b&gt; (Phase 3, §15)&lt;br/&gt;tree of znodes, path-keyed, O(log n)&lt;br/&gt;Stat = (czxid, mzxid, pzxid, ctime,&lt;br/&gt;mtime, version, cversion, ...)&lt;br/&gt;persistent / ephemeral / sequential&quot;]
+RAFT[&quot;&lt;b&gt;Replication: Raft&lt;/b&gt; (Phase 4, §16)&lt;br/&gt;leader election, log replication,&lt;br/&gt;commit index&lt;br/&gt;linearizable writes (commit-then-apply)&lt;br/&gt;reads: follower-local (sequential)&lt;br/&gt;or sync()-gated (linearizable)&quot;]
+ST[(&quot;&lt;b&gt;Storage layer&lt;/b&gt; (Phase 5, §17)&lt;br/&gt;WAL (append-only, fsync-after-commit,&lt;br/&gt;CRC32C per record)&lt;br/&gt;snapshot (full namespace + sessions,&lt;br/&gt;chunked + CRC-segmented)&lt;br/&gt;compaction (100K-entry / 1 GB WAL&lt;br/&gt;trigger, ADR-07)&quot;)]
+APP -- &quot;public API (crate coord-sdk)&quot; --&gt; SDK
+SDK -- &quot;bespoke wire protocol: len||op||payload&quot; --&gt; SES
+SES -- &quot;requests cleared of auth + session checks&quot; --&gt; ACL
+ACL -- &quot;authorised operations&quot; --&gt; NS
+NS -- &quot;writes serialised through Raft proposal&quot; --&gt; RAFT
+RAFT -- &quot;persistence interface&quot; --&gt; ST
+classDef rt stroke-width:1.5px
+classDef trust stroke-width:1.5px
+classDef store stroke-width:1.5px
+classDef side stroke-width:1.5px
+class SDK,NS,RAFT rt
+class SES,ACL trust
+class ST store
+class APP side</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the lock service&#39;s own layers</li><li><span class="swatch trust"></span>session and ACL checks (control boundary)</li><li><span class="swatch store"></span>persistence layer</li><li><span class="swatch side"></span>the applications using the service</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>┌───────────────────────────────────────────────────────────────────────────┐
+│ Application layer (HDFS NameNode HA, Kafka controller, HBase, custom...) │
+└──────────────────────────────────┬────────────────────────────────────────┘
+                                   │ public API (crate coord-sdk)
+┌──────────────────────────────────▼────────────────────────────────────────┐
+│ Client SDK (Phase 6, §18)                                                 │
+│ • connection mgmt + session reconnection  • idempotent retries (req-id)  │
+│ • watch (re-)arming on reconnect          • recipes (Phase 7-8, §19-20)  │
+└──────────────────────────────────┬────────────────────────────────────────┘
+                                   │ bespoke wire protocol: len||op||payload
+┌──────────────────────────────────▼────────────────────────────────────────┐
+│ Session layer (Phase 2, §14)                                             │
+│ • heartbeat protocol  • Connecting→Connected→Jeopardy→Expired            │
+│ • per-session: owned ephemeral znodes, registered watches                │
+└──────────────────────────────────┬────────────────────────────────────────┘
+                                   │ requests cleared of auth + session checks
+┌──────────────────────────────────▼────────────────────────────────────────┐
+│ ACL layer (Phase 9, §21)                                                 │
+│ • per-znode ACL list; schemes: world, auth, digest, ip                   │
+│ • mTLS / SASL principal resolution                                      │
+└──────────────────────────────────┬────────────────────────────────────────┘
+                                   │ authorised operations
+┌──────────────────────────────────▼────────────────────────────────────────┐
+│ Hierarchical namespace (Phase 1, §13) + watch subsystem (Phase 3, §15)   │
+│ • tree of znodes, path-keyed, O(log n) traversal                        │
+│ • Stat = (czxid, mzxid, pzxid, ctime, mtime, version, cversion, ...)     │
+│ • persistent / ephemeral / sequential modifiers                          │
+└──────────────────────────────────┬────────────────────────────────────────┘
+                                   │ writes serialised through Raft proposal
+┌──────────────────────────────────▼────────────────────────────────────────┐
+│ Replication: Raft (Phase 4, §16)                                          │
+│ • leader election, log replication, commit index                         │
+│ • linearizable writes (commit-then-apply)                                │
+│ • reads: follower-local (sequential) or sync()-gated (linearizable)      │
+└──────────────────────────────────┬────────────────────────────────────────┘
+                                   │ persistence interface
+┌──────────────────────────────────▼────────────────────────────────────────┐
+│ Storage layer (Phase 5, §17)                                             │
+│ • WAL (append-only, fsync-after-commit, CRC32C per record)               │
+│ • snapshot (full namespace + sessions; chunked + CRC-segmented)          │
+│ • compaction (100K-entry / 1 GB WAL trigger, ADR-07)                     │
+└───────────────────────────────────────────────────────────────────────────┘</code></pre></details>
+<p>Leader-follower topology (3- or 5-node typical):</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: the leader
+%% legend ingest: followers (quorum = majority)
+L[&quot;&lt;b&gt;Leader&lt;/b&gt;&lt;br/&gt;proposes log entries&quot;]
+F1[&quot;&lt;b&gt;Follower&lt;/b&gt;&quot;]
+F2[&quot;&lt;b&gt;Follower&lt;/b&gt;&quot;]
+F3[&quot;&lt;b&gt;Follower&lt;/b&gt;&quot;]
+L -- &quot;heartbeat / AppendEntries / vote / InstallSnapshot&quot; --&gt; F1
+L -- &quot;heartbeat / AppendEntries / vote / InstallSnapshot&quot; --&gt; F2
+L -- &quot;heartbeat / AppendEntries / vote / InstallSnapshot&quot; --&gt; F3
+classDef rt stroke-width:1.5px
+classDef ingest stroke-width:1.5px
+class L rt
+class F1,F2,F3 ingest</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the leader</li><li><span class="swatch ingest"></span>followers (quorum = majority)</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>         ┌───────────┐
+         │  Leader   │── proposes log entries
+         └─┬───────┬─┘
+           │       │
+   ┌───────▼─┐ ┌───▼─────┐ ┌─────────┐
+   │Follower │ │Follower │ │Follower │   quorum = majority
+   └─────────┘ └─────────┘ └─────────┘
+           │ heartbeat / AppendEntries / vote / InstallSnapshot</code></pre></details>
+<p><strong>Application layer</strong> — external services that consume <code>coord</code> as a dependency; out of this project&#39;s scope but the reason it exists. <strong>Client SDK</strong> — owns connection pooling, session reconnection, idempotent retry via request-id de-duplication, watch re-arming, and the four composed recipes; the only layer application code touches. <strong>Session layer</strong> — the truth-source for liveness (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-6">I6</a>); tracks heartbeats and the four-state session machine; every ephemeral znode and every watch is indexed by session. <strong>ACL layer</strong> — evaluates the per-znode ACL list against the connection-resolved principal on every single request (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-7">I7</a>); never caches. <strong>Hierarchical namespace + watch subsystem</strong> — the in-memory state machine Raft replicates; a radix-indexed tree of znodes plus the one-shot watch registry, both opaque to Raft (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-4">I4</a>). <strong>Raft replication</strong> — the sole path to linearizable writes; commit-then-apply ordering (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-9">I9</a>) is the cornerstone invariant; reads optionally bypass it for throughput. <strong>Storage layer</strong> — WAL plus periodic snapshot give crash recovery; every record is CRC-checked (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-10">I10</a>) because fsync alone does not guarantee bit-level integrity (Pillai et al. 2014). All later sections stay consistent with this diagram; a box referenced elsewhere always resolves to one of these seven.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model, Protocol &amp; Data Model</h2>
+<h3 id="sec-8-1">8.1 Znode data model</h3>
+<p>A znode carries a canonical path (<code>/services/db/leader</code>, leading <code>/</code>, no trailing <code>/</code>, no <code>..</code>, no double-<code>/</code>), a byte-vector <code>data</code> (≤ 1 MiB, <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/architecture/#p-6">P6</a>), a <code>Stat</code> record, an ACL list, and a children index. <code>Stat</code> fields: <code>czxid</code> (creation zxid), <code>mzxid</code> (last-modification zxid — the fencing-token source, <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/architecture/#p-5">P5</a>), <code>pzxid</code> (last modification of the children list), <code>ctime</code>/<code>mtime</code> (advisory wall-clock, not load-bearing), <code>version</code> (data version, bumped on <code>set_data</code>), <code>cversion</code> (children version, bumped on child add/remove), <code>aversion</code> (ACL version, bumped on <code>set_acl</code>), <code>ephemeral_owner</code> (<code>Some(session_id)</code> or <code>None</code> for persistent), <code>data_length</code>, <code>num_children</code>. Operations are whole-value: <code>get_data</code> returns the entire payload, <code>set_data</code> replaces it (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/architecture/#p-6">P6</a>) — there is no partial-write or append primitive.</p>
+<h3 id="sec-8-2">8.2 Session state machine</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">stateDiagram-v2
+[*] --&gt; Connecting : NewSession committed
+Connecting --&gt; Connected : heartbeat
+Connected --&gt; Jeopardy : no heartbeat for timeout/3 * 2
+Jeopardy --&gt; Connected : reconnect
+Jeopardy --&gt; Expired : no heartbeat for timeout
+Expired --&gt; [*]
+note right of Expired
+terminal
+ephemerals removed
+client must open a new session
+end note</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.2.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>                 NewSession committed
+      ┌─────────────────────────────────────────┐
+      │                                         ▼
+ [Connecting] ──heartbeat──► [Connected] ◄──reconnect── [Jeopardy]
+                                  │                          ▲
+                                  │ no heartbeat for          │
+                                  │   timeout/3 * 2            │
+                                  └──────────────────────────┘
+                                                            │
+                                                 no heartbeat
+                                                 for `timeout`
+                                                            ▼
+                                                     [Expired]  (terminal;
+                                                      ephemerals removed;
+                                                      client must open a
+                                                      new session)</code></pre></details>
+<p>Transition table: <code>Connecting → Connected</code> on first heartbeat after <code>NewSession</code> commits. <code>Connected → Jeopardy</code> on missing a heartbeat for <code>timeout/3 * 2</code>. <code>Jeopardy → Connected</code> on any subsequent heartbeat before full <code>timeout</code> elapses. <code>Jeopardy → Expired</code> on the leader committing <code>Mutation::ExpireSession</code>, which is terminal — no transition leaves <code>Expired</code>; the client must construct a new session. <code>Jeopardy</code> exists because Chubby pioneered it (Burrows 2006, section 2.6); between TCP loss and the leader giving up, the client may still resume, but application code must be warned the lock it holds might already be gone (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/architecture/#p-3">P3</a>, the <code>on_lose_leadership</code> hook in <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-20-1">§20.1</a>).</p>
+<h3 id="sec-8-3">8.3 Watch protocol</h3>
+<p>Four kinds, each armed as a side effect of a successful read: <code>NodeCreated</code> (via <code>exists(path, watch)</code> when absent), <code>NodeDeleted</code> (via <code>get_data</code>/<code>exists(path, watch)</code> when present), <code>NodeDataChanged</code> (via <code>get_data(path, watch)</code>), <code>NodeChildrenChanged</code> (via <code>get_children(path, watch)</code>, fires only on direct child add/remove, not grandchild change). Delivery-ordering guarantee (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-4">I4</a>): a watch fires on the client&#39;s outbound channel before any later response on that same session can reflect the post-event state. A watch is one-shot (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/architecture/#p-7">P7</a>): registered, fired once, removed; the client must re-arm inside the same call that observes the new state to avoid the classic re-arm race (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-15-6">§15.6</a>).</p>
+<h3 id="sec-8-4">8.4 Fencing-token protocol — the Kleppmann scenario, worked example</h3>
+<ol>
+<li>Client A acquires the lock on <code>/locks/db-primary</code>; fencing token = <code>mzxid = 0x0000000100000005</code>.</li>
+<li>Client A enters a GC pause exceeding the session timeout.</li>
+<li>The leader commits <code>ExpireSession(A)</code>; A&#39;s ephemeral lock child is deleted atomically (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-2">I2</a>).</li>
+<li>Client B acquires the lock; fencing token = <code>mzxid = 0x0000000100000007</code> (strictly greater, <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-5">I5</a>).</li>
+<li>Client A&#39;s GC pause ends; unaware its session expired, A writes to the protected resource presenting token <code>0x...05</code>.</li>
+<li>The resource compares <code>0x...05</code> against its stored high-watermark <code>0x...07</code>, rejects the write.</li>
+</ol>
+<p>The point: <code>coord</code> cannot prevent step 5 — A has no way to know locally that its session expired. The resource-side check in step 6 is the only closure (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/architecture/#p-5">P5</a>); a <code>Lock</code> API that returns no token cannot close this hole, which is why one is never shipped (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-19-2">§19.2</a>).</p>
+<h3 id="sec-8-5">8.5 Wire protocol framing</h3>
+<pre class="diagram"><code>Request  frame:  | 4B length (LE) | 1B opcode | payload (bincode) |
+Response frame:  | 4B length (LE) | 1B status | payload (bincode) |
+Reconnect frame:  session_id(8B) | password(16B) | last_seen_zxid(8B)
+                  | watch_count(2B) | watches[]: (path_len(2B), path,
+                  last_seen_zxid(8B), kind_mask(1B))</code></pre>
+<p>Opcodes: <code>0x01 Create</code>, <code>0x02 Delete</code>, <code>0x03 SetData</code>, <code>0x04 GetData</code>, <code>0x05 GetChildren</code>, <code>0x06 Exists</code>, <code>0x07 SetAcl</code>, <code>0x08 Sync</code>, <code>0x09 Heartbeat</code>, <code>0x0A Connect</code>, <code>0x0B Reconnect</code>. Status codes mirror the <code>coord-core::error::Error</code> enum (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-11-7">§11.7</a>): <code>0x00 Ok</code>, <code>0x01 NoNode</code>, <code>0x02 NodeExists</code>, <code>0x03 BadVersion</code>, <code>0x04 NotEmpty</code>, <code>0x05 NoAuth</code>, <code>0x06 SessionExpired</code>, <code>0x07 ZnodeTooLarge</code>, <code>0x08 NotLeader</code>, <code>0x09 LimitExceeded</code>.</p>
+<h3 id="sec-8-6">8.6 WAL and snapshot record layout</h3>
+<pre class="diagram"><code>WAL record:      | 4B length (LE) | 4B CRC32C(payload) | bincode(LogEntry) |
+LogEntry:        term(8B) | index(8B) | Mutation (§11.6)
+
+Snapshot file:    | 16B magic &quot;COORD-SNAP-V1\0\0\0&quot; | 8B snapshot_index
+                  | 8B snapshot_term | 8B namespace_len
+                  | namespace bytes, chunked 1 MiB each, per-chunk CRC32C
+                  | 8B sessions_len | session-set bytes, chunked, per-chunk CRC32C
+                  | 4B file-level CRC32C of all preceding bytes</code></pre>
+<p><code>LogEntry</code> carries the <code>Mutation</code> enum (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-11-6">§11.6</a>) that the state machine applies deterministically (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-8">I8</a>). Chunked per-record and per-chunk CRC32C let recovery skip and log a single corrupted unit instead of discarding the whole file.</p>
+<h3 id="sec-8-7">8.7 Malformed-input example</h3>
+<p>A client sends a <code>Create</code> request whose declared <code>4B length</code> field is 40 bytes but only 12 bytes follow before the connection closes. <code>coord-net::frame</code> reads the length prefix, attempts to read 40 bytes, hits EOF at byte 12, and returns <code>FrameError::Truncated</code> without touching the namespace or Raft — the connection is dropped, no <code>Mutation</code> is proposed, and the fuzz target <code>wire_decode</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-27">§27</a>) exercises exactly this class continuously. A second malformed case: a <code>Create</code> payload that bincode-decodes structurally but names a path containing <code>..</code> — <code>Path::parse</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-11-2">§11.2</a>) rejects it at construction with <code>Error::InvalidPath</code> before it ever reaches <code>Namespace::create</code>, so no zxid is allocated for a request that was never going to succeed (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-13-4">§13.4</a> pitfall).</p>
+<h3 id="sec-8-8">8.8 Failure-path example</h3>
+<p>A client issues <code>set_data(&quot;/config/x&quot;, ...)</code> to the current leader; the leader appends the entry, begins replicating, then crashes before a majority acknowledges. The client&#39;s request times out; its SDK (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/build/#sec-18">§18</a>) retries the identical <code>request_id</code> against the new leader (elected per <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-16-5">§16.5</a>). Two sub-cases: (a) the crashed leader&#39;s entry never reached a majority — it is truncated from the log during the new leader&#39;s term, the retry proposes fresh, and the write lands exactly once; (b) the crashed leader&#39;s entry <em>did</em> reach a majority before the crash — it is already committed, the new leader has it in its log, and the retry is recognized as a duplicate via the <code>pending_requests</code> de-duplication map (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-16-3">§16.3</a>) and returns the original response without re-applying. Both sub-cases preserve <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-1">I1</a> and <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-9">I9</a>; neither double-applies nor silently drops the write.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Linearizable writes are the contract.</strong> Every mutating operation (<code>create</code>, <code>delete</code>, <code>set_data</code>, <code>set_acl</code>) goes through Raft and is applied in commit order. <em>Tradeoff:</em> every write pays at least one round-trip to a majority. <em>Operational implication:</em> write latency has a floor equal to the slowest-of-majority RTT. <em>Violation:</em> two concurrent writers observe different orderings — the conformance suite&#39;s linearizability checker (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-27">§27</a>) catches this before it reaches production.</li><li id="p-12"><strong>Sequential-consistency reads with explicit <code>sync()</code> for linearizability.</strong> A follower-local <code>get_data</code> is sequentially consistent (Lamport 1979) but may be stale; <code>sync()</code> promotes it. <em>Tradeoff:</em> default reads are fast but can return stale data. <em>Operational implication:</em> any client logic that needs freshness must call <code>sync()</code> explicitly — a documented, not implicit, cost. <em>Violation:</em> omitting <code>sync()</code> before a leader-only write check reintroduces split-brain (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/architecture/#sec-6">§6</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/architecture/#p-12">P12</a>).</li><li id="p-3"><strong>Sessions are the truth-source for liveness, not TCP connections.</strong> A session is a server-side lease independent of any one TCP socket. <em>Tradeoff:</em> a client can appear &quot;gone&quot; for up to the full session timeout before ephemerals are released. <em>Operational implication:</em> short timeouts release resources faster but risk false expiry under transient GC pauses. <em>Violation:</em> treating disconnect as instant failure causes premature ephemeral deletion and false leader-election churn.</li><li id="p-4"><strong>Ephemeral nodes tie state to sessions.</strong> An ephemeral znode&#39;s <code>ephemeral_owner</code> field binds it to exactly one session; <code>ExpireSession</code> atomically removes every znode that session owned. <em>Tradeoff:</em> no independent per-znode TTL — lifetime is entirely session-derived. <em>Operational implication:</em> there is no garbage collector to tune; the deletion is part of the linearizable log. <em>Violation:</em> a non-atomic cleanup leaves dangling protected-resource ownership no replay can reconstruct (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-2">I2</a>).</li><li id="p-5"><strong>Fencing tokens are non-negotiable.</strong> Every successful lock acquire returns a monotonic 64-bit fencing token; the protected resource MUST check it. <em>Tradeoff:</em> requires the resource owner to add one comparison — a small but mandatory integration cost. <em>Operational implication:</em> a <code>RawLock</code> API without a token is never shipped. <em>Violation:</em> skipping the check reproduces the exact Kleppmann 2016 GC-pause outage (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/architecture/#sec-8-4">§8.4</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/build/#sec-19">§19</a>).</li><li id="p-6"><strong>The hierarchical namespace is not a filesystem.</strong> Znodes carry whole-value data (≤ 1 MiB, <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/trade-offs/#adr-6">ADR-06</a>) and metadata; no streaming, append, or offset access. <em>Tradeoff:</em> large or growing payloads must be chunked by the application. <em>Operational implication:</em> <code>get_data</code>/<code>set_data</code> are O(payload size), never O(1) partial updates. <em>Violation:</em> an application that treats a znode as a log or a stream will hit <code>ZnodeTooLarge</code> and lose data if it doesn&#39;t chunk (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-11">I11</a>).</li><li id="p-7"><strong>Watches are one-shot.</strong> A watch fires exactly once, then must be re-armed. <em>Tradeoff:</em> clients must implement fire-and-refetch loops correctly (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-15-6">§15.6</a> pitfall). <em>Operational implication:</em> server-side watch memory is bounded by design, not by luck. <em>Violation:</em> a naive <code>while true: watch; wait</code> loop has a race window that silently drops updates.</li><li id="p-8"><strong>ACLs are per-znode, evaluated on every operation, never inherited.</strong> <em>Tradeoff:</em> no POSIX-style inheritance convenience; every znode&#39;s ACL is explicit. <em>Operational implication:</em> <code>set_acl</code> takes effect immediately with no cache-invalidation lag. <em>Violation:</em> client-side ACL caching produces stale grants after <code>set_acl</code> commits (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-7">I7</a>).</li><li id="p-9"><strong>Reconfiguration is part of the protocol, not bolted on.</strong> Adding or removing a replica goes through the same Raft log using joint consensus (Ongaro thesis, section 6). <em>Tradeoff:</em> reconfiguration is slower than a naive single-step add. <em>Operational implication:</em> there is no &quot;manual&quot; config change that bypasses Raft. <em>Violation:</em> the single-server-addition shortcut has a known partition-induced disagreement bug (Howard et al. 2015) — this design forbids it (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-24">§24</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#fm-3">FM-3</a>).</li><li id="p-10"><strong>Storage durability is snapshot + WAL, with per-record CRC32C.</strong> <em>Tradeoff:</em> every WAL append pays a CRC computation and an fsync. <em>Operational implication:</em> corrupted records are detected and the WAL truncated, never silently skipped. <em>Violation:</em> skipping the CRC check lets a single bit-flip propagate into a state-machine divergence no later Raft check can catch (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-10">I10</a>).</li><li id="p-11"><strong>The 1 MiB max-znode-size cap is load-bearing, enforced three times.</strong> <em>Tradeoff:</em> legitimately large payloads must be split by the application, adding client-side complexity. <em>Operational implication:</em> the cap is checked at the API boundary, the Raft-proposal boundary, and the snapshot-chunk boundary — deliberately redundant. <em>Violation:</em> single-point enforcement lets a bug in one layer let an oversized entry reach Raft batching or snapshot streaming and OOM a replica (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-11">I11</a>).</li><li id="p-12"><strong><code>sync()</code> is specifically a read-linearization barrier, not a general fence.</strong> <em>Tradeoff:</em> it cannot be used as a generic distributed barrier (that&#39;s the dedicated Barrier recipe, <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-20-3">§20.3</a>). <em>Operational implication:</em> documentation must distinguish the two explicitly. <em>Violation:</em> confusing them produces code that assumes ordering guarantees <code>sync()</code> does not provide.</li><li id="p-13"><strong>Conformance is the contract.</strong> The Jepsen-style harness (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-27">§27</a>) gates the Sealed milestone: linearizability on writes, sequential consistency on follower reads, lock correctness under partition, watch-delivery guarantees under reconnect. <em>Tradeoff:</em> a 30-day soak and a 30-day fuzz canary add real calendar time before Sealed. <em>Operational implication:</em> a conformance regression is a hard merge block, not a warning. <em>Violation:</em> shipping without it is exactly how the ZooKeeper/etcd Jepsen reports (Kingsbury 2013+) found real production bugs.</li><li id="p-14"><strong>Deterministic serialization everywhere in the replicated state.</strong> Every serializable type uses <code>BTreeMap</code>, never <code>HashMap</code>. <em>Tradeoff:</em> marginally slower map operations than a hash table. <em>Operational implication:</em> any two replicas that applied the same log produce byte-identical snapshots — a cheap correctness check. <em>Violation:</em> one <code>HashMap</code> in a serializable type makes cross-replica snapshot comparison useless and can mask real divergence (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#sec-24">§24</a> <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/reliability/#fm-6">FM-6</a>).</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

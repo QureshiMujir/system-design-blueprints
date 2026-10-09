@@ -1,0 +1,648 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Adaptive Indexing Engine — Architecture · Engineering Blueprints</title><meta name="description" content="Adaptive Indexing Engine, hld: §3 overview + §8 domain model. The Adaptive Indexing Engine (AIE) is a storage-engine-adjacent indexing subsystem, written in Rust, that provides secondary access methods whose physical layout refines incrementally as a side…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/adaptive-indexing-engine/">Adaptive Indexing Engine</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Adaptive Indexing Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~61 weeks</li> <li>2,849 lines</li> <li>blueprint #208</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/adaptive-indexing-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/adaptive-indexing-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/adaptive-indexing-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/adaptive-indexing-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/adaptive-indexing-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/adaptive-indexing-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/adaptive-indexing-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/adaptive-indexing-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/adaptive-indexing-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/adaptive-indexing-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Adaptive Indexing Engine — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                       +---------------------------+
+                       |  Host Engine (OLTP/OLAP)  |
+                       +-------------+-------------+
+                                     | AccessMethod trait (protocol boundary)
+                                     v
+                       +---------------------------+
+                       |  Access-Method Interface   |
+                       +-------------+-------------+
+                                     |
+                         +-----------+-----------+
+                         |                        |
+                         v                        v
+               +-------------------+   +-----------------------+
+               | Cost-Based Router |&lt;-&gt;| Statistics Collector  |
+               +---------+---------+   +----------+------------+
+                         |                          ^ incremental
+      +------------------+------------------+       | update
+      |                  |                  |       |
+      v                  v                  v       |
++-------------+ +-----------------+ +------------------------+
+| B+Tree      | | ART Engine      | | Cracking / Adaptive    |
+| Engine      | |                 | | Reorg Engine            |
++------+------+ +--------+--------+ +-----------+-------------+
+       |                 |                       |
+       +-------+---------+-----------+-----------+
+               |                     |
+               v                     v
+   +----------------------+ +-------------------------+
+   | Concurrency-Control  | | Scan Accelerator         |
+   | Layer (latch/OLC)    | | (SIMD, vectorized)       |
+   +----------+-----------+ +-----------+---------------+
+              |                         |
+              +------------+------------+
+                           v
+               +----------------------------+
+               | Buffer / Storage Manager   |   &lt;- persistence boundary
+               +--------------+-------------+
+                              |
+                              v
+               +----------------------------+
+               | Tiered-Compaction Worker   |
+               +--------------+-------------+
+                              |
+                              v
+                    +-------------------+
+                    | Block / Object    |
+                    | Storage Tiers     |
+                    +-------------------+</code></pre>
+<p><strong>Access-Method Interface.</strong> The single protocol boundary to the host engine; every request
+(lookup, scan, mutate) enters here as a <code>Predicate</code> and leaves as an <code>AccessPath</code> result. It
+owns no state of its own and is where request validation and backpressure (<a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/trade-offs/#adr-29">ADR-29</a>) live.</p>
+<p><strong>Cost-Based Router.</strong> Consults the Statistics Collector for the current generation and
+consults each candidate engine&#39;s <code>CostEstimate</code> before choosing a path (P2); its decisions are
+deterministic given inputs and are themselves emitted as telemetry.</p>
+<p><strong>Statistics Collector.</strong> Owns histograms and sketches, updated incrementally on the write
+path (<a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/trade-offs/#adr-9">ADR-09</a>) and consulted, never blocked on, by the router; staleness is a bounded, visible
+quantity (P9, <a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/reliability/#inv-6">I6</a>).</p>
+<p><strong>B+Tree Engine.</strong> Provides ordered range access with latch coupling (P7) and prefix
+compression; the default path for wide-range, update-heavy workloads.</p>
+<p><strong>ART Engine.</strong> Provides point-lookup-optimized access via adaptive radix nodes with path
+compression; the default path for sparse, point-lookup-heavy workloads.</p>
+<p><strong>Cracking / Adaptive Reorg Engine.</strong> The load-bearing subsystem: performs in-place partitioning
+(cracking) or run-merging (adaptive merging) as a side effect of query execution, never as a
+standalone job (P1), and is the only engine whose physical layout changes without an explicit
+build step.</p>
+<p><strong>Concurrency-Control Layer.</strong> Owns latches, optimistic lock coupling tokens, and the
+copy-on-crack versioning that lets reorganization proceed without invalidating active readers
+(P3, <a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/reliability/#inv-9">I9</a>); every other engine calls through it rather than implementing its own locking.</p>
+<p><strong>Scan Accelerator.</strong> SIMD-vectorized predicate evaluation over both cracked columns and raw
+row batches; consumes <code>ScanBatch</code> units from the storage manager.</p>
+<p><strong>Buffer / Storage Manager.</strong> The persistence boundary: page/segment caching, eviction, and
+durable writes; every structure above it is volatile until it flushes through here.</p>
+<p><strong>Tiered-Compaction Worker.</strong> Moves segments between hot/warm/cold storage tiers under a
+backpressure-throttled, leveled-compaction policy (<a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/trade-offs/#adr-15">ADR-15</a>), never competing unbounded with
+foreground queries (P10).</p>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Database Cracking — Named Steps</h3>
+<ul>
+<li><strong>C1 — Receive predicate.</strong> A range predicate <code>lo &lt;= x &lt; hi</code> arrives on column <code>C</code>.</li>
+<li><strong>C2 — Locate bracketing pieces.</strong> Find pieces <code>P_i</code>, <code>P_j</code> in the <code>CrackerIndex</code> whose
+boundaries bracket <code>lo</code> and <code>hi</code>.</li>
+<li><strong>C3 — Partition at <code>lo</code>.</strong> In-place three-way (Hoare-style) partition of <code>P_i</code> around <code>lo</code>,
+producing <code>P_i_low</code> (&lt; lo) and <code>P_i_high</code> (&gt;= lo).</li>
+<li><strong>C4 — Partition at <code>hi</code>.</strong> Partition <code>P_j</code> around <code>hi</code> similarly, producing <code>P_j_low</code>
+(&lt; hi) and <code>P_j_high</code> (&gt;= hi).</li>
+<li><strong>C5 — Insert boundaries.</strong> Insert <code>lo</code> and <code>hi</code> into the sorted boundary array — O(p) where
+p = current piece count.</li>
+<li><strong>C6 — Return contiguous run.</strong> The now-contiguous sub-range <code>[lo, hi)</code> is returned directly
+as the scan result — no further sort is required for this exact range again.</li>
+</ul>
+<p><strong>Worked example.</strong> Column <code>C</code> holds 1,000,000 unsorted values in one piece <code>[.,.)</code>.
+Query 1: <code>C &gt;= 200000 AND C &lt; 400000</code>. Cracking at 200000 and 400000 yields three pieces:
+<code>[.,200000)</code>, <code>[200000,400000)</code>, <code>[400000,.)</code>. Cost: one O(n) partition pass, n = 1,000,000.
+Query 2: <code>C &gt;= 250000 AND C &lt; 300000</code> lands entirely inside the ~200,000-element piece from
+query 1. Cracking again at 250000 and 300000 subdivides only that piece — cost O(200,000), not
+O(1,000,000). Each subsequent query in the same neighborhood touches an exponentially smaller
+piece (P6, P11), converging toward full refinement in O(log n) touches.</p>
+<h3 id="sec-8-2">8.2 Cracker-Index Structure</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>boundary</code></td>
+<td>key value</td>
+<td>the partitioning value between two adjacent pieces</td>
+</tr>
+<tr>
+<td><code>piece_id</code></td>
+<td>u32</td>
+<td>identity of the piece to the right of this boundary</td>
+</tr>
+<tr>
+<td><code>size_estimate</code></td>
+<td>u64</td>
+<td>approximate element count of the piece (statistics-fed)</td>
+</tr>
+<tr>
+<td><code>refined_generation</code></td>
+<td>u32</td>
+<td>number of crack operations that have touched this piece</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Adaptive Merging — Named Steps and Contrast with Cracking</h3>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/numbers/#m-1">M1</a> — Initial run split.</strong> Partition the column into <code>k</code> sorted runs (one merge pass).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/numbers/#m-2">M2</a> — Identify overlapping runs.</strong> On a range query, find runs overlapping <code>[lo, hi)</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/numbers/#m-3">M3</a> — Partial merge.</strong> Merge only the overlapping runs within <code>[lo, hi)</code>, producing one
+run for that sub-range.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/numbers/#m-4">M4</a> — Update run index.</strong> Replace the merged runs&#39; entries in the <code>RunIndex</code> with the new
+single run.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/numbers/#m-5">M5</a> — Repeat.</strong> Subsequent queries touching the same region find fewer, larger runs, until
+one fully sorted run remains for the touched range (Graefe &amp; Kuno 2010).</li>
+</ul>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Cracking</th>
+<th>Adaptive Merging</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>first-query cost</td>
+<td>O(n) in-place partition</td>
+<td>O(n log k) partial merge, higher constant</td>
+</tr>
+<tr>
+<td>convergence speed (queries to refine a range)</td>
+<td>O(log n) cracks, cheap per step</td>
+<td>fewer queries, each costlier</td>
+</tr>
+<tr>
+<td>physical operation</td>
+<td>in-place swap, not stable</td>
+<td>run merge, stable, more copying</td>
+</tr>
+<tr>
+<td>memory overhead</td>
+<td>boundary array, O(p)</td>
+<td>run metadata, O(k)</td>
+</tr>
+<tr>
+<td>best-fit workload</td>
+<td>unpredictable, narrow, shifting ranges</td>
+<td>stable, wide, repeated ranges</td>
+</tr>
+<tr>
+<td>convergence character</td>
+<td>lazy (P1, P6)</td>
+<td>eager relative to cracking (P12)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-4">8.4 The RUM Conjecture Framing</h3>
+<p>The RUM conjecture (Athanassoulis et al. 2016) states that no access method minimizes Read
+overhead, Update overhead, and Memory overhead simultaneously; improving two forces the third
+to grow. Framed per structure:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Structure</th>
+<th>Read (R)</th>
+<th>Update (U)</th>
+<th>Memory (M)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>B+Tree</td>
+<td>good (logarithmic)</td>
+<td>good (in-place, amortized splits)</td>
+<td>moderate (overflow/fill-factor slack)</td>
+</tr>
+<tr>
+<td>ART</td>
+<td>best (key-length bounded, cache-friendly)</td>
+<td>moderate (node growth/shrink cost)</td>
+<td>worst (pointer-heavy nodes, P8)</td>
+</tr>
+<tr>
+<td>cracked column</td>
+<td>best after convergence, worst before</td>
+<td>cheap (append, lazy re-crack)</td>
+<td>best (no extra structure, just boundaries)</td>
+</tr>
+<tr>
+<td>LSM (contrast, <a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/blueprint/#sec-36-3">§36.3</a>)</td>
+<td>worst (read amplification across levels)</td>
+<td>best (append-only)</td>
+<td>moderate (write-amplified but compact)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 B+Tree Node Layout</h3>
+<p>16KB page byte layout:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Offset</th>
+<th>Field</th>
+<th>Size</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td><code>page_id</code></td>
+<td>8B</td>
+</tr>
+<tr>
+<td>8</td>
+<td><code>lsn</code></td>
+<td>8B</td>
+</tr>
+<tr>
+<td>16</td>
+<td><code>level</code></td>
+<td>2B</td>
+</tr>
+<tr>
+<td>18</td>
+<td><code>key_count</code></td>
+<td>2B</td>
+</tr>
+<tr>
+<td>20</td>
+<td><code>free_space_offset</code></td>
+<td>2B</td>
+</tr>
+<tr>
+<td>22</td>
+<td><code>checksum</code></td>
+<td>4B</td>
+</tr>
+<tr>
+<td>26</td>
+<td><code>flags</code></td>
+<td>2B</td>
+</tr>
+<tr>
+<td>28..</td>
+<td>page-level prefix (shared, variable)</td>
+<td>variable</td>
+</tr>
+<tr>
+<td>..</td>
+<td>separator-key suffix array (prefix-compressed)</td>
+<td>variable</td>
+</tr>
+<tr>
+<td>..</td>
+<td>child-pointer / <code>Rid</code> array</td>
+<td>variable</td>
+</tr>
+<tr>
+<td>tail</td>
+<td>low fence key, high fence key</td>
+<td>variable</td>
+</tr>
+</tbody></table></div>
+<p><strong>Latch-coupling sequence (Lehman &amp; Yao 1981 style):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Latch Held Before</th>
+<th>Action</th>
+<th>Latch Held After</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>S1</td>
+<td>reader</td>
+<td>none</td>
+<td>latch root (read mode)</td>
+<td>root</td>
+</tr>
+<tr>
+<td>S2</td>
+<td>reader</td>
+<td>root</td>
+<td>inspect separator, choose child</td>
+<td>root</td>
+</tr>
+<tr>
+<td>S3</td>
+<td>reader</td>
+<td>root</td>
+<td>latch child (read mode)</td>
+<td>root + child</td>
+</tr>
+<tr>
+<td>S4</td>
+<td>reader</td>
+<td>root + child</td>
+<td>release root</td>
+<td>child</td>
+</tr>
+<tr>
+<td>S5</td>
+<td>reader</td>
+<td>child</td>
+<td>descend, repeat until leaf</td>
+<td>leaf</td>
+</tr>
+</tbody></table></div>
+<p><strong>Prefix-compression example.</strong> Keys <code>customer_10023</code>, <code>customer_10024</code>, <code>customer_10025</code>
+share the 12-byte prefix <code>customer_100</code>, stored once per page; each entry then stores only the
+2-byte suffix <code>23</code>/<code>24</code>/<code>25</code> — a reduction from 14 bytes to 2 bytes per key, 85.7% smaller for
+this run.</p>
+<h3 id="sec-8-6">8.6 ART Node Types — Byte Layout and Structure</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Node Type</th>
+<th>Key Array</th>
+<th>Child Pointers</th>
+<th>Approx. Size</th>
+<th>Capacity</th>
+<th>Lookup</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Node4</td>
+<td>4 x 1B keys</td>
+<td>4 x 8B ptrs</td>
+<td>~36B + header</td>
+<td>4</td>
+<td>linear scan</td>
+</tr>
+<tr>
+<td>Node16</td>
+<td>16 x 1B keys</td>
+<td>16 x 8B ptrs</td>
+<td>~144B</td>
+<td>16</td>
+<td>SIMD-comparable linear scan</td>
+</tr>
+<tr>
+<td>Node48</td>
+<td>256B byte→slot index</td>
+<td>48 x 8B ptrs</td>
+<td>~640B</td>
+<td>48</td>
+<td>indexed lookup, sparse</td>
+</tr>
+<tr>
+<td>Node256</td>
+<td>none (direct index)</td>
+<td>256 x 8B ptrs</td>
+<td>~2048B</td>
+<td>256</td>
+<td>direct array index</td>
+</tr>
+</tbody></table></div>
+<p><strong>Adaptive-node-growth rule (P8):</strong> grow Node4→16 on the 5th child; 16→48 on the 17th; 48→256
+on the 49th. Shrink is symmetric but hysteresis-gated — a node shrinks only once its fill drops
+below roughly half the lower tier&#39;s capacity, preventing growth/shrink thrashing at the
+boundary.</p>
+<p><strong>Path compression / lazy expansion — worked insert.</strong> Insert <code>&quot;10&quot;</code>, then <code>&quot;100&quot;</code>, then
+<code>&quot;1000&quot;</code> into an empty ART. Insert <code>&quot;10&quot;</code>: a single leaf stores the full path-compressed key
+<code>&quot;10&quot;</code> with no intermediate nodes (lazy expansion — a unique path needs no branching node).
+Insert <code>&quot;100&quot;</code>: it diverges from <code>&quot;10&quot;</code> at byte position 2 (<code>&quot;10&quot;</code> ends, <code>&quot;100&quot;</code> continues with
+<code>&quot;0&quot;</code>); this forces expansion — a Node4 is created at the divergence point holding two
+children: an end-marker leaf for <code>&quot;10&quot;</code> and a continuing leaf for <code>&quot;0&quot;</code>. Insert <code>&quot;1000&quot;</code>: it
+diverges further inside <code>&quot;100&quot;</code>&#39;s remaining path, introducing a second Node4 at the new
+divergence point; the common prefix <code>&quot;10&quot;</code> remains absorbed as the path-compressed prefix on
+the node above it (<a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/reliability/#inv-4">I4</a>).</p>
+<h3 id="sec-8-7">8.7 Cost Model — Display Equations and Worked Comparison</h3>
+<pre class="diagram"><code>Cost_fullscan            = n * c_scan
+Cost_btree_lookup        = c_traverse * log_f(n) + selectivity * n * c_fetch
+Cost_cracked_scan(gen)   = touched_piece_size(selectivity, gen) * c_scan + crack_overhead(gen)
+crack_overhead(gen)      -&gt; log2(n) * c_partition  as gen -&gt; 0 (first touch)
+crack_overhead(gen)      -&gt; 0                      as gen -&gt; converged</code></pre>
+<p><strong>Worked comparison.</strong> n = 10,000,000 rows, <code>c_scan</code> = 1ns/row, <code>c_fetch</code> = 100ns/row,
+<code>c_traverse</code> = 50ns, fanout f = 200, selectivity = 0.001 (10,000 matching rows).</p>
+<ul>
+<li><code>Cost_fullscan</code> = 10,000,000 * 1ns = 10ms.</li>
+<li><code>Cost_btree_lookup</code> = 50ns * log200(10,000,000) ≈ 50ns * 3.1 + 0.001 * 10,000,000 * 100ns
+≈ 155ns + 1,000,000ns ≈ 1.0002ms.</li>
+<li><code>Cost_cracked_scan</code> (converged) ≈ 10,000 * 1ns = 10µs, <code>crack_overhead</code> ≈ 0.</li>
+<li><code>Cost_cracked_scan</code> (first touch) ≈ 10,000 * 1ns + log2(10,000,000) * 1ns * 10,000,000
+≈ dominated by the ≈23ms partition pass.</li>
+</ul>
+<p>Router decision: once converged, the cracked scan (10µs) wins over the B+Tree lookup (~1ms)
+and full scan (10ms); on the very first touch the partition overhead dominates, so the router
+may still prefer the B+Tree lookup (P2, P11) until convergence is reached.</p>
+<h3 id="sec-8-8">8.8 Statistics Representation and Incremental-Update Rule</h3>
+<p>Histogram: equal-depth buckets, bucket <code>i</code> covers <code>[lo_i, hi_i)</code> with <code>count_i</code>. Incremental
+update rule: on insert of value <code>v</code>, increment the bucket containing <code>v</code>; on bucket overflow
+(<code>count_i</code> &gt; 2x target depth), locally split that bucket (redistribute only its contents), an
+amortized O(1) operation per write — never a full histogram recompute (<a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/trade-offs/#adr-9">ADR-09</a>).</p>
+<p>Sketch: HyperLogLog for cardinality estimation, <code>m</code> = 2^14 registers, standard error ≈
+1.04/√m ≈ 0.8%.</p>
+<h3 id="sec-8-9">8.9 Concurrency-Control State Machine for Reorganization</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Next State</th>
+<th>Failure Edge</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Stable</td>
+<td>query touches unrefined range</td>
+<td>Cracking</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Cracking</td>
+<td>partition complete</td>
+<td>BoundaryInsert</td>
+<td>ReaderConflict → Deferred (retry later)</td>
+</tr>
+<tr>
+<td>Cracking</td>
+<td>crash mid-partition</td>
+<td>Abandoned</td>
+<td>treated as still-Stable per <a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/trade-offs/#adr-14">ADR-14</a> (lazy recovery)</td>
+</tr>
+<tr>
+<td>BoundaryInsert</td>
+<td>boundary committed</td>
+<td>Stable (new generation)</td>
+<td>ConcurrentBoundaryRace → Retry (CAS re-read)</td>
+</tr>
+<tr>
+<td>Stable</td>
+<td>compaction trigger</td>
+<td>Compacting</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Compacting</td>
+<td>tier move complete</td>
+<td>Stable (new tier)</td>
+<td>CrashMidMove → RecoveryReplay (manifest-driven)</td>
+</tr>
+<tr>
+<td>RecoveryReplay</td>
+<td>checksum verified</td>
+<td>Stable</td>
+<td>ChecksumFailure → Quarantined</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-10">8.10 Tiered-Compaction Model — Amplification Arithmetic</h3>
+<p>Leveled compaction: level <code>L_i</code> capacity = <code>base_size * fanout^i</code>. Worst-case write
+amplification <code>WA ≈ fanout * num_levels</code>; for fanout = 10, 4 levels, worst-case <code>WA ≈ 40x</code>,
+bounded to the &lt; 4x target in <a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/numbers/#sec-4">§4</a> by heat-aware skipping of cold levels (only touched levels
+are rewritten). Worst-case read amplification <code>RA = num_levels</code> if bloom/heat routing misses;
+bounded to &lt; 2.5x by routing reads directly to the tier the statistics indicate holds the
+match.</p>
+<h3 id="sec-8-11">8.11 Malformed / Degenerate Examples</h3>
+<ul>
+<li><strong>Crack on a constant column</strong> (all values equal <code>c</code>): the predicate either matches
+everything or nothing; partitioning would produce a zero-width piece boundary at <code>c</code> — the
+<code>CrackerIndex</code> must reject a duplicate boundary insert (<a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/reliability/#inv-3">I3</a>) rather than looping.</li>
+<li><strong>All-duplicate keys in ART:</strong> path compression degenerates to one long chain with no
+branching; the engine must not allocate a Node256 for a single distinct byte value — it
+falls back to a leaf carrying a duplicate-key list.</li>
+<li><strong>Highly-skewed workload defeating convergence:</strong> 99% of queries touch a single
+0.001%-width range; that range converges immediately, but the router must not &quot;pre-crack&quot;
+the untouched long tail — doing so violates P6.</li>
+<li><strong>Concurrent update during a crack:</strong> a writer inserts into the exact piece being
+partitioned; the crack step serializes against the write via the piece latch (the
+WriterConflict edge implied by <a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/architecture/#sec-8-9">§8.9</a>) and either aborts-and-retries or applies the write
+post-crack against the new boundary.</li>
+</ul>
+<h3 id="sec-8-12">8.12 Failure-Path Example</h3>
+<p>A crack on piece <code>P</code> (500,000 elements) begins; partitioning proceeds 60% through; the process
+receives SIGKILL. On restart, <code>CrackerIndex</code> reload finds <code>P</code>&#39;s boundary array unchanged
+(cracks are not WAL-logged, <a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/trade-offs/#adr-13">ADR-13</a>) — <code>P</code> is treated as still fully unrefined at its pre-crack
+boundaries (<a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/trade-offs/#adr-14">ADR-14</a>, lazy recovery). The next query touching <code>P</code> re-executes the crack from
+scratch. Correctness (<a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/adaptive-indexing-engine/reliability/#inv-11">I11</a>) is preserved at the cost of repaying the partition once.</p>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

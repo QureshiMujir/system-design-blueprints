@@ -1,0 +1,1017 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>AI Agent Memory Architecture — Architecture · Engineering Blueprints</title><meta name="description" content="AI Agent Memory Architecture, hld: §3 overview + §8 domain model. Build a production-grade, durable memory subsystem for LLM agents, implemented in Rust (edition 2021, MSRV 1.78). Delivers: crash-safe record store (WAL + mmap), multi-index hybrid retrieval (vector…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/ai-agent-memory-architecture/">AI Agent Memory Architecture</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>AI Agent Memory Architecture</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~21 weeks</li> <li>4,589 lines</li> <li>blueprint #327</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/ai-agent-memory-architecture/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/ai-agent-memory-architecture/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/ai-agent-memory-architecture/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/ai-agent-memory-architecture/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/ai-agent-memory-architecture/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/ai-agent-memory-architecture/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/ai-agent-memory-architecture/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/ai-agent-memory-architecture/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/ai-agent-memory-architecture/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/ai-agent-memory-architecture/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:AI Agent Memory Architecture — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Architecture Diagram</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+  %% legend rt: the memory library&#39;s own main components
+  %% legend ingest: the four mem-index lookups and background work
+  %% legend store: durable record store (WAL + mmap)
+  %% legend side: the calling agent, outside the library
+  AG([&quot;&lt;b&gt;agent&lt;/b&gt;&quot;])
+  ING[&quot;&lt;b&gt;mem-ingest&lt;/b&gt;&lt;br/&gt;extract facts/entities (LlmIface),&lt;br/&gt;dedup, chunk, embed&quot;]
+  ST[(&quot;&lt;b&gt;mem-store&lt;/b&gt;&lt;br/&gt;WAL + record store (mmap,&lt;br/&gt;crash recovery, compaction)&quot;)]
+  VEC[&quot;&lt;b&gt;vec ANN/HNSW&lt;/b&gt;&lt;br/&gt;(mem-index)&quot;]
+  BM[&quot;&lt;b&gt;BM25 inverted&lt;/b&gt;&lt;br/&gt;(mem-index)&quot;]
+  REC[&quot;&lt;b&gt;recency/temporal&lt;/b&gt;&lt;br/&gt;(mem-index)&quot;]
+  IMP[&quot;&lt;b&gt;importance&lt;/b&gt;&lt;br/&gt;(mem-index)&quot;]
+  RET[&quot;&lt;b&gt;mem-retrieve&lt;/b&gt;&lt;br/&gt;hybrid fusion (RRF) + MMR&lt;br/&gt;+ rerank hook&quot;]
+  CTX[&quot;&lt;b&gt;mem-context&lt;/b&gt;&lt;br/&gt;token-budget pack -&gt;&lt;br/&gt;prompt context&quot;]
+  CON[&quot;&lt;b&gt;mem-consolidate&lt;/b&gt;&lt;br/&gt;summarize/reflect/merge/link&quot;]
+  FOR[&quot;&lt;b&gt;mem-forget&lt;/b&gt;&lt;br/&gt;decay/evict/tier/archive&quot;]
+  TEL[&quot;&lt;b&gt;mem-telemetry&lt;/b&gt;&lt;br/&gt;taps all paths&quot;]
+  AG -- &quot;remember(obs)&quot; --&gt; ING
+  ING -- &quot;MemoryRecord&quot; --&gt; ST
+  ST --&gt; VEC
+  ST --&gt; BM
+  ST --&gt; REC
+  ST --&gt; IMP
+  VEC --&gt; RET
+  BM --&gt; RET
+  REC --&gt; RET
+  IMP --&gt; RET
+  AG -- &quot;recall(query)&quot; --&gt; RET
+  RET -- &quot;ranked MemoryRecords&quot; --&gt; CTX
+  CTX -- &quot;prompt context&quot; --&gt; AG
+  subgraph BG[&quot;background&quot;]
+    direction LR
+    CON
+    FOR
+  end
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  classDef side stroke-width:1.5px
+  class ING,RET,CTX rt
+  class VEC,BM,REC,IMP,CON,FOR,TEL ingest
+  class ST store
+  class AG side</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the memory library&#39;s own main components</li><li><span class="swatch ingest"></span>the four mem-index lookups and background work</li><li><span class="swatch store"></span>durable record store (WAL + mmap)</li><li><span class="swatch side"></span>the calling agent, outside the library</li></ul><p class="diagram-note">Drawn from the text diagram in §3.1.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>    agent --remember(obs)--&gt; [mem-ingest] extract facts/entities (LlmIface), dedup, chunk, embed
+                                   |  MemoryRecord
+                            [mem-store]  WAL + record store (mmap, crash recovery, compaction)
+                              |        |          |            |
+                       [vec ANN/HNSW][BM25 inverted][recency/temporal][importance]   (mem-index)
+                              |________|__________|____________|
+                                          |
+    agent --recall(query)--&gt; [mem-retrieve] hybrid fusion (RRF) + MMR + rerank hook
+                                          |  ranked MemoryRecords
+                            [mem-context] token-budget pack -&gt; prompt context --&gt; agent
+    background: [mem-consolidate] summarize/reflect/merge/link     [mem-forget] decay/evict/tier/archive
+                            [mem-telemetry] taps all paths</code></pre></details>
+<h3 id="sec-3-2">3.2 mem-ingest — Write Pipeline Entry Point</h3>
+<ul>
+<li><strong>Responsibilities</strong>: accept raw <code>Observation</code> strings; dispatch to <code>LlmIface::extract_facts()</code> and <code>LlmIface::extract_entities()</code>; chunk oversized content; call <code>mem-embed</code> for embedding vector; dedup via content-hash + semantic similarity threshold; write <code>MemoryRecord</code> to <code>mem-store</code>; notify <code>mem-index</code> of new record; push <code>ConsolidationJob</code> to background queue.</li>
+<li><strong>Concurrency boundary</strong>: single-writer channel (<code>tokio::sync::mpsc</code>); multiple callers enqueue <code>Observation</code>s; single ingest worker drains the channel sequentially to enforce WAL ordering.</li>
+<li><strong>Failure modes</strong>: <code>LlmIface</code> timeout → store record with <code>embedding_ref: None</code>; dedup collision → return existing <code>MemoryId</code> to caller; store write failure → return <code>MemError::StoreFull</code> / <code>MemError::Io</code>.</li>
+<li><strong>Invariant</strong>: every successfully returned <code>remember()</code> call has a durably fsynced WAL entry before <code>Ok(MemoryId)</code> is returned.</li>
+</ul>
+<h3 id="sec-3-3">3.3 mem-store — Durable Engine</h3>
+<ul>
+<li><strong>Responsibilities</strong>: append-only WAL (segment files, CRC32 per entry, configurable fsync policy); record store (fixed-layout pages, mmap for reads); crash recovery (WAL replay on open, discard trailing partial entries); compaction (background generation sweep, atomic segment swap); snapshots (consistent read view for backup/replica).</li>
+<li><strong>Persistence boundary</strong>: only crate that touches the filesystem (except mem-embed&#39;s embedding cache). WAL directory and record-store directory are separate paths; configurable.</li>
+<li><strong>Concurrency boundary</strong>: exclusive write lock via <code>RwLock</code>-protected <code>StoreInner</code>; mmap read path acquires shared lock on active generation; compaction runs on separate thread with generation pointer swap.</li>
+<li><strong>Invariants</strong>: WAL entry order = <code>MemoryId</code> monotonic order; record store is rebuild-from-WAL-capable; compaction never drops a live record; every eviction writes a tombstone to WAL before removal.</li>
+</ul>
+<h3 id="sec-3-4">3.4 mem-index — Multi-Index Layer</h3>
+<ul>
+<li><strong>Responsibilities</strong>: maintain four parallel indices over <code>MemoryRecord</code>s: (1) HNSW vector ANN graph (<code>M</code>, <code>ef_construction</code> configurable); (2) BM25 inverted index with per-namespace term statistics; (3) recency/temporal B-tree index keyed by <code>created_at</code> / <code>last_access</code>; (4) importance/salience sorted-set. Plus secondary metadata indices (namespace filter, kind filter, <code>as_of</code> timestamp filter).</li>
+<li><strong>Protocol boundary</strong>: <code>IndexHandle</code> trait exposes <code>insert()</code>, <code>delete()</code>, <code>search()</code>, <code>snapshot()</code>; HNSW backend pluggable (internal pure-Rust impl or FFI to hnswlib).</li>
+<li><strong>Concurrency boundary</strong>: HNSW write serialized; BM25 uses append-only posting-list with background merge; recency and importance indices use <code>BTreeMap</code> behind <code>RwLock</code>.</li>
+<li><strong>Invariant</strong>: index entries and store records never dangle; compaction calls <code>index.delete()</code> atomically with store record deletion; <code>as_of</code> queries filter by <code>created_at ≤ timestamp</code>.</li>
+</ul>
+<h3 id="sec-3-5">3.5 mem-embed — Embedding Interface + Cache</h3>
+<ul>
+<li><strong>Responsibilities</strong>: implement <code>EmbeddingProvider</code> trait backed by <code>LlmIface::embed()</code>; chunk text to model token limit (configurable chunker strategy: sentence / fixed-token / semantic); maintain in-memory LRU embedding cache keyed by content-hash; batch embedding requests for throughput.</li>
+<li><strong>External interface</strong>: <code>LlmIface</code> trait is the only outbound network dependency; implementation can be HTTP REST, gRPC, or local FFI.</li>
+<li><strong>Failure modes</strong>: provider timeout → <code>MemError::EmbedTimeout</code>; dimension mismatch → <code>MemError::DimMismatch</code>; cache miss + provider down → store record without embedding, flag <code>embedding_ref: None</code>, schedule retry via <code>ConsolidationJob</code>.</li>
+<li><strong>Invariant</strong>: embedding dimension <code>D</code> is fixed per namespace at creation; <code>Embedding</code> structs in index are always dimension-<code>D</code> vectors.</li>
+</ul>
+<h3 id="sec-3-6">3.6 mem-retrieve — Hybrid Retrieval Read Path</h3>
+<ul>
+<li><strong>Responsibilities</strong>: accept <code>Query</code>; dispatch in parallel to: HNSW ANN search, BM25 inverted-index search, recency index scan (top-K by <code>last_access + recency_bias</code>), importance index scan (top-K by <code>salience * importance_bias</code>); fuse ranked lists via RRF (<code>k=60</code> default); apply MMR diversity pass (λ configurable); invoke optional <code>LlmIface::rerank()</code> hook on top-N candidates; return <code>Vec&lt;RetrievalResult&gt;</code>.</li>
+<li><strong>Concurrency boundary</strong>: all four index searches run in parallel (<code>tokio::spawn</code> + <code>join_all</code>); each index provides a snapshot-consistent read handle.</li>
+<li><strong>Determinism invariant</strong>: fixed index state + query → identical ranked set; stable tie-break by score (desc) then <code>MemoryId</code> (asc, ULID order).</li>
+<li><strong>Failure modes</strong>: HNSW search error → fallback to BM25 + recency only; rerank timeout → skip rerank, return RRF-fused result; <code>k &gt; index_size</code> → return all records.</li>
+</ul>
+<h3 id="sec-3-7">3.7 mem-context — Context-Window Assembler</h3>
+<ul>
+<li><strong>Responsibilities</strong>: maintain working-memory ring buffer (<code>MemoryKind::Working</code>, bounded by <code>ContextBudget.max_tokens</code>); accept ranked <code>Vec&lt;RetrievalResult&gt;</code> from mem-retrieve; greedy-pack highest-priority records within token budget (tokenizer via <code>LlmIface::count_tokens()</code>); evict lowest-salience working memories to long-term (mem-ingest write path) when budget exceeded; assemble final prompt context string/blocks.</li>
+<li><strong>Invariant</strong>: assembled context never exceeds <code>ContextBudget.max_tokens</code>; overflow always evicts working memories to long-term before truncating retrieval results; <code>reserved</code> tokens always held back for system prompt.</li>
+<li><strong>Failure modes</strong>: all records exceed budget → return single highest-salience record + truncation marker; <code>LlmIface::count_tokens()</code> unavailable → use character-based approximation (4 chars/token).</li>
+</ul>
+<h3 id="sec-3-8">3.8 mem-consolidate — Background Consolidation Pipeline</h3>
+<ul>
+<li><strong>Responsibilities</strong>: drain <code>ConsolidationJob</code> queue; run summarization (<code>LlmIface::summarize()</code>) on episodic clusters to produce semantic memories; run reflection (<code>LlmIface::reflect()</code>) on recent memory windows to produce higher-order insight records; merge near-duplicate records (cosine similarity &gt; threshold); maintain <code>links: Vec&lt;MemoryId&gt;</code> graph edges; write new consolidated <code>MemoryRecord</code>s back through mem-ingest.</li>
+<li><strong>Concurrency boundary</strong>: single background <code>tokio::task</code>; jobs are idempotent (re-runnable on restart); job state persisted in WAL (ConsolidationJob record type).</li>
+<li><strong>Failure modes</strong>: <code>LlmIface</code> call failure → job retried with exponential backoff (max 5 attempts); merge produces duplicate → dedup detects via content-hash, returns existing ID; reflection over corrupted cluster → skip cluster, emit telemetry warning.</li>
+</ul>
+<h3 id="sec-3-9">3.9 mem-forget — Decay, Eviction, Tiering, Archival</h3>
+<ul>
+<li><strong>Responsibilities</strong>: run periodic decay sweep: <code>salience = salience * exp(-λ * Δt)</code>; evict records below salience threshold <code>ε</code> (configurable per namespace); enforce TTL (<code>ttl: Option&lt;Duration&gt;</code> field); move cold records to cold-tier (compressed storage or external object store); archive terminal records (write to archival WAL segment, remove from live index).</li>
+<li><strong>Invariant</strong>: every eviction writes a tombstone WAL entry with <code>reason</code> (decay, TTL, explicit forget, budget pressure) before index + store removal; no silent loss.</li>
+<li><strong>Tiering</strong>: hot (mmap + in-memory index), warm (mmap + index but lower priority), cold (compressed on-disk, excluded from default retrieval unless <code>include_cold=true</code>).</li>
+<li><strong>Failure modes</strong>: eviction of record with active <code>links</code> → write orphan-link warning to telemetry, proceed (dangling links are inert, not read); cold-tier write failure → retain in warm tier, emit metric.</li>
+</ul>
+<h3 id="sec-3-10">3.10 mem-api — Public Agent-Facing Surface</h3>
+<ul>
+<li><strong>Responsibilities</strong>: expose <code>AgentMemory</code> struct with <code>remember()</code>, <code>recall()</code>, <code>forget()</code>, <code>reflect()</code>, <code>new_session()</code>, <code>set_namespace()</code>; orchestrate calls across mem-ingest, mem-retrieve, mem-context, mem-consolidate, mem-forget; enforce namespace isolation (<code>NsId</code> plumbed through all calls); provide <code>async</code> Rust API.</li>
+<li><strong>Trust boundary</strong>: caller is the agent process; namespace isolation enforced at this layer; no cross-namespace data leakage.</li>
+<li><strong>Protocol boundary</strong>: pure Rust API (no HTTP, no gRPC at this layer); serialization only for persistence, not for IPC.</li>
+</ul>
+<h3 id="sec-3-11">3.11 mem-telemetry — Observability Tap</h3>
+<ul>
+<li><strong>Responsibilities</strong>: expose <code>tracing</code> spans and <code>metrics</code> counters/histograms for every hot path; per-crate instrumentation hooks (write latency, retrieval latency, index sizes, consolidation job throughput, eviction counts, embedding cache hit rate, WAL segment sizes); Prometheus-compatible export endpoint (optional feature flag).</li>
+<li><strong>Cross-cutting</strong>: taps all crates via <code>tracing::instrument</code> macros and <code>metrics::counter!</code> / <code>metrics::histogram!</code> calls; no crate depends on mem-telemetry (telemetry depends on crates, not vice versa).</li>
+</ul>
+<h3 id="sec-3-12">3.12 Data Flow Summary</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Source crate</th>
+<th>Destination crate</th>
+<th>Data</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>remember(obs)</td>
+<td>mem-api</td>
+<td>mem-ingest</td>
+<td><code>Observation</code></td>
+</tr>
+<tr>
+<td>extract/embed</td>
+<td>mem-ingest</td>
+<td>LlmIface</td>
+<td><code>String</code> → <code>Vec&lt;Fact&gt;</code>, <code>Embedding</code></td>
+</tr>
+<tr>
+<td>WAL write + store</td>
+<td>mem-ingest</td>
+<td>mem-store</td>
+<td><code>MemoryRecord</code></td>
+</tr>
+<tr>
+<td>Index insert</td>
+<td>mem-store</td>
+<td>mem-index</td>
+<td><code>(MemoryId, Embedding, content)</code></td>
+</tr>
+<tr>
+<td>recall(query)</td>
+<td>mem-api</td>
+<td>mem-retrieve</td>
+<td><code>Query</code></td>
+</tr>
+<tr>
+<td>Parallel index search</td>
+<td>mem-retrieve</td>
+<td>mem-index ×4</td>
+<td><code>Query</code> → ranked <code>MemoryId</code> lists</td>
+</tr>
+<tr>
+<td>RRF + MMR + rerank</td>
+<td>mem-retrieve</td>
+<td>→ mem-context</td>
+<td><code>Vec&lt;RetrievalResult&gt;</code></td>
+</tr>
+<tr>
+<td>Context pack</td>
+<td>mem-context</td>
+<td>→ agent</td>
+<td>prompt context string</td>
+</tr>
+<tr>
+<td>Consolidation</td>
+<td>mem-consolidate</td>
+<td>LlmIface → mem-ingest</td>
+<td><code>ConsolidationJob</code> → new <code>MemoryRecord</code></td>
+</tr>
+<tr>
+<td>Decay / eviction</td>
+<td>mem-forget</td>
+<td>mem-store + mem-index</td>
+<td>tombstone WAL entries</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — AI Agent Memory Lifecycle &amp; Retrieval</h2>
+<h3 id="sec-8-1">8.1 Entity Catalogue</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Identity</th>
+<th>Mutable Fields</th>
+<th>Immutable Fields</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>MemoryRecord</code></td>
+<td><code>MemoryId(Ulid)</code></td>
+<td><code>salience</code>, <code>last_access</code>, <code>access_count</code>, <code>links</code>, <code>ttl</code></td>
+<td><code>id</code>, <code>kind</code>, <code>content</code>, <code>embedding_ref</code>, <code>created_at</code>, <code>provenance</code>, <code>namespace</code></td>
+</tr>
+<tr>
+<td><code>Embedding</code></td>
+<td><code>EmbeddingId(Ulid)</code></td>
+<td>—</td>
+<td><code>vector: Vec&lt;f32&gt;</code>, <code>dim: u32</code>, <code>model_id: str</code>, <code>created_at</code></td>
+</tr>
+<tr>
+<td><code>NsId</code></td>
+<td><code>u64</code> (hash of namespace string)</td>
+<td><code>policy: NsPolicy</code></td>
+<td><code>name</code>, <code>created_at</code></td>
+</tr>
+<tr>
+<td><code>ConsolidationJob</code></td>
+<td><code>JobId(Ulid)</code></td>
+<td><code>state</code>, <code>retries</code>, <code>result</code></td>
+<td><code>kind</code>, <code>source_ids</code>, <code>scheduled_at</code></td>
+</tr>
+<tr>
+<td><code>DecayEntry</code></td>
+<td>composite <code>(NsId, MemoryId)</code></td>
+<td><code>score</code>, <code>tier</code>, <code>evicted_at</code></td>
+<td><code>created_at</code></td>
+</tr>
+<tr>
+<td><code>SessionCtx</code></td>
+<td><code>SessionId(Ulid)</code></td>
+<td><code>working_memory: Vec&lt;MemoryId&gt;</code>, <code>budget_used</code></td>
+<td><code>ns</code>, <code>opened_at</code></td>
+</tr>
+</tbody></table></div>
+<p>Ownership: <code>MemoryRecord</code> owns <code>provenance</code>; <code>Embedding</code> is referenced by <code>EmbeddingId</code> — embedding store is separate from record store; records never embed vector bytes inline.</p>
+<hr>
+<h3 id="sec-8-2">8.2 MemoryRecord State Machine</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">stateDiagram-v2
+  state &quot;Observed&quot; as OB
+  state &quot;Pending&quot; as PE
+  state &quot;Deduplicated&lt;br/&gt;(existing record&#39;s access_count++)&quot; as DD
+  state &quot;Active&quot; as AC
+  state &quot;Consolidated&lt;br/&gt;(original archived or replaced)&quot; as CO
+  state &quot;Tombstoned&quot; as TB
+  state &quot;Warm&quot; as WA
+  state &quot;Cold&quot; as CL
+  state &quot;Archived/Deleted&quot; as AD
+  OB --&gt; PE : mem-ingest - extract + dedup check
+  PE --&gt; DD : dup detected
+  PE --&gt; AC : embed + store
+  AC --&gt; CO : consolidation tick
+  AC --&gt; TB : explicit forget()
+  CO --&gt; WA : decay score #lt; eviction_threshold
+  TB --&gt; AD : WAL TOMBSTONE written
+  WA --&gt; CL : further decay
+  CL --&gt; AD : TTL/policy</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.2.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>  [ Observed ]
+       |  mem-ingest: extract + dedup check
+       v
+  [ Pending ] ──dup detected──&gt; [ Deduplicated ] (existing record&#39;s access_count++)
+       |  embed + store
+       v
+  [ Active ] ──────────────────────────────────────────────────┐
+       |                                                        |
+  consolidation tick                                    explicit forget()
+       |                                                        |
+       v                                                        v
+  [ Consolidated ] (original archived or replaced)     [ Tombstoned ]
+       |                                                        |
+  decay score &lt; eviction_threshold                      WAL TOMBSTONE written
+       |                                                        |
+       v                                                        v
+  [ Warm ]  ──further decay──&gt; [ Cold ] ──TTL/policy──&gt; [ Archived/Deleted ]</code></pre></details>
+<p>State transitions — invariant: transitions are WAL-logged before index update.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Transition</th>
+<th>Trigger</th>
+<th>WAL Entry</th>
+<th>Index Op</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Observed → Pending</td>
+<td><code>remember()</code> call</td>
+<td><code>OP_BEGIN_INGEST</code></td>
+<td>none</td>
+</tr>
+<tr>
+<td>Pending → Active</td>
+<td>embed + fsync</td>
+<td><code>OP_RECORD_COMMITTED</code></td>
+<td>insert all indices</td>
+</tr>
+<tr>
+<td>Active → Consolidated</td>
+<td>consolidation job</td>
+<td><code>OP_CONSOLIDATED(src_ids, new_id)</code></td>
+<td>replace src with new</td>
+</tr>
+<tr>
+<td>Active → Tombstoned</td>
+<td><code>forget()</code> API</td>
+<td><code>OP_TOMBSTONE(id, reason, ts)</code></td>
+<td>remove all indices</td>
+</tr>
+<tr>
+<td>Active → Warm</td>
+<td>decay score drop</td>
+<td><code>OP_TIER_CHANGE(id, Hot→Warm)</code></td>
+<td>importance index update</td>
+</tr>
+<tr>
+<td>Warm → Cold</td>
+<td>further decay</td>
+<td><code>OP_TIER_CHANGE(id, Warm→Cold)</code></td>
+<td>evict from hot cache</td>
+</tr>
+<tr>
+<td>Cold → Archived</td>
+<td>TTL/policy</td>
+<td><code>OP_ARCHIVE(id, dest_path)</code></td>
+<td>remove live indices</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-8-3">8.3 Write Path Sequence (remember())</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">sequenceDiagram
+  autonumber
+  participant A as Agent
+  participant API as mem-api
+  participant ING as mem-ingest
+  participant LLM as LlmIface
+  participant EMB as mem-embed
+  participant ST as mem-store
+  participant IDX as mem-index
+  A-&gt;&gt;API: remember(obs: Observation, ns: NsId, session: SessionId)
+  API-&gt;&gt;ING: validates ns, session
+  ING-&gt;&gt;LLM: extract_facts(obs.content)
+  LLM--&gt;&gt;ING: Vec#lt;Fact#gt;
+  ING-&gt;&gt;ST: dedup_check(content_hash, ns) vs record store
+  alt hit
+    ST--&gt;&gt;ING: bump access_count, return existing MemoryId (no new record)
+  else miss
+    ST--&gt;&gt;ING: continue
+  end
+  ING-&gt;&gt;ING: chunker::split(content, chunk_cfg) gives Vec#lt;Chunk#gt;
+  ING-&gt;&gt;EMB: embed_chunks(chunks)
+  Note over EMB,LLM: cache hit: skip LlmIface call&lt;br/&gt;cache miss: LlmIface::embed()
+  EMB--&gt;&gt;ING: Vec#lt;(ChunkId, Embedding)#gt;
+  ING-&gt;&gt;ING: build MemoryRecord with kind, content, embedding_ref,&lt;br/&gt;salience=initial_salience()
+  ING-&gt;&gt;ST: append_wal(OP_BEGIN_INGEST)
+  ING-&gt;&gt;ST: write_record(record)
+  ING-&gt;&gt;ST: fsync() per SyncPolicy
+  ING-&gt;&gt;IDX: insert(vec_index, bm25_index, recency_index, importance_index)
+  ING-&gt;&gt;ST: append_wal(OP_RECORD_COMMITTED)
+  ING--&gt;&gt;A: return Ok(MemoryId)
+  Note over ING,IDX: Failure paths&lt;br/&gt;embed failure: OP_INGEST_ABORTED, record not committed, no index mutation&lt;br/&gt;fsync failure: error propagated, partial WAL entry detected on next recovery&lt;br/&gt;index insert failure: OP_INDEX_PARTIAL logged, repair job scheduled</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>Agent
+  │ remember(obs: Observation, ns: NsId, session: SessionId)
+  ▼
+mem-api ──validates ns, session──&gt; mem-ingest
+  │
+  ├─ LlmIface::extract_facts(obs.content) ──&gt; Vec&lt;Fact&gt;
+  ├─ dedup_check(content_hash, ns) vs record store
+  │     hit  ──&gt; bump access_count, return existing MemoryId (no new record)
+  │     miss ──&gt; continue
+  ├─ chunker::split(content, chunk_cfg) ──&gt; Vec&lt;Chunk&gt;
+  ├─ mem-embed::embed_chunks(chunks) ──&gt; Vec&lt;(ChunkId, Embedding)&gt;
+  │     cache hit: skip LlmIface call; cache miss: LlmIface::embed()
+  ├─ build MemoryRecord { kind, content, embedding_ref, salience=initial_salience(), ... }
+  ├─ mem-store::append_wal(OP_BEGIN_INGEST)
+  ├─ mem-store::write_record(record)
+  ├─ mem-store::fsync() [per SyncPolicy]
+  ├─ mem-index::insert(vec_index, bm25_index, recency_index, importance_index)
+  ├─ mem-store::append_wal(OP_RECORD_COMMITTED)
+  └─ return Ok(MemoryId)
+
+Failure paths:
+  embed failure        ──&gt; OP_INGEST_ABORTED, record not committed, no index mutation
+  fsync failure        ──&gt; error propagated, partial WAL entry detected on next recovery
+  index insert failure ──&gt; OP_INDEX_PARTIAL logged; repair job scheduled</code></pre></details>
+<p>Timing contract: WAL fsync before returning Ok (strict durability); or per <code>SyncPolicy::Batched(interval)</code> (relaxed, documented trade-off).</p>
+<hr>
+<h3 id="sec-8-4">8.4 Read Path Sequence (recall())</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+  %% legend rt: the recall() read path in mem-retrieve
+  %% legend ingest: the four parallel index lanes and embedding
+  %% legend trust: validation, filters and the rerank gate
+  %% legend side: the calling agent and the as_of rule
+  AG([&quot;&lt;b&gt;Agent&lt;/b&gt;&quot;])
+  API[&quot;&lt;b&gt;mem-api&lt;/b&gt;&quot;]
+  RT[&quot;&lt;b&gt;mem-retrieve&lt;/b&gt;&quot;]
+  D1{&quot;query.embedding absent?&quot;}
+  EQ[&quot;&lt;b&gt;mem-embed::embed_query&lt;/b&gt;&lt;br/&gt;(query.text) gives Embedding&quot;]
+  FORK([&quot;PARALLEL branch (4 lanes)&quot;])
+  ASOF[&quot;&lt;b&gt;as_of query&lt;/b&gt;&lt;br/&gt;filters records where created_at &amp;gt; as_of&lt;br/&gt;before index lookup&lt;br/&gt;(index is time-stamped)&quot;]
+  V[&quot;&lt;b&gt;vec_index::search&lt;/b&gt;&lt;br/&gt;(embedding, k*4)&lt;br/&gt;Vec of (MemoryId, f32) - cosine sim&quot;]
+  B[&quot;&lt;b&gt;bm25_index::search&lt;/b&gt;&lt;br/&gt;(tokens, k*4)&lt;br/&gt;Vec of (MemoryId, f32) - BM25 score&quot;]
+  R[&quot;&lt;b&gt;recency_index::top_k&lt;/b&gt;&lt;br/&gt;(k*4)&lt;br/&gt;Vec of (MemoryId, f32) - exp decay&quot;]
+  I[&quot;&lt;b&gt;importance_index::top_k&lt;/b&gt;&lt;br/&gt;(k*4)&lt;br/&gt;Vec of (MemoryId, f32) - salience&quot;]
+  RRF[&quot;&lt;b&gt;RRF_fuse&lt;/b&gt;&lt;br/&gt;(lists, recency_bias, importance_bias)&lt;br/&gt;Vec of (MemoryId, f32)&quot;]
+  BF[(&quot;&lt;b&gt;mem-store::batch_fetch&lt;/b&gt;&lt;br/&gt;(ids) gives Vec of MemoryRecord&quot;)]
+  FL[&quot;&lt;b&gt;apply&lt;/b&gt; kind_filter, MetaFilter, as_of&quot;]
+  MMR[&quot;&lt;b&gt;MMR_rerank&lt;/b&gt;&lt;br/&gt;(candidates, query_embedding, lambda=0.5)&lt;br/&gt;top-k diverse set&quot;]
+  D2{&quot;rerank_hook present?&quot;}
+  RR[&quot;&lt;b&gt;LlmIface::rerank&lt;/b&gt;&lt;br/&gt;(query, candidates)&lt;br/&gt;reordered&quot;]
+  UP[&quot;&lt;b&gt;update last_access + access_count&lt;/b&gt;&lt;br/&gt;async write-back, not on critical path&quot;]
+  RET[&quot;&lt;b&gt;return&lt;/b&gt; Vec of RetrievalResult&lt;br/&gt;record, score, components&lt;br/&gt;(vec, bm25, recency, importance)&quot;]
+  AG -- &quot;recall(query: Query, ns: NsId)&quot; --&gt; API
+  API -- &quot;validates budget, ns&quot; --&gt; RT
+  RT --&gt; D1
+  D1 -- &quot;yes&quot; --&gt; EQ
+  EQ --&gt; FORK
+  D1 -- &quot;no&quot; --&gt; FORK
+  ASOF -. &quot;applies&quot; .-&gt; FORK
+  FORK --&gt; V
+  FORK --&gt; B
+  FORK --&gt; R
+  FORK --&gt; I
+  V --&gt; RRF
+  B --&gt; RRF
+  R --&gt; RRF
+  I --&gt; RRF
+  RRF --&gt; BF
+  BF --&gt; FL
+  FL --&gt; MMR
+  MMR --&gt; D2
+  D2 -- &quot;yes&quot; --&gt; RR
+  RR --&gt; UP
+  D2 -- &quot;no&quot; --&gt; UP
+  UP --&gt; RET
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef trust stroke-width:1.5px
+  classDef side stroke-width:1.5px
+  class API,RT,RRF,MMR,RET rt
+  class EQ,V,B,R,I,BF,UP,RR ingest
+  class D1,D2,FL trust
+  class AG,ASOF side</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the recall() read path in mem-retrieve</li><li><span class="swatch ingest"></span>the four parallel index lanes and embedding</li><li><span class="swatch trust"></span>validation, filters and the rerank gate</li><li><span class="swatch side"></span>the calling agent and the as_of rule</li></ul><p class="diagram-note">Drawn from the text diagram in §8.4.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>Agent
+  │ recall(query: Query, ns: NsId)
+  ▼
+mem-api ──validates budget, ns──&gt; mem-retrieve
+  │
+  ├─ [query.embedding absent] ──&gt; mem-embed::embed_query(query.text) ──&gt; Embedding
+  │
+  ├─ PARALLEL branch (4 lanes):
+  │   ├─ vec_index::search(embedding, k*4)   ──&gt; Vec&lt;(MemoryId, f32)&gt;  [cosine sim]
+  │   ├─ bm25_index::search(tokens, k*4)     ──&gt; Vec&lt;(MemoryId, f32)&gt;  [BM25 score]
+  │   ├─ recency_index::top_k(k*4)           ──&gt; Vec&lt;(MemoryId, f32)&gt;  [exp decay]
+  │   └─ importance_index::top_k(k*4)        ──&gt; Vec&lt;(MemoryId, f32)&gt;  [salience]
+  │
+  ├─ RRF_fuse(lists, recency_bias, importance_bias) ──&gt; Vec&lt;(MemoryId, f32)&gt;
+  ├─ mem-store::batch_fetch(ids)             ──&gt; Vec&lt;MemoryRecord&gt;
+  ├─ apply kind_filter, MetaFilter, as_of
+  ├─ MMR_rerank(candidates, query_embedding, lambda=0.5) ──&gt; top-k diverse set
+  ├─ [rerank_hook present] ──&gt; LlmIface::rerank(query, candidates) ──&gt; reordered
+  ├─ update last_access + access_count (async write-back, not on critical path)
+  └─ return Vec&lt;RetrievalResult { record, score, components { vec, bm25, recency, importance } }&gt;
+
+as_of query: filters records where created_at &gt; as_of before index lookup (index is time-stamped).</code></pre></details>
+<hr>
+<h3 id="sec-8-5">8.5 RRF Fusion Formula</h3>
+<pre class="diagram"><code>RRF_score(d) = Σ_i  w_i / (k_rrf + rank_i(d))
+
+where:
+  i ∈ { vec, bm25, recency, importance }
+  w_vec         = 1.0 - recency_bias - importance_bias          (≥ 0)
+  w_bm25        = 1.0 - recency_bias - importance_bias          (shared with vec, normalized)
+  w_recency     = recency_bias  (Query.recency_bias ∈ [0,1])
+  w_importance  = importance_bias
+  k_rrf         = 60 (default, configurable)
+
+Tie-break: equal RRF score → lower MemoryId (Ulid, lexicographic = chronological).
+Invariant: deterministic given fixed index state + query.</code></pre>
+<hr>
+<h3 id="sec-8-6">8.6 MMR Diversity Reranking</h3>
+<pre class="diagram"><code>MMR(query q, candidate set S, selected set R, lambda λ):
+  score(d) = λ · sim(d, q) - (1-λ) · max_{r∈R} sim(d, r)
+  greedily select d* = argmax score(d) from S \ R; add to R; repeat k times.
+
+λ = 0 → max diversity; λ = 1 → pure relevance.
+Default λ = 0.5 (configurable per Query).
+sim = cosine similarity on Embedding vectors.
+Complexity: O(k · |S| · D) where D = embedding dim; acceptable for k ≤ 50, |S| ≤ 200.</code></pre>
+<hr>
+<h3 id="sec-8-7">8.7 Working Memory &amp; Context Assembly</h3>
+<pre class="diagram"><code>SessionCtx.working_memory = circular buffer, capacity = cfg.working_mem_cap (default 32 MemoryIds)
+ContextBudget { max_tokens: usize, reserved: usize }  → available = max_tokens - reserved
+
+Assembly algorithm (mem-context):
+  1. Rank working memories by (salience DESC, last_access DESC).
+  2. Greedily pack records until token count would exceed (max_tokens - reserved).
+  3. Overflow: evict lowest-priority working memories to long-term (episodic) store.
+     - Eviction = append OP_EVICT_TO_LONGTERM(id) to WAL; remove from working_memory buffer.
+  4. Append retrieved long-term memories (from recall()) similarly.
+  5. Return ContextPacket { items: Vec&lt;MemoryRecord&gt;, tokens_used }.
+
+Invariant: tokens_used ≤ max_tokens always; overflow raises ContextOverflowError not silent truncation.
+Edge case: single record &gt; available tokens → error MemError::RecordExceedsBudget(id).</code></pre>
+<hr>
+<h3 id="sec-8-8">8.8 Consolidation Pipeline</h3>
+<pre class="diagram"><code>ConsolidationJob kinds:
+  Summarize   — group episodic memories by time window / topic → one SemanticMemory
+  Reflect     — LlmIface::reflect(memories) → higher-order insight → new SemanticMemory
+  Merge       — near-duplicate records (cosine sim &gt; merge_threshold) → single record
+  LinkGraph   — extract entity co-occurrence → update MemoryRecord.links
+
+Scheduling: background tokio task, interval-driven; also triggered when
+  episodic_count(ns) &gt; cfg.consolidation_trigger_count.
+
+Execution sequence:
+  1. ConsolidationScheduler picks job from queue (priority: Merge &gt; Summarize &gt; Reflect).
+  2. Lock source records (optimistic: read-only; no write lock on record store).
+  3. LlmIface call (summarize / reflect / embed result).
+  4. Write new MemoryRecord (kind=Semantic or Procedural).
+  5. WAL: OP_CONSOLIDATED(source_ids: Vec&lt;MemoryId&gt;, new_id: MemoryId).
+  6. Update indices: insert new, remove/mark source records (tombstone or downgrade salience).
+  7. Update MemoryRecord.links on related records.
+  8. Release.
+
+Failure modes:
+  LlmIface timeout   → job retried with exponential backoff (max 3 retries); sources untouched.
+  Partial write      → WAL replay detects OP_BEGIN_CONSOLIDATE without matching OP_CONSOLIDATED → re-run.
+  Duplicate reflect  → content_hash dedup prevents identical insight from being stored twice.</code></pre>
+<p>ConsolidationJob state machine:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>→ Next</th>
+<th>Condition</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Queued</td>
+<td>Running</td>
+<td>scheduler picks up</td>
+</tr>
+<tr>
+<td>Running</td>
+<td>Done</td>
+<td>LlmIface + WAL commit succeed</td>
+</tr>
+<tr>
+<td>Running</td>
+<td>Failed</td>
+<td>LlmIface error or WAL error</td>
+</tr>
+<tr>
+<td>Failed</td>
+<td>Queued</td>
+<td>retry_count &lt; max_retries</td>
+</tr>
+<tr>
+<td>Failed</td>
+<td>Abandoned</td>
+<td>retry_count ≥ max_retries; alert emitted</td>
+</tr>
+<tr>
+<td>Done</td>
+<td>—</td>
+<td>terminal</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-8-9">8.9 Decay &amp; Forgetting Model</h3>
+<pre class="diagram"><code>decay_score(record, t_now) =
+    w_r · recency(record, t_now)
+  + w_s · record.salience.0
+  + w_a · access_frequency(record)
+
+recency(r, t) = exp(- λ_r · (t - r.last_access).as_secs_f64() / 86400.0)
+  λ_r default = 0.1 (half-life ≈ 7 days for λ=0.1)
+access_frequency(r) = min(1.0, r.access_count as f32 / cfg.access_saturation)
+
+w_r + w_s + w_a = 1.0 (configurable; defaults 0.4 / 0.4 / 0.2)
+
+Tiering thresholds (configurable per NsId):
+  score &gt; hot_threshold   → Hot (in-memory index + mmap)
+  warm_threshold &lt; score ≤ hot_threshold → Warm (mmap only)
+  cold_threshold &lt; score ≤ warm_threshold → Cold (file, not mmap-pinned)
+  score ≤ cold_threshold  → eviction candidate
+
+Eviction policy (mem-forget):
+  1. Collect Cold records where score ≤ cold_threshold OR ttl expired.
+  2. Sort by score ASC (lowest first).
+  3. Evict until free_target_bytes freed or eviction_list exhausted.
+  4. WAL: OP_EVICT(id, reason: {decay|ttl|capacity}, score, ts).
+  5. Remove from all live indices.
+  6. Write to archive store (optional, per NsPolicy.archive_on_evict).
+
+Invariant: every eviction logged with reason; no silent loss.
+TTL: if record.ttl = Some(d) and (t_now - created_at) &gt; d → forced eviction regardless of score.</code></pre>
+<hr>
+<h3 id="sec-8-10">8.10 WAL Record Layout</h3>
+<pre class="diagram"><code>WAL segment file: fixed-path  data/wal/{ns_hex}/{seg_id:08}.wal
+Header per segment:
+  magic:      [u8; 4]  = b&quot;MWAL&quot;
+  version:    u16
+  segment_id: u64
+  created_at: i64 (Unix ns)
+
+Per-entry framing (little-endian):
+  entry_len:  u32       (total bytes of payload + crc)
+  op_type:    u8        (enum discriminant; see table below)
+  payload:    [u8]      (bincode-encoded op-specific struct)
+  crc32c:     u32       (covers op_type + payload)
+
+Op codes:
+  0x01  OP_BEGIN_INGEST       { ingest_id: Ulid, ns: NsId, session: SessionId }
+  0x02  OP_RECORD_COMMITTED   { id: MemoryId, embedding_ref: EmbeddingId, kind: MemoryKind }
+  0x03  OP_INGEST_ABORTED     { ingest_id: Ulid, reason: String }
+  0x10  OP_TOMBSTONE          { id: MemoryId, reason: ForgetReason, ts: Timestamp }
+  0x11  OP_TIER_CHANGE        { id: MemoryId, from: Tier, to: Tier, ts: Timestamp }
+  0x12  OP_EVICT              { id: MemoryId, reason: EvictReason, score: f32, ts: Timestamp }
+  0x13  OP_ARCHIVE            { id: MemoryId, dest: PathBuf }
+  0x20  OP_BEGIN_CONSOLIDATE  { job_id: JobId, source_ids: Vec&lt;MemoryId&gt; }
+  0x21  OP_CONSOLIDATED       { job_id: JobId, new_id: MemoryId }
+  0x22  OP_CONSOLIDATE_FAIL   { job_id: JobId, reason: String }
+  0x30  OP_EVICT_TO_LONGTERM  { id: MemoryId, session: SessionId }
+  0x40  OP_SNAPSHOT           { snapshot_id: Ulid, lsn: u64, ts: Timestamp }
+  0x41  OP_COMPACTION_DONE    { new_segment: u64, obsolete_segments: Vec&lt;u64&gt; }
+  0xFF  OP_CHECKPOINT         { lsn: u64 }
+
+Recovery protocol:
+  1. Find last OP_CHECKPOINT; start replay from that LSN.
+  2. For each entry: verify CRC32c; skip corrupt entry (log warning + metrics bump).
+  3. Apply in order; ignore entries for already-committed records (idempotent).
+  4. Any OP_BEGIN_* without matching OP_*_COMMITTED/FAIL → abort that operation.
+  5. Rebuild indices from replayed committed records.</code></pre>
+<hr>
+<h3 id="sec-8-11">8.11 Record Store Layout (mmap)</h3>
+<pre class="diagram"><code>data/store/{ns_hex}/records.dat   — append-only fixed-slot or variable-length records
+data/store/{ns_hex}/embeddings.dat — embedding vectors, aligned to 64 bytes (SIMD)
+data/store/{ns_hex}/index/hnsw.bin — HNSW graph serialized
+data/store/{ns_hex}/index/bm25.bin — inverted index
+data/store/{ns_hex}/index/recency.idx — sorted ring of (created_at, MemoryId)
+data/store/{ns_hex}/index/importance.idx — sorted heap of (salience, MemoryId)
+data/snapshots/{snap_id}.snap — snapshot (records.dat + index files, linked to WAL LSN)
+
+Record slot in records.dat:
+  slot_header: { id: [u8;16], flags: u8, payload_len: u32 }
+  payload:     bincode(MemoryRecord) — variable length
+  padding:     align to 8 bytes
+
+Flags:
+  0x01 = ACTIVE
+  0x02 = TOMBSTONED
+  0x04 = CONSOLIDATED_SOURCE (kept for provenance, excluded from retrieval)
+  0x08 = ARCHIVED
+
+mmap strategy: records.dat + embeddings.dat mapped read-only for retrieval; writes go via pwrite().
+Compaction: new file written with only ACTIVE records; atomic rename; WAL OP_COMPACTION_DONE.</code></pre>
+<hr>
+<h3 id="sec-8-12">8.12 HNSW Index Semantics</h3>
+<pre class="diagram"><code>Parameters (configurable):
+  M       = 16   (max neighbours per node per layer)
+  ef_c    = 200  (construction ef)
+  ef_s    = 50   (search ef; tunable at query time)
+  dim     = embedding dimension (must match model; validated at insert)
+
+Distance: cosine (pre-normalize vectors to unit length → inner product = cosine).
+Insert: add_node(embedding_ref: EmbeddingId, vec: &amp;[f32]) → O(log N) amortized.
+Search: search_knn(query_vec: &amp;[f32], k: usize, ef: usize) → Vec&lt;(EmbeddingId, f32)&gt;.
+Delete: lazy-tombstone in HNSW (set node flag DELETED); periodic background rebuild removes dead nodes.
+  Invariant: deleted nodes never returned in search results (filter applied post-search).
+Persistence: serialize to hnsw.bin on checkpoint; load on startup; rebuild from embeddings.dat if corrupt.
+Concurrent reads: allowed (shared reader lock); writes serialized (exclusive writer lock on HNSW struct).
+
+Edge case: dim mismatch on insert → MemError::DimMismatch { expected, got }.
+Edge case: N = 0 (empty index) → search returns empty Vec (not error).</code></pre>
+<hr>
+<h3 id="sec-8-13">8.13 BM25 Inverted Index Semantics</h3>
+<pre class="diagram"><code>Tokenizer: Unicode word boundary split + lowercase + stop-word filter (configurable list).
+Stemming: optional (Porter stemmer); disabled by default (reproducibility).
+Index entry: term → posting_list: [(MemoryId, tf: u32, field_len: u16)]
+IDF: ln(1 + (N - df + 0.5) / (df + 0.5))   (Robertson IDF)
+TF-norm: (tf · (k1+1)) / (tf + k1 · (1 - b + b · dl/avgdl))   k1=1.2, b=0.75
+Score(q, d) = Σ_{t∈q} IDF(t) · TF_norm(t, d)
+
+Updates: insert on commit; delete marks posting entries as tombstoned; compaction removes them.
+Persistence: serialized to bm25.bin.
+Edge case: query terms not in any document → score 0 for all; RRF rank = ∞ (treated as absent from list).
+Pitfall: very short documents inflate TF-norm; field_len tracked per record.</code></pre>
+<hr>
+<h3 id="sec-8-14">8.14 Namespace Isolation</h3>
+<pre class="diagram"><code>NsId = hash64(namespace_string)
+Each namespace owns:
+  - Separate WAL directory: data/wal/{ns_hex}/
+  - Separate record store: data/store/{ns_hex}/
+  - Separate index files
+  - NsPolicy { sync_policy, archive_on_evict, consolidation_enabled, decay_params, max_records }
+
+Cross-namespace: records are never retrievable across namespaces by default.
+  Exception: explicit cross-ns link if NsPolicy.allow_cross_ns_links = true.
+Isolation invariant: a Query with ns=A never returns records from ns=B.
+  Enforcement: all index lookups are ns-scoped; record fetch validates ns field.
+
+Pitfall: ns hash collision (u64) → two namespaces map to same store path.
+  Mitigation: log warning + refuse second ns creation if path already claimed by different name.</code></pre>
+<hr>
+<h3 id="sec-8-15">8.15 Provenance &amp; Link Graph</h3>
+<pre class="diagram"><code>Provenance { source: SourceId, session: SessionId, derived_from: Vec&lt;MemoryId&gt; }
+  source: enum { Agent(AgentId), User, System, Consolidation(JobId) }
+  derived_from: populated by consolidation (new record points to source records).
+
+MemoryRecord.links: Vec&lt;MemoryId&gt; — bidirectional association maintained by mem-consolidate.
+Link graph traversal: BFS from seed MemoryId, depth-limited (default depth=2).
+  Used by: context assembly (pull related memories), reflect job (find clusters).
+
+Invariant: derived_from entries reference valid MemoryIds (not tombstoned at consolidation time;
+  subsequent tombstone of a source is allowed — link becomes &quot;stale ref&quot;, tracked in link_graph audit).
+Pitfall: circular links (A → B → A) possible via consolidation chains; traversal must track visited set.</code></pre>
+<hr>
+<h3 id="sec-8-16">8.16 Worked Example — Full Lifecycle</h3>
+<pre class="diagram"><code>t=0: agent calls remember(&quot;User prefers dark mode&quot;, ns=&quot;user:alice&quot;, session=S1)
+  → ingest: extract fact &quot;preference: dark_mode=true&quot;
+  → dedup: content_hash not seen → proceed
+  → embed: EmbeddingId=E1, dim=1536
+  → MemoryRecord { id=M1, kind=Semantic, content=&quot;...&quot;, embedding_ref=E1, salience=0.7, ... }
+  → WAL: OP_BEGIN_INGEST | OP_RECORD_COMMITTED(M1, E1)
+  → indices: HNSW insert(E1, vec), BM25 index tokens, recency ring, importance heap
+  → Ok(M1)
+
+t=1: agent calls recall(Query { text=&quot;UI preferences&quot;, k=5 }, ns=&quot;user:alice&quot;)
+  → embed query → E_q
+  → vec search(E_q, 20) → [(M1, 0.92), ...]
+  → bm25 search(&quot;ui preferences&quot;) → [(M1, 3.1), ...]
+  → recency top-20 → [M1, ...]
+  → importance top-20 → [M1, ...]
+  → RRF fuse → M1 score=0.89
+  → MMR rerank (k=5, λ=0.5) → [M1, ...]
+  → return [RetrievalResult { record=M1, score=0.89, components={vec:0.92,bm25:0.78,recency:0.95,importance:0.7} }]
+
+t=48h: decay tick
+  → decay_score(M1, t_now) = 0.4·exp(-0.1·2) + 0.4·0.7 + 0.2·0.1 ≈ 0.4·0.82 + 0.28 + 0.02 = 0.63
+  → above warm_threshold(0.4) → remains Active/Hot
+
+t=30d: decay_score(M1) drops below warm_threshold → Warm tier; WAL OP_TIER_CHANGE
+
+t=90d: TTL expires (if ttl=90d) → WAL OP_EVICT(M1, reason=ttl) → removed from indices</code></pre>
+<hr>
+<h3 id="sec-8-17">8.17 Edge Cases &amp; Malformed Input Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Behaviour</th>
+<th>Invariant enforced</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>remember()</code> with empty content</td>
+<td><code>MemError::EmptyContent</code></td>
+<td>no WAL entry written</td>
+</tr>
+<tr>
+<td><code>remember()</code> embedding dim mismatch</td>
+<td><code>MemError::DimMismatch</code></td>
+<td>record not committed</td>
+</tr>
+<tr>
+<td><code>recall()</code> k=0</td>
+<td>returns empty Vec (not error)</td>
+<td>determinism</td>
+</tr>
+<tr>
+<td><code>recall()</code> with <code>as_of</code> in future</td>
+<td>returns full set (no filtering)</td>
+<td>monotonic ids</td>
+</tr>
+<tr>
+<td>Duplicate content same ns</td>
+<td>returns existing MemoryId; access_count++</td>
+<td>dedup invariant</td>
+</tr>
+<tr>
+<td>WAL CRC mismatch on recovery</td>
+<td>skip entry, log warning, metrics <code>wal_corrupt_entries</code></td>
+<td>no silent data loss (entry skipped not silently accepted)</td>
+</tr>
+<tr>
+<td>HNSW rebuild needed (corrupt hnsw.bin)</td>
+<td>rebuild from embeddings.dat; slow but safe</td>
+<td>index-store consistency</td>
+</tr>
+<tr>
+<td>ConsolidationJob LlmIface timeout</td>
+<td>retry ≤3; sources unchanged; job Abandoned after max</td>
+<td>no partial consolidation</td>
+</tr>
+<tr>
+<td>Cross-ns recall attempt</td>
+<td><code>MemError::NamespaceMismatch</code></td>
+<td>isolation invariant</td>
+</tr>
+<tr>
+<td>ContextBudget overflow (single record &gt; budget)</td>
+<td><code>MemError::RecordExceedsBudget(id)</code></td>
+<td>budget invariant</td>
+</tr>
+<tr>
+<td>Circular link traversal</td>
+<td>visited-set BFS terminates</td>
+<td>no infinite loop</td>
+</tr>
+<tr>
+<td>HNSW insert with N at capacity</td>
+<td>resize / new segment; O(1) amortized</td>
+<td>no data loss</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-8-18">8.18 Failure-Path Sequence: Crash During remember()</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+  %% legend bad: the crash scenario
+  %% legend ingest: recovery steps in order
+  %% legend rt: the end state after recovery
+  %% legend trust: the invariant that makes recovery safe
+  SC[&quot;&lt;b&gt;Scenario&lt;/b&gt;&lt;br/&gt;process crashes after WAL fsync of&lt;br/&gt;OP_BEGIN_INGEST but before&lt;br/&gt;OP_RECORD_COMMITTED&quot;]
+  S1[&quot;&lt;b&gt;1.&lt;/b&gt; WAL replay finds OP_BEGIN_INGEST&lt;br/&gt;(ingest_id=I1) with no matching&lt;br/&gt;OP_RECORD_COMMITTED&quot;]
+  S2[&quot;&lt;b&gt;2.&lt;/b&gt; Classify as INCOMPLETE_INGEST&quot;]
+  S3[&quot;&lt;b&gt;3.&lt;/b&gt; Check record store: if record with&lt;br/&gt;embedding_ref exists (partial write)&lt;br/&gt;tombstone it&quot;]
+  S4[&quot;&lt;b&gt;4.&lt;/b&gt; Check embedding store: if E1 exists&lt;br/&gt;orphaned, mark for GC&quot;]
+  S5[&quot;&lt;b&gt;5.&lt;/b&gt; Log warning: #quot;Incomplete ingest I1&lt;br/&gt;during recovery, aborted.#quot;&quot;]
+  S6[&quot;&lt;b&gt;6.&lt;/b&gt; Increment metric:&lt;br/&gt;recovery_aborted_ingests_total&quot;]
+  S7[&quot;&lt;b&gt;7.&lt;/b&gt; System resumes clean&lt;br/&gt;no half-committed record visible&lt;br/&gt;to retrieval&quot;]
+  KEY[&quot;&lt;b&gt;Key&lt;/b&gt;&lt;br/&gt;no index was mutated before&lt;br/&gt;OP_RECORD_COMMITTED&lt;br/&gt;indices remain consistent&quot;]
+  SC -- &quot;Recovery&quot; --&gt; S1
+  S1 --&gt; S2
+  S2 --&gt; S3
+  S3 --&gt; S4
+  S4 --&gt; S5
+  S5 --&gt; S6
+  S6 --&gt; S7
+  KEY -.-&gt; S7
+  classDef bad stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef rt stroke-width:1.5px
+  classDef trust stroke-width:1.5px
+  class SC bad
+  class S1,S2,S3,S4,S5,S6 ingest
+  class S7 rt
+  class KEY trust</pre><figcaption><ul class="diagram-legend"><li><span class="swatch bad"></span>the crash scenario</li><li><span class="swatch ingest"></span>recovery steps in order</li><li><span class="swatch rt"></span>the end state after recovery</li><li><span class="swatch trust"></span>the invariant that makes recovery safe</li></ul><p class="diagram-note">Drawn from the text diagram in §8.18.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>Scenario: process crashes after WAL fsync of OP_BEGIN_INGEST but before OP_RECORD_COMMITTED.
+
+Recovery:
+  1. WAL replay finds OP_BEGIN_INGEST(ingest_id=I1) with no matching OP_RECORD_COMMITTED.
+  2. Classify as INCOMPLETE_INGEST.
+  3. Check record store: if record with embedding_ref exists (partial write) → tombstone it.
+  4. Check embedding store: if E1 exists orphaned → mark for GC.
+  5. Log warning: &quot;Incomplete ingest I1 during recovery; aborted.&quot;
+  6. Increment metric: recovery_aborted_ingests_total.
+  7. System resumes clean; no half-committed record visible to retrieval.
+
+Key: no index was mutated before OP_RECORD_COMMITTED → indices remain consistent.</code></pre></details>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

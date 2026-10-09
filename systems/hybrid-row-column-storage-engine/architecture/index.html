@@ -1,0 +1,362 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Hybrid Row/Column Storage Engine — Architecture · Engineering Blueprints</title><meta name="description" content="Hybrid Row/Column Storage Engine, hld: §3 overview + §8 domain model. Build a from-scratch, single-node, embeddable HTAP storage engine in Rust that keeps every table in BOTH a write-optimized row store and a read-optimized column store, unified by a delta/main…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/">Hybrid Row/Column Storage Engine</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Hybrid Row/Column Storage Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~38 weeks</li> <li>3,056 lines</li> <li>blueprint #317</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Hybrid Row/Column Storage Engine — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 System Diagram</h3>
+<pre class="diagram"><code>    Application API / hydb CLI:  insert / update / delete / get / scan / aggregate
+            |                                                  |
+       writes (OLTP)                                      reads (OLTP point + OLAP scan)
+            v                                                  v
+    hy-txn: TxnManager (MVCC, Snapshot, visibility)     hy-store: AccessPath router
+            |                                              /                 \
+            v                                  point/get  v                   v  scan/aggregate
+    hy-wal: Wal (append + group commit)      hy-row RowStore + hy-index BTree   unified read path
+            |  redo/undo (Recovery)               (DELTA: recent writes)        merge DELTA + MAIN
+            v                                          |                              |  under Snapshot
+    hy-page: BufferPool + FileManager &lt;----------------+                              v
+            ^                                                            hy-col MainStore:
+            |  pages                                                     RowGroups -&gt; ColumnSegments
+    hy-store: TupleMover  --delta-&gt;main merge / row-&gt;column convert / GC--&gt;  (Encoding + ZoneMap)
+            ^                                                                     |
+            |  schema + format + stats                                vectorized ColumnReader -&gt; ColumnBatch
+    hy-catalog: Schema / TableFormat / Stats  ----------------------&gt; hy-store: scan() -&gt; BatchIter</code></pre>
+<h3 id="sec-3-2">3.2 Cross-Cutting Boundaries</h3>
+<ul>
+<li><strong>Trust boundary</strong> — on-disk bytes (pages, WAL records, column segments) and inbound rows/keys are UNTRUSTED. Every decoder (SlottedPage slot directory, WalRecord parser, EncodedColumn decoders, BTreeNode layout) bounds-checks lengths/offsets/codes before deref; corrupt input -&gt; <code>ErrorKind::Corrupt</code>, never UB. CRC/torn-page checks gate page acceptance. Rust chosen precisely to keep this hot path memory-safe.</li>
+<li><strong>Concurrency boundary</strong> — foreground readers (snapshot-stable) vs foreground writers (append to DELTA + WAL) vs the background TupleMover (delta-&gt;main merge). MVCC means readers never block writers; the TupleMover publishes a NEW immutable MainStore epoch via an atomic pointer swap, so in-flight scans keep their old <code>RowGroup</code> set until they finish. No reader sees a half-merged main. Lock scope: short latches on <code>BufferPool</code> frames + <code>Wal</code> tail; long-lived state is snapshot-versioned, not locked.</li>
+<li><strong>Persistence boundary</strong> — the <strong>WAL is the single durability source of truth</strong> (log-before-data). <code>BufferPool</code> pages and <code>hy-col</code> column segments are <em>checkpointed</em> derived state: recoverable by replaying WAL onto the last checkpoint. A committed txn = its <code>Commit</code> record <code>flush</code>ed to WAL; everything else (dirty pages, column flushes) is best-effort-eager, recovery-mandatory.</li>
+</ul>
+<p>Each later phase references these boundaries: Phase 3 (WAL) owns persistence; Phase 4 (MVCC) owns concurrency; Phase 13 (fuzzing/differential) attacks the trust boundary.</p>
+<h3 id="sec-3-3">3.3 Component Responsibilities (one per box)</h3>
+<h4 id="sec-3-hy-page-bufferpool-filemanager-pageguard">hy-page — BufferPool / FileManager / PageGuard</h4>
+<p>The byte-and-frame substrate, the only code touching the filesystem. <code>FileManager</code> maps <code>SegmentId</code>→files + aligned 4 KiB I/O; <code>BufferPool</code> is a fixed frame table with clock eviction + per-frame pin/dirty; <code>fetch(PageId)→PageGuard</code> pins, unpins on Drop. Every persistent crate mutates state exclusively through <code>PageGuard</code>s, so durability/eviction policy lives here. <strong>Invariant</strong>: a dirty page is never evicted before its <code>pageLSN</code> is durable in the WAL (flush-on-evict hook); pinned frames never evicted. Phase 0 (shell) + Phase 1 (real).</p>
+<h4 id="sec-3-hy-row-rowstore-slottedpage-tuple">hy-row — RowStore / SlottedPage / Tuple</h4>
+<p>The write-optimized row heap and physical home of DELTA. <code>SlottedPage</code> = slot directory from front + payloads heap-from-end; <code>RowStore</code> is a heap addressed by <code>RowId{page,slot}</code> doing <code>insert</code>/<code>get</code>/update-delete-<em>as-new-versions</em> (MVCC, never in-place); <code>TupleHeader</code> carries in-tuple <code>txn_min/txn_max/next_version/null_bitmap</code>, decode driven by the <code>Schema</code>. <strong>Invariant</strong>: a <code>RowId</code> is stable for a version-chain entry&#39;s life (compaction relocates payload, never invalidates a live RowId). hy-txn interprets the header; hy-store uses it as DELTA backing.</p>
+<h4 id="sec-3-hy-index-btree">hy-index — BTree</h4>
+<p>Primary B+Tree (primary-key bytes → <code>RowId</code>): O(log n) point lookup + ordered range, node split/merge over <code>PageGuard</code>s with WAL-logged structural changes. <code>lookup(key,&amp;Snapshot)</code> returns the chain-head <code>RowId</code>; <strong>visibility is resolved separately</strong> by hy-txn walking <code>next_version</code>. <strong>Invariant</strong>: leaf key order == primary-key order; the index holds the chain entry point, never the visible version. Phase 11&#39;s router uses it for the point path.</p>
+<h4 id="sec-3-hy-wal-wal-recovery">hy-wal — Wal / Recovery</h4>
+<p>Durability + crash recovery. <code>Wal</code> = append-only log + group commit + <code>flush(lsn)</code>; <code>WalRecord</code> enumerates every transition (<code>Begin/Insert/Update/Delete/Commit/Abort/Clr/ColumnFlush/Checkpoint</code>). <code>Recovery</code> is ARIES three-pass: analysis (rebuild ATT+DPT from last <code>Checkpoint</code>), redo (repeat history from <code>recLSN</code>, pageLSN-gated), undo (roll back losers with <code>Clr</code>). <strong>Invariant</strong>: log-before-data + monotonic <code>Lsn</code> — no committed effect lost, no uncommitted survives. <code>ColumnFlush</code> lets recovery rebuild the column store (Phase 12).</p>
+<h4 id="sec-3-hy-txn-txnmanager-snapshot-visibility-vacuum">hy-txn — TxnManager / Snapshot / visibility / Vacuum</h4>
+<p>MVCC under snapshot isolation. <code>TxnManager</code> is the id + commit-ts oracle + active-set; <code>begin</code> captures <code>Snapshot{xmin,xmax,active,ts}</code>, <code>commit</code> assigns a <code>Timestamp</code> + writes <code>Commit</code>, <code>abort</code> triggers undo. <code>visible(&amp;TupleHeader,&amp;Snapshot)</code> is the SI predicate; updates/deletes link a NEW version via <code>next_version</code>; <code>Vacuum</code> reclaims versions older than the oldest live snapshot. <strong>Invariant</strong>: a committed txn is atomic+durable; a snapshot&#39;s visible set is immutable for its lifetime. <code>IsolationLevel</code> = SnapshotIsolation | ReadCommitted. Underpins the unified read path (Phase 9) + merge MVCC-safety (Phase 10).</p>
+<h4 id="sec-3-hy-col-rowgroup-columnsegment-encoding-zonemap-vectorized-reader">hy-col — RowGroup / ColumnSegment / Encoding / ZoneMap / vectorized reader</h4>
+<p>The read-optimized immutable columnar MAIN. A <code>RowGroup</code> (65,536 rows) holds one <code>ColumnSegment</code>/column carrying its <code>Encoding</code>, <code>ZoneMap{min,max,null_count}</code>, <code>n_rows</code>, <code>null_count</code>, <code>SegmentId</code>; <code>Compressor</code> picks the smallest valid encoding from <code>ColumnStats</code>; <code>ColumnReader::scan(&amp;SelectionVector,&amp;mut ColumnBatch)</code> decodes only survivors (late materialization). <strong>Invariant</strong>: MAIN is immutable — a published segment is never mutated, deletes go to a delete vector applied at scan. ZoneMap skipping (Phase 7); O(values) SIMD decode (Phase 8); targets dict/RLE 4–20×, bit-pack/FoR 2–8×.</p>
+<h4 id="sec-3-hy-store-hybridtable-deltastore-mainstore-tuplemover-router">hy-store — HybridTable / DeltaStore / MainStore / TupleMover / router</h4>
+<p>The HTAP unifier. <code>HybridTable</code> composes <code>RowStore</code>+<code>BTree</code> (point), <code>DeltaStore</code> (row writes + validity bitmap), <code>MainStore</code> (immutable columnar + delete vector), <code>Wal</code>, <code>TxnManager</code>. The AccessPath router maps an op to <code>RowLookup</code>/<code>IndexLookup</code>/<code>ColumnScan</code>/<code>DeltaScan</code> via rule + <code>TableStats</code>; <code>get</code>/<code>scan</code> both <strong>merge DELTA(row)+MAIN(column) under one Snapshot</strong>; the <code>TupleMover</code> background-merges DELTA into compressed MAIN (build, encode, write, atomic swap, GC) MVCC-safely. <strong>Invariant</strong>: one <code>Snapshot</code> governs both halves of every read → a consistent point-in-time view. Phases 9–12; the engine&#39;s public face.</p>
+<h4 id="sec-3-hy-catalog-schema-tableformat-stats">hy-catalog — Schema / TableFormat / Stats</h4>
+<p>Metadata + policy. <code>Schema</code> (<code>ColumnDef</code>→<code>DataType</code>) drives all encode/decode; <code>TableFormat</code> declares row-vs-column placement + row-group size; <code>TableStats</code>/<code>ColumnStats</code> (cardinality, min/max, null fraction, histograms) feed both the <code>Compressor</code> and the router. <strong>Invariant</strong>: stats are advisory — wrong stats degrade plan/compression, never correctness (q-error tracked, not trusted for safety). Pure descriptive metadata, no FS/concurrency state.</p>
+<h4 id="sec-3-hy-cli-the-hydb-binary">hy-cli — the hydb binary</h4>
+<p>Operator-facing entry point: <code>load insert get scan aggregate analyze compact checkpoint recover bench</code>. Thin — parses args, opens a <code>HybridTable</code>, drives the same API tests use (no engine logic). <strong>Invariant</strong>: every subcommand maps 1:1 to a public API, never a privileged path. Used end-to-end from Phase 0&#39;s smoke test through Phase 13&#39;s HTAP benchmarks + fault-injection recovery.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Storage Layouts, MVCC, and the Delta/Main Lifecycle</h2>
+<p>The on-disk and in-memory shapes below are LOCKED contracts shared across <code>hy-page</code>, <code>hy-row</code>, <code>hy-index</code>, <code>hy-wal</code>, <code>hy-col</code>, and <code>hy-store</code>. All multi-byte integers are little-endian. All page-resident structures are checksummed and <code>lsn</code>-stamped for ARIES redo idempotency. Sizes target a 4 KiB <code>Page</code> default; row group default = 65_536 rows.</p>
+<h3 id="sec-8-1">8.1 Page (<code>hy-page::Page</code>) — 4 KiB unit of buffering and I/O</h3>
+<pre class="diagram"><code>Page = 4096 bytes, 4 KiB aligned
++--------------------------------------------------------------+ off
+| PageHeader (24 B)                                            | 0
+|   lsn        : u64   // pageLSN; last WAL record applied      | 0
+|   kind        : u8   // PageKind (see below)                 | 8
+|   _pad        : u8                                           | 9
+|   free_ptr    : u16  // heap-from-end frontier (SlottedPage) | 10
+|   slot_count  : u16  // # slots                              | 12
+|   _rsv        : u16                                          | 14
+|   checksum    : u32  // crc32c over bytes[20..4096]          | 16
+|   gen         : u32  // monotonic write generation (torn-pg) | 20
++--------------------------------------------------------------+ 24
+| Body (4072 B) — interpretation depends on kind               | 24
++--------------------------------------------------------------+ 4096</code></pre>
+<p><code>PageKind</code> enum (1 B): <code>Meta=0</code>, <code>RowSlotted=1</code>, <code>BTreeLeaf=2</code>, <code>BTreeInternal=3</code>, <code>WalSegMeta=4</code>, <code>ColSegment=5</code>, <code>FreeSpaceMap=6</code>, <code>Overflow=7</code>. <code>Pageable::page_kind()</code> returns the owning kind. <code>checksum</code> excludes bytes <code>[0..20)</code> (so <code>lsn</code>/<code>kind</code>/<code>free_ptr</code> can be patched in place during recovery without recompute) but covers <code>[20..4096)</code> including <code>gen</code>. <code>gen</code> increments on every flush; pairs with sentinel-at-page-tail for torn-page detection (<a class="cite" href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/architecture/#sec-8-10">§8.10</a>).</p>
+<h3 id="sec-8-2">8.2 SlottedPage (<code>hy-row::SlottedPage</code>) — variable-length tuples, heap-from-end</h3>
+<p>Slot directory grows forward from byte 24; tuple payloads grow backward from byte 4096. Free space = <code>free_ptr - (24 + slot_count*4)</code>.</p>
+<pre class="diagram"><code>+-- PageHeader (24 B, kind=RowSlotted) ------------------------+ 0
++-- Slot Directory (slot_count * 4 B), grows -&gt;               | 24
+|   Slot { off: u16, len: u16 }  // off=0 =&gt; dead/moved slot   |
+|   ...                                                        |
+|                  &lt;-- free space --&gt;                          |
+|   Tuple[N-1] payload                                         |
+|   ...                                                        |
+|   Tuple[0] payload                          &lt;-- free_ptr     | ..4096
++--------------------------------------------------------------+ 4096</code></pre>
+<p><code>RowId{ page, slot }</code> addresses a tuple; <code>slot</code> indexes the directory. <code>off=0</code> marks a slot whose tuple migrated (update created a new version elsewhere) or was vacuumed; the slot index is never reused while any version chain references it (stable RowId invariant). Compaction reclaims dead payload space when free space &lt; threshold (default 256 B) by sliding live payloads and rewriting <code>off</code> fields under WAL.</p>
+<h3 id="sec-8-3">8.3 TupleHeader + payload (<code>hy-row::TupleHeader</code>) — in-tuple MVCC metadata</h3>
+<pre class="diagram"><code>TupleHeader (fixed prefix of every Tuple payload)
++----------------+------+---------------------------------------+
+| field          | size | meaning                               |
++----------------+------+---------------------------------------+
+| txn_min        | u64  | creating TxnId (LOCKED: TxnId)        |
+| txn_max        | u64  | deleting/superseding TxnId; 0 = live  |
+| next_version   | u64  | RowId-packed next version; 0 = head   |
+|   (page&lt;&lt;16|slot, 0 sentinel = none)                          |
+| flags          | u8   | bit0 DELETED, bit1 MOVED, bit2 DELTA, |
+|                |      | bit3 TOMBSTONE, bit4 OVERFLOW          |
+| null_bitmap    | SmallBitset (ceil(ncols/8) B, inline &lt;=8 B)  |
++----------------+------+---------------------------------------+
+| payload        | column values, schema order, NOT-NULL only;  |
+|                | var-len (Str/Bytes) -&gt; u32 len prefix        |
++--------------------------------------------------------------+</code></pre>
+<p>Header = 25 B + <code>ceil(ncols/8)</code> B bitmap. Payload encodes only non-null columns; <code>Datum::Null</code> columns occupy zero payload bytes and are signalled by <code>null_bitmap</code>. Decode requires the table <code>Schema</code> (column order + <code>DataType</code>). Versions chain newest→older via <code>next_version</code>; the BTree/Delta head always points at the newest version.</p>
+<h3 id="sec-8-4">8.4 B+Tree node (<code>hy-index::BTreeNode</code>)</h3>
+<pre class="diagram"><code>Leaf (kind=BTreeLeaf)                Internal (kind=BTreeInternal)
++-- PageHeader (24) ---------+       +-- PageHeader (24) ---------+
+| n_keys : u16              |       | n_keys : u16              |
+| right_sib : PageId (u64)  |       | _rsv  : u16               |
+| _rsv : u16                |       | child[0] : PageId         |
+| -- entries grow from end -|       | (key[i], child[i+1]) pairs|
+|   (key_len:u16, key bytes,|       |   key = primary-key bytes |
+|    rid: u64-packed RowId) |       |   child : PageId          |
++---------------------------+       +---------------------------+</code></pre>
+<p>Keys = order-preserving primary-key bytes (ints big-endian-flipped, Str length-prefixed); leaves form a right-sibling chain for <code>range</code>. The index points at the newest <code>RowId</code>; the caller walks <code>next_version</code> for the snapshot-visible version (<a class="cite" href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/architecture/#sec-8-7">§8.7</a>). Split on full, merge/redistribute &lt; 40% occupancy; node writes WAL-logged for crash safety.</p>
+<h3 id="sec-8-5">8.5 WAL record framing (<code>hy-wal::WalRecord</code>)</h3>
+<pre class="diagram"><code>On-disk frame (per record)
++--------+--------+--------------------------+--------+--------+
+| len:u32| lsn:u64| type:u8 | body (len-17 B)| crc:u32| &lt;next&gt; |
++--------+--------+--------------------------+--------+--------+
+type tags: 0 Begin 1 Insert 2 Update 3 Delete 4 Commit 5 Abort
+           6 Clr   7 ColumnFlush 8 Checkpoint</code></pre>
+<p>Bodies (LOCKED): <code>Begin{txn}</code>, <code>Insert{txn,rid,after}</code>, <code>Update{txn,rid,before,after}</code>, <code>Delete{txn,rid,before}</code>, <code>Commit{txn,ts}</code>, <code>Abort{txn}</code>, <code>Clr{txn,undo_next:Lsn}</code>, <code>ColumnFlush{rg,seg}</code>, <code>Checkpoint(CheckpointRec{att:Vec&lt;(TxnId,Lsn)&gt;, dpt:Vec&lt;(PageId,Lsn)&gt;, ts})</code>. <code>before</code>/<code>after</code> are full payload images (physiological) → redo pageLSN-idempotent, undo via <code>before</code>; <code>Clr.undo_next</code> chains compensation (no double-apply). <code>crc</code> covers <code>[len..crc)</code>; a torn tail frame (bad crc / <code>len</code> past EOF) bounds the analysis scan (that frame + all after discarded).</p>
+<h3 id="sec-8-6">8.6 Columnar layouts (<code>hy-col</code>)</h3>
+<p><strong>RowGroup metadata</strong> (<code>RowGroup{ id, n_rows, columns }</code>), persisted as a <code>Meta</code>/<code>ColSegment</code> directory:</p>
+<pre class="diagram"><code>RowGroupMeta
+| id : RowGroupId (u64) | n_rows : u32 (&lt;=65_536) | n_cols : u32 |
+| delete_vector : SegmentId  // bitmap, 1 bit/row, 1=deleted     |
+| ColumnSegment[ n_cols ] (see below)                            |</code></pre>
+<p><strong>ColumnSegment header + encoded body</strong> (<code>ColumnSegment{ col, encoding, zone, n_rows, null_count, data }</code>):</p>
+<pre class="diagram"><code>ColumnSegment (on disk, kind=ColSegment, may span pages via Overflow)
++-----------------+--------------------------------------------+
+| col : u32       | ColumnId                                   |
+| enc_tag : u8    | 0 Plain 1 Dict 2 Rle 3 BitPacked 4 FoR     |
+| n_rows : u32    |                                            |
+| null_count : u32|                                            |
+| null_bitmap_off : u32 (0 if null_count==0)                   |
+| zone : ZoneMap (see 8.6.z)                                   |
+| enc_params : encoding-specific (dict SegmentId | bits:u8 |   |
+|              base:i64+bits:u8)                                |
+| data : encoded body (length implied by enc + n_rows)         |
++--------------------------------------------------------------+</code></pre>
+<p><strong>ZoneMap</strong> (<code>ZoneMap{ min, max, null_count }</code>) — <code>min</code>/<code>max</code> are <code>Datum</code> (encoded inline for fixed-width, length-prefixed for Str truncated to 16 B prefix). Enables segment/row-group skip when predicate range ∉ <code>[min,max]</code>.</p>
+<h3 id="sec-8-6-2">8.6.e Encoding formats with worked examples</h3>
+<p>Definitions/decode-cost in Glossary + <a class="cite" href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/blueprint/#sec-6-11">§6.11</a>; the &quot;best for&quot; workload per encoding is ADR-10. Width: Bool 1, I32 4, I64/F64/Date/Timestamp 8, Decimal 16, Str/Bytes = u32-offset array + blob. Worked examples (the unique content here):</p>
+<pre class="diagram"><code>Plain        raw fixed-width, n_rows*width B
+Dictionary   [&quot;US&quot;,&quot;UK&quot;,&quot;US&quot;,&quot;US&quot;,&quot;UK&quot;] -&gt; dict[0]=UK,[1]=US (sorted=ZoneMap);
+             codes [1,0,1,1,0] @ceil(log2(2))=1 bit -&gt; 5 B -&gt; 1 B; decode=gather dict[code]
+Rle          [7,7,7,7,2,2,9] -&gt; (7,4)(2,2)(9,1) = 3*(width+4) B vs 7*width
+BitPacked    [3,1,2,0,3] range 0..3 -&gt; bits=2 -&gt; 1101100011 -&gt; 2 B (was 20 B)
+FrameOfRef   [1000,1002,1001,1004] -&gt; base=1000, deltas [0,2,1,4] bits=3 -&gt; 2 B (+8 B base); decode=base+delta</code></pre>
+<p>All decoders O(n_rows), branch-light, SIMD-friendly; <code>Compressor</code> (Phase 6) picks the smallest valid encoding from <code>ColumnStats</code> (cardinality, run-length, range).</p>
+<h3 id="sec-8-7">8.7 MVCC model — visibility predicate</h3>
+<p><code>visible(h: &amp;TupleHeader, snap: &amp;Snapshot) -&gt; bool</code> under <code>IsolationLevel::SnapshotIsolation</code>. A version is visible iff its creator is committed and pre-snapshot, AND it is not superseded by a committed-pre-snapshot deleter. Definitions: <em>committed_before(t)</em> ≡ <code>committed(t) &amp;&amp; commit_ts(t) &lt;= snap.ts &amp;&amp; t ∉ snap.active &amp;&amp; t &lt; snap.xmax</code>. Own-write rule: a txn always sees its own uncommitted versions (<code>txn_min == snap.owner</code>).</p>
+<p>Truth table (rows = predicate states; <code>*</code> = don&#39;t-care):</p>
+<pre class="diagram"><code>| txn_min state          | txn_max(=0?) | txn_max state         | VISIBLE? |
+|------------------------|--------------|-----------------------|----------|
+| own uncommitted        | =0           | *                     | YES      |
+| own uncommitted        | own          | (own delete)          | NO       |
+| committed_before       | =0           | (live)                | YES      |
+| committed_before       | set          | committed_before      | NO       |
+| committed_before       | set          | active/own/uncommitted| YES      |
+| committed_before       | set          | committed_after(ts)   | YES      |
+| in snap.active         | *            | *                     | NO       |
+| uncommitted (other)    | *            | *                     | NO       |
+| committed_after(ts)    | *            | *                     | NO       |
+| aborted                | *            | *                     | NO       |</code></pre>
+<p><code>commit_ts</code> resolved via the <code>TxnManager</code> commit oracle; uncommitted/aborted txns have no <code>commit_ts</code>. <code>ReadCommitted</code> reuses the predicate but takes a fresh <code>Snapshot</code> per statement.</p>
+<h3 id="sec-8-7-2">8.7.c Version-chain example: insert → update → update → delete</h3>
+<p>Key <code>K</code>, head stays <code>R0</code> in the index; updates append newest-first via <code>next_version</code> (commit ts in parens):</p>
+<pre class="diagram"><code>INDEX[K] -&gt; Vh (head, newest)
+ Vd: txn_min=T4(ts40) txn_max=T4   flags=DELETED  next=Vc   (delete)
+ Vc: txn_min=T3(ts30) txn_max=T4               next=Vb   (update v3)
+ Vb: txn_min=T2(ts20) txn_max=T3               next=Va   (update v2)
+ Va: txn_min=T1(ts10) txn_max=T2  next=0 (origin)         (insert)</code></pre>
+<p>Three snapshots (each picks the first <code>visible()</code> version walking head→origin):</p>
+<pre class="diagram"><code>| Snapshot         | ts | active set | sees   | reason                         |
+|------------------|----|------------|--------|--------------------------------|
+| S_x (ts=15)      | 15 | {}         | Va     | only T1 committed_before       |
+| S_y (ts=25)      | 25 | {T3}       | Vb     | T3 active -&gt; skip Vc; Vb live@25|
+| S_z (ts=45)      | 45 | {}         | (none) | Vd deletes; T4&lt;=45 -&gt; row gone |</code></pre>
+<h3 id="sec-8-8">8.8 Delta/main lifecycle — state machine</h3>
+<p>Per-tuple state DELTA → MAIN → reclaimed:</p>
+<pre class="diagram"><code>[Absorbed]  write lands in DeltaStore (row format, in DeltaStore SlottedPages, flags|=DELTA)
+    | TupleMover merge (background, Phase 10)
+    v
+[Merged]    encoded into a new MAIN RowGroup (columnar); delta row marked MOVED
+    | commit of new RowGroup + atomic swap (ColumnFlush WAL record)
+    v
+[InMain]    visible only via column path; delta copy GC-eligible
+    | delete against main row
+    v
+[MarkedDeleted]  delete_vector bit set (main is immutable); still scanned-then-filtered
+    | next merge of that RowGroup
+    v
+[Reclaimed]  physically dropped at re-merge; Vacuum drops versions &lt; oldest live snapshot</code></pre>
+<p>Swap atomicity + immutability invariants: <a class="cite" href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/blueprint/#sec-6-3">§6.3</a>, <a class="cite" href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/blueprint/#sec-6-13">§6.13</a> (the swap publishes after <code>ColumnFlush</code> is durable, retires delta rows only once <code>oldest_live_snapshot &gt;= merge_ts</code>). Write→delta→merge→main→vacuum sequence: insert appends a row + <code>Insert</code> WAL → <code>Commit</code> assigns ts → at threshold the mover reads a delta+main merge snapshot, encodes RowGroups, logs <code>ColumnFlush</code>, atomic-swaps the directory pointer (delta rows → MOVED) → later Vacuum drops MOVED + delete-vector&#39;d rows once <code>oldest_live_snapshot</code> advances past <code>merge_ts</code>.</p>
+<h3 id="sec-8-8-2">8.8.x Worked scan: 2 delta rows + a 65_536-row main row group under a snapshot</h3>
+<p><code>scan(spec)</code> with <code>spec.snap=S</code>, project <code>{c0,c1}</code>, predicate <code>c0 &gt; 100</code>:</p>
+<pre class="diagram"><code>1. Plan: AccessPath::ColumnScan(main RG#7) + DeltaScan(delta region)
+2. MAIN RG#7: ZoneMap[c0]={min:50,max:9000} -&gt; NOT skipped.
+   decode c0 -&gt; ColumnBatch (1024/iter); c0&gt;100 -&gt; SelectionVector (~900/1024);
+   AND-out delete_vector; late-materialize c1 only for survivors
+3. DELTA: R_a(c0=150,T8@S.ts) visible -&gt; included; R_b(c0=80) fails predicate
+4. Merge: dedup by PK — a newer delta version shadows the main copy
+5. Emit BatchIter: main-survivors ++ delta-survivors, one snapshot-consistent stream</code></pre>
+<p>Cost: ZoneMap + late materialization decode only matching <code>c1</code>; delta merge is an O(delta) PK hash-probe against emitted main keys.</p>
+<h3 id="sec-8-9">8.9 Domain invariants (LOCKED)</h3>
+<ul>
+<li>RowId stability (slot never reused while a chain references it); single newest head (acyclic, <code>next_version=0</code> terminator); MAIN immutability (only <code>delete_vector</code> + directory pointer change); WAL ordering (<code>pageLSN ≤ flushed_lsn</code> before flush); encoding fidelity (<code>decode(encode)==</code>, exact <code>n_rows</code>/<code>null_count</code>/<code>ZoneMap</code>); snapshot consistency (one lifecycle state per key per <code>Snapshot</code>).</li>
+</ul>
+<h3 id="sec-8-10">8.10 Malformed / edge cases → required behavior</h3>
+<pre class="diagram"><code>| Condition                | Detection                       | Behavior / Error                                          |
+|--------------------------|---------------------------------|-----------------------------------------------------------|
+| Corrupt page checksum    | crc32c mismatch on read         | PageCorrupt; refuse; if recoverable redo from WAL recLSN   |
+| Torn page (partial write)| header.gen != tail sentinel     | TornPage; rebuild via WAL (double-write protection §24)    |
+| Encoding length mismatch | decoded bytes != n_rows*w       | DecodeMismatch; quarantine segment, fail scan, no partial  |
+| Version chain cycle      | visited-set / hop &gt; 4096        | VersionCycle; abort txn, flag for Vacuum, never loop       |
+| Oversized tuple          | payload &gt; ~4040 B               | spill to Overflow chain; &gt; overflow cap -&gt; TooLarge        |
+| Delta overflow           | rows &gt; high-watermark (256k)    | force synchronous merge + backpressure; DeltaFull if merge can&#39;t keep up |
+| Null in NOT-NULL column  | null_bitmap vs Schema           | NullViolation at encode/write                              |
+| Decimal precision overflow| value exceeds p/s              | NumericOverflow; reject write                              |</code></pre>
+<p>Every error → a <code>hy-common::ErrorKind</code>; persistence-path errors are non-panicking <code>Result</code>s. Corruption never yields silently wrong results — a failed checksum/decode aborts rather than emitting guessed data.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

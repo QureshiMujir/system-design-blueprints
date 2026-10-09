@@ -1,0 +1,362 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Memory Allocator — Architecture · Engineering Blueprints</title><meta name="description" content="Memory Allocator, hld: §3 overview + §8 domain model. Build smalloc, a general-purpose, drop-in replacement for the C library's malloc / free / realloc / calloc / aligned_alloc family, shipped as libsmalloc.so (LD_PRELOAD-injectable) and libsmalloc.a…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <a href="/system-design-blueprints/systems/memory-allocator/">Memory Allocator</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Memory Allocator</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~14 weeks</li> <li>2,425 lines</li> <li>blueprint #29</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/memory-allocator/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/memory-allocator/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/memory-allocator/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/memory-allocator/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/memory-allocator/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/memory-allocator/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/memory-allocator/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/memory-allocator/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/memory-allocator/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/memory-allocator/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Memory Allocator — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>+------------------------------------------------------------------+
+|  application: malloc / free / realloc / calloc / aligned_alloc   |
++----------------------------|--------------------------------------+
+                             v
++------------------------------------------------------------------+
+|  smalloc public facade (src/smalloc.c)                            |
+|  smalloc_alloc  smalloc_free  smalloc_realloc  smalloc_calloc     |
+|  smalloc_aligned_alloc  smalloc_usable_size  smalloc_get_stats    |
++----------------------------|--------------------------------------+
+                             v
++------------------------------------------------------------------+
+|  per-thread cache -- TLS, lock-free fast path (src/tcache.c)      |
+|  small-class freelists (bins), refill/drain to arena              |
+|  remote-free MPSC queue for cross-thread frees                    |
++----------------------------|--------------------------------------+
+                             v  (cache miss / refill / drain)
++------------------------------------------------------------------+
+|  central arena (src/arena.c) -- per-arena ticket lock              |
+|  +----------------+  +-----------------+  +--------------------+  |
+|  | segregated     |  | buddy allocator |  | slab caches         |  |
+|  | freelists      |  | order 12..21    |  | (Bonwick magazines) |  |
+|  | (src/seglist.c)|  | (src/buddy.c)   |  | (src/slab.c)        |  |
+|  +----------------+  +-----------------+  +--------------------+  |
++----------------------------|--------------------------------------+
+                             v
++------------------------------------------------------------------+
+|  page provider (src/pages.c)                                      |
+|  mmap / munmap / mprotect / madvise, platform/{linux,macos,       |
+|  freebsd}.c shims                                                  |
++------------------------------------------------------------------+
+
+   side channels (cross-cutting, not on the alloc/free path):
+   - hardening.c: canary, redzone, guard pages, double-free table,
+     quarantine
+   - trace.c: mtrace-compatible log, ring-buffer binary trace,
+     malloc_hook shim
+   - stats.c: per-arena, per-size-class, per-thread atomic counters
+   - radixmap.c: 3-level radix tree, ptr -&gt; {arena, class} (I1)</code></pre>
+<p>One paragraph per box:</p>
+<p><strong>Application.</strong> Any C/C++/dynamically-linked process calling the standard <code>malloc</code>
+family; unaware of <code>smalloc</code> beneath it (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-9">P9</a>). Its only contract is the C17 section
+7.22.3 alignment and lifetime rules.</p>
+<p><strong>smalloc façade (<code>src/smalloc.c</code>).</strong> Validates arguments, classifies the request size
+(<code>class_for</code>, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/blueprint/#sec-11-5">§11.5</a>), and routes to the per-thread cache; the only layer every call
+passes through, so it stays branch-minimal (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-5">P5</a>).</p>
+<p><strong>Per-thread cache (<code>src/tcache.c</code>).</strong> <code>__thread</code>-resident freelists per small class
+(<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-8">I8</a>); the fast path (pop/push, no lock, no syscall); owns the remote-free MPSC queue
+that receives cross-thread frees (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-13">I13</a>, Phase 6).</p>
+<p><strong>Central arena (<code>src/arena.c</code>).</strong> One per CPU (bounded by <code>SM_MAX_ARENAS</code>, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a>); holds
+the segregated freelists (Phase 3), the buddy page allocator (Phase 4), and the slab
+caches (Phase 5) behind one ticket lock (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-11">ADR-11</a>); refills/drains the tcache in batches.</p>
+<p><strong>Segregated freelists (<code>src/seglist.c</code>).</strong> One explicit freelist per size class
+(<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-8">ADR-08</a>); O(1) placement, no best-fit search, bounded internal fragmentation (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-2">I2</a>).</p>
+<p><strong>Buddy allocator (<code>src/buddy.c</code>).</strong> Page-grain backend, orders 12..21 (4 KiB–2 MiB);
+splits/coalesces power-of-two regions (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-9">ADR-09</a>); the layer that talks to the page
+provider for growth/decommit.</p>
+<p><strong>Slab caches (<code>src/slab.c</code>).</strong> Bonwick-style two-level magazines (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-10">ADR-10</a>) for the
+hottest kernel-shaped fixed-size objects; out-of-band descriptors (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-4">P4</a>).</p>
+<p><strong>Page provider (<code>src/pages.c</code>).</strong> The sole layer that issues syscalls
+(<code>mmap</code>/<code>mprotect</code>/<code>madvise</code>); platform shims abstract <code>MADV_DONTNEED</code> (Linux) vs
+<code>MADV_FREE</code> (macOS/FreeBSD) behind one call (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-21">ADR-21</a>).</p>
+<p><strong>Side channels.</strong> <code>hardening.c</code>, <code>trace.c</code>, <code>stats.c</code>, <code>radixmap.c</code> cross-cut every
+layer without sitting on the hot path; <code>radixmap.c</code> is the exception — its lookup <em>is</em>
+on path for large allocations and cache misses (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-1">I1</a>).</p>
+<p>The diagram is canonical; every later section&#39;s module names trace back to a box here.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<p><strong>Address-space layout (steady state, Phase 15+):</strong></p>
+<pre class="diagram"><code>0x0000_7000_0000_0000  +--------------------------------------+
+                        | arena region N x 16 GiB reservation   |
+                        | (segregated lists + buddy, per arena) |
+0x0000_7100_0000_0000  +--------------------------------------+
+                        | slab region (Bonwick caches)          |
+0x0000_7200_0000_0000  +--------------------------------------+
+                        | large-mmap region (&gt;= 2 MiB objects)  |
+0x0000_7300_0000_0000  +--------------------------------------+
+                        | radix map metadata (out-of-band, I3)  |
+                        +--------------------------------------+</code></pre>
+<p><strong>Allocation state machine</strong> (<code>smalloc_alloc</code>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Next state</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>REQUESTED</td>
+<td><code>smalloc_alloc(size, align)</code> called</td>
+<td>CLASSIFIED</td>
+</tr>
+<tr>
+<td>CLASSIFIED</td>
+<td><code>class_for(size)</code> resolves a size class (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-8">ADR-08</a>)</td>
+<td>CACHE_LOOKUP</td>
+</tr>
+<tr>
+<td>CACHE_LOOKUP</td>
+<td>tcache bin non-empty</td>
+<td>SERVED (fast path, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-5">P5</a>)</td>
+</tr>
+<tr>
+<td>CACHE_LOOKUP</td>
+<td>tcache bin empty</td>
+<td>ARENA_REFILL</td>
+</tr>
+<tr>
+<td>ARENA_REFILL</td>
+<td>arena bin non-empty</td>
+<td>CACHE_FILL → SERVED</td>
+</tr>
+<tr>
+<td>ARENA_REFILL</td>
+<td>arena bin empty</td>
+<td>BUDDY_SPLIT or SLAB_GROW</td>
+</tr>
+<tr>
+<td>BUDDY_SPLIT / SLAB_GROW</td>
+<td>region available</td>
+<td>CACHE_FILL → SERVED</td>
+</tr>
+<tr>
+<td>BUDDY_SPLIT / SLAB_GROW</td>
+<td>no region available</td>
+<td>PAGE_PROVIDER_MMAP</td>
+</tr>
+<tr>
+<td>PAGE_PROVIDER_MMAP</td>
+<td><code>mmap</code> succeeds</td>
+<td>CACHE_FILL → SERVED</td>
+</tr>
+<tr>
+<td>PAGE_PROVIDER_MMAP</td>
+<td><code>mmap</code> fails (<code>ENOMEM</code>)</td>
+<td>FAILED (returns <code>NULL</code>, <code>errno=ENOMEM</code>)</td>
+</tr>
+</tbody></table></div>
+<p><strong>Free state machine</strong> (<code>smalloc_free</code>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Next state</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>FREED</td>
+<td><code>smalloc_free(ptr)</code> called</td>
+<td>HARDENING_CHECK</td>
+</tr>
+<tr>
+<td>HARDENING_CHECK</td>
+<td>redzone/canary intact, not in DFD table</td>
+<td>OWNER_CHECK</td>
+</tr>
+<tr>
+<td>HARDENING_CHECK</td>
+<td>violation detected</td>
+<td>ABORT (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-6">I6</a>)</td>
+</tr>
+<tr>
+<td>OWNER_CHECK</td>
+<td>freeing thread owns the arena</td>
+<td>CACHE_PUSH</td>
+</tr>
+<tr>
+<td>OWNER_CHECK</td>
+<td>cross-thread free</td>
+<td>REMOTE_ENQUEUE (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-13">I13</a>)</td>
+</tr>
+<tr>
+<td>CACHE_PUSH</td>
+<td>tcache bin below <code>limit</code></td>
+<td>DONE</td>
+</tr>
+<tr>
+<td>CACHE_PUSH</td>
+<td>tcache bin at <code>limit</code></td>
+<td>CACHE_DRAIN → BIN_PUSH</td>
+</tr>
+<tr>
+<td>BIN_PUSH (arena bin)</td>
+<td>buddy-backed and buddy neighbor free</td>
+<td>COALESCE → DECOMMIT_CHECK</td>
+</tr>
+<tr>
+<td>DECOMMIT_CHECK</td>
+<td>region fully free</td>
+<td><code>madvise</code>/<code>MADV_DONTNEED</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Worked example — <code>malloc(40)</code> trace (Phase 15+ steady state):</strong> <code>class_for(40)</code> rounds
+up to the 48 B class (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-8">ADR-08</a>) → tcache bin <code>[48]</code> checked → empty (cold cache) →
+<code>ARENA_REFILL</code> acquires the arena ticket lock (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-11">ADR-11</a>) → arena bin <code>[48]</code> empty →
+<code>BUDDY_SPLIT</code> carves one 4 KiB page from an order-12 buddy block into 85 chunks of 48 B
+→ 15 chunks fill the tcache (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-8">I8</a>), the rest populate the arena bin → lock released →
+first chunk served to the caller. Total path length: 1 TLS lookup + 1 lock acquire/
+release + 1 buddy split — amortized to O(1/85) per steady-state call.</p>
+<p><strong>Malformed-input examples:</strong> <code>smalloc_free(garbage_ptr)</code> — radix-map lookup misses →
+in a hardened build, <code>abort()</code> with <code>SM_E_FAULT</code> (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-1">I1</a>); in glibc-compat mode, silently
+ignored per historical <code>free(invalid)</code> UB tolerance (documented divergence, Phase 22).
+<code>smalloc_realloc(ptr_not_from_us, n)</code> — undefined per C17 section 7.22.3.5; detected only when
+the <code>sm_block_hdr_t</code> magic (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/blueprint/#sec-11-4">§11.4</a>) fails to match, otherwise UB is inherited as-is.</p>
+<p><strong>Failure-path example — OOM on arena refill:</strong> <code>BUDDY_SPLIT</code> requests a new 2 MiB
+region from <code>pages.c</code> → <code>mmap</code> returns <code>MAP_FAILED</code>/<code>ENOMEM</code> → the failure propagates
+as <code>NULL</code> through <code>ARENA_REFILL</code> → <code>CACHE_LOOKUP</code> → the façade sets <code>errno=ENOMEM</code> and
+returns <code>NULL</code> to the caller; the tcache bin for that class remains empty; the <em>next</em>
+call to that class retries the same path (no cached failure state, per <a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-4">I4</a>&#39;s accounting
+identity staying valid even on a failed refill).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Correctness above throughput (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-1">P1</a>).</strong> Every commit passes the conformance suite under ASan/MSan/TSan/UBSan before merge. Tradeoff: slower CI. Operational: sanitizer builds gated in <code>ci.yml</code> (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-19">ADR-19</a>). Violate it and silent heap corruption reaches production.</li><li id="p-2"><strong>Layered fallback (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-2">P2</a>).</strong> The hot path is the tcache; a miss falls to segregated lists, then buddy, then <code>mmap</code>. Tradeoff: more paths to test. Operational: each layer is independently benchmarkable and shippable. Violate it and a monolithic allocator cannot ship a partial phase.</li><li id="p-3"><strong>Bounded, documented metadata (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-3">P3</a>).</strong> Every allocation&#39;s overhead is a known, tabled number (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a>). Tradeoff: less per-object flexibility. Operational: capacity planning is exact. Violate it and RSS surprises reach production.</li><li id="p-4"><strong>Out-of-band metadata where possible (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-4">P4</a>).</strong> Small-class metadata lives in the radix map (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-3">I3</a>), never adjacent to user data. Tradeoff: an extra indirection (cache miss) on the map lookup. Operational: a user-buffer overrun cannot corrupt allocator state. Violate it and the classic overflow-corrupts-header bug class returns.</li><li id="p-5"><strong>Constant-time fast path (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-5">P5</a>).</strong> <code>malloc(≤4096)</code> never takes a lock or a syscall on a cache hit. Tradeoff: a cache miss falls to a slower, lock-guarded path. Operational: p99 tail latency is bounded (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a>). Violate it and a hot loop that occasionally blocks on a syscall destroys tail-latency SLOs.</li><li id="p-6"><strong>Address space is cheap; memory is not (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-6">P6</a>).</strong> Reserve large VA ranges (16 GiB) via <code>MAP_NORESERVE</code>, commit lazily. Tradeoff: relies on sane overcommit. Operational: <code>madvise</code>/<code>DONTNEED</code> returns RSS aggressively. Violate it and misconfigured hosts reserve swap for the full VA range (Phase 14 pitfall).</li><li id="p-7"><strong>Hardening is opt-in, always available (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-7">P7</a>).</strong> A runtime flag reaches every hardening feature even in a release build. Tradeoff: a flag check on the fast path (compiled dead when off). Operational: an incident can enable redzones without a rebuild (Phase 20). Violate it and an incident forces a slow debug rebuild.</li><li id="p-8"><strong>Reproducible builds (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-8">P8</a>).</strong> Pinned toolchain, deterministic flags, CI verifies bit-identical artifacts (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-2">ADR-02</a>, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-20">ADR-20</a>). Tradeoff: slower contributor onboarding. Operational: security audits trust the artifact. Violate it and a supply-chain trust gap opens.</li><li id="p-9"><strong>Drop-in ABI compatibility (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-9">P9</a>).</strong> Export the right symbol versions (<code>GLIBC_2.2.5</code>, <code>GLIBC_2.34</code>) so <code>LD_PRELOAD</code> &quot;just works&quot; (Phase 22, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-4">ADR-04</a>). Tradeoff: must track glibc&#39;s evolving surface. Operational: the version script is maintained per release. Violate it and a silent symbol mismatch crashes at load time.</li><li id="p-10"><strong>Telemetry that does not lie (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-10">P10</a>).</strong> Every cross-thread counter is atomic; reading stats never blocks an allocation (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-9">I9</a>). Tradeoff: an atomic RMW cost on increment. Operational: dashboards are trustworthy under load. Violate it and racy counters produce false confidence.</li><li id="p-11"><strong>Differential correctness over unit correctness (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-11">P11</a>).</strong> The same operation sequence is replayed against glibc/jemalloc/smalloc and outputs compared (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-19">ADR-19</a>, Phase 24). Tradeoff: needs multiple allocators linked into one harness. Operational: catches divergence unit tests miss. Violate it and allocator-specific bugs escape testing.</li><li id="p-12"><strong>Fail loud, never silently corrupt (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-12">P12</a>).</strong> A detected invariant violation (double-free, redzone mismatch) calls <code>abort()</code> with a structured diagnostic, never limps on (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-6">I6</a>). Tradeoff: a false-positive detector crashes a healthy process. Operational: postmortem tooling parses the abort diagnostic. Violate it and undetected corruption propagates to unrelated allocations.</li><li id="p-13"><strong>Size-class geometry bounds waste, not fit search (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-13">P13</a>).</strong> Segregated lists eliminate best-fit search, trading a small fixed step-waste for O(1) placement (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-8">ADR-08</a>, Phase 15). Tradeoff: cannot reach zero internal fragmentation. Operational: the class table is the single source of truth for the waste bound (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a>). Violate it and an ad-hoc &quot;round to next power of two&quot; scheme wastes far more (§&quot;Back-of-Envelope Capacity Model&quot;).</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

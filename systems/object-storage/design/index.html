@@ -1,0 +1,521 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Object Storage (S3-like) — Design · Engineering Blueprints</title><meta name="description" content="Object Storage (S3-like), lld: core types, repo tree, file inventory. A cluster-scale, S3-API-compatible object storage system in the Amazon S3 / Ceph RADOS Gateway / MinIO / OpenStack Swift lineage: an immutable, versioned blob store addressed by a (bucket, key…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/object-storage/">Object Storage (S3-like)</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Object Storage (S3-like)</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~28 weeks</li> <li>2,447 lines</li> <li>blueprint #107</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/object-storage/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/object-storage/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/object-storage/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/object-storage/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/object-storage/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/object-storage/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/object-storage/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/object-storage/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/object-storage/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/object-storage/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Object Storage (S3-like) — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/object-storage/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>pub struct BucketName(String);         // owned, immutable post-parse; Send+Sync; wire: UTF-8
+impl BucketName {
+    pub fn parse(s: &amp;str) -&gt; Result&lt;Self, BucketNameError&gt;;  // 3-63 chars, lowercase+hyphen
+    pub fn as_str(&amp;self) -&gt; &amp;str;
+}
+
+pub struct ObjectKey(String);          // owned, immutable; opaque to the system (P1); &lt;=1024B
+impl ObjectKey {
+    pub const MAX_LEN: usize;
+    pub fn parse(s: &amp;str) -&gt; Result&lt;Self, ObjectKeyError&gt;;
+    pub fn as_str(&amp;self) -&gt; &amp;str;
+}
+
+pub struct VersionId(pub u128);        // Copy; monotonic per (bucket,key) (I2); 0 = &quot;no version&quot;
+impl VersionId {
+    pub const NONE: Self;
+    pub fn is_none(self) -&gt; bool;
+    pub fn encode(self) -&gt; String;     // 32 lowercase hex chars, wire-stable
+}</code></pre><pre class="code"><code>pub enum ETag {                        // Clone, Eq, Hash; serialized as a quoted wire string
+    SinglePartMd5([u8; 16]),
+    Multipart { combined_md5: [u8; 16], n_parts: u16 },
+    Opaque(String),                     // SSE-C / SSE-KMS / server-assigned
+}
+impl ETag {
+    pub fn from_body(body: &amp;[u8]) -&gt; Self;
+    pub fn from_parts(part_md5s: &amp;[[u8; 16]]) -&gt; Self;
+    pub fn to_header_value(&amp;self) -&gt; String;
+}</code></pre><pre class="code"><code>pub struct MultipartUploadId(pub u128);         // cluster-allocated; base64url wire encoding
+impl MultipartUploadId { pub fn encode(self) -&gt; String; }
+
+pub struct PartNumber(pub u16);                 // Copy, Ord; range 1..=10_000 (I7)
+impl PartNumber {
+    pub const MIN: Self;
+    pub const MAX: Self;
+    pub fn parse(n: u16) -&gt; Result&lt;Self, PartNumberError&gt;;
+}
+
+pub const MIN_PART_BYTES: u64;        // 5 MiB
+pub const MAX_PART_BYTES: u64;        // 5 GiB
+pub const MAX_OBJECT_BYTES: u64;      // 5 TiB</code></pre><pre class="code"><code>pub struct FragmentId(pub [u8; 16]);   // xxh3-128 fingerprint; storage key (P6, ADR-03)
+
+pub struct ManifestEntry {             // owned by ObjectManifest; immutable once installed
+    pub part_number: u16,              // 0 for non-multipart
+    pub fragment:    FragmentId,
+    pub bytes:       u64,
+    pub md5:         [u8; 16],         // ETag reconstruction
+    pub sha256:      [u8; 32],         // integrity verification (I4)
+    pub placement:   PlacementPlan,
+}
+
+pub struct ObjectManifest {            // installed atomically in one WAL entry (I1, I3)
+    pub bytes_total:  u64,
+    pub durability:   Durability,
+    pub entries:      Vec&lt;ManifestEntry&gt;,   // ordered by part_number then offset
+    pub completed_at: chrono::DateTime&lt;chrono::Utc&gt;,
+    pub etag:         ETag,
+}</code></pre><pre class="code"><code>pub enum Durability {                  // Copy; per-bucket policy (P7)
+    Replication { rf: u8 },            // 1..=7, default 3 (ADR-04)
+    Erasure     { k: u8, m: u8 },      // default (6,3) (ADR-05)
+    Tiered      { hot: Box&lt;Durability&gt;, cold: Box&lt;Durability&gt; },
+}
+
+pub struct StorageNodeId(pub u64);     // Copy, Hash
+
+pub enum PlacementPlan {               // set once by the metadata service (I13); immutable
+    Replicated { nodes: Vec&lt;StorageNodeId&gt; },
+    EcShards   { data: Vec&lt;StorageNodeId&gt;, parity: Vec&lt;StorageNodeId&gt; },
+}
+impl PlacementPlan { pub fn replicas(&amp;self) -&gt; usize; }</code></pre><pre class="code"><code>pub struct Object {                    // one version; immutable post-install (P2)
+    pub bucket:        BucketName,
+    pub key:           ObjectKey,
+    pub version:       VersionId,
+    pub manifest:      ObjectManifest,
+    pub headers:       UserHeaders,
+    pub uploaded_at:   chrono::DateTime&lt;chrono::Utc&gt;,
+    pub uploader:      AccessKeyId,
+    pub legal_hold:    bool,
+    pub retention:     Option&lt;RetentionConfig&gt;,
+    pub delete_marker: bool,
+}
+
+pub struct UserHeaders {               // Default; owned copy per version
+    pub content_type:     Option&lt;String&gt;,
+    pub content_encoding:  Option&lt;String&gt;,
+    pub content_md5:       Option&lt;[u8; 16]&gt;,
+    pub cache_control:     Option&lt;String&gt;,
+    pub user_meta:         std::collections::BTreeMap&lt;String, String&gt;,
+}
+
+pub struct BucketMeta {                // owned by the metadata service; mutated via WAL ops
+    pub name:        BucketName,
+    pub created_at:  chrono::DateTime&lt;chrono::Utc&gt;,
+    pub region:      String,
+    pub durability:  Durability,
+    pub versioning:  VersioningState,
+    pub object_lock: Option&lt;ObjectLockConfig&gt;,
+    pub lifecycle:   Vec&lt;LifecycleRule&gt;,
+    pub policy:      Option&lt;BucketPolicy&gt;,
+    pub replication: Option&lt;ReplicationConfig&gt;,
+    pub acl:         BucketAcl,
+}
+
+pub enum VersioningState { Unversioned, Enabled, Suspended }   // Copy; monotone per P9/I5</code></pre><pre class="code"><code>pub struct MultipartUpload {
+    pub id:            MultipartUploadId,
+    pub bucket:        BucketName,
+    pub key:           ObjectKey,
+    pub initiated_at:  chrono::DateTime&lt;chrono::Utc&gt;,
+    pub initiator:     AccessKeyId,
+    pub headers:       UserHeaders,
+    pub parts:         std::collections::BTreeMap&lt;PartNumber, PartRecord&gt;,
+    pub durability:    Durability,
+    pub state:         MpuState,
+}
+
+pub struct PartRecord {
+    pub number:      PartNumber,
+    pub bytes:       u64,
+    pub md5:         [u8; 16],
+    pub fragment:    FragmentId,
+    pub placement:   PlacementPlan,
+    pub uploaded_at: chrono::DateTime&lt;chrono::Utc&gt;,
+}
+
+pub enum MpuState { InProgress, Completing, Completed, Aborting, Aborted, Expired }</code></pre><pre class="code"><code>pub struct AccessKeyId(pub String);    // 20-char alnum; S3-compatible
+
+pub struct AccessKey {
+    pub id:         AccessKeyId,
+    pub secret:      Secret,           // zeroize-on-drop
+    pub created_at:  chrono::DateTime&lt;chrono::Utc&gt;,
+    pub disabled:    bool,
+    pub policy:      Option&lt;BucketPolicy&gt;,
+}
+
+pub enum RetentionMode { Governance, Compliance }   // Compliance is irreversible (P10, I8)
+
+pub struct RetentionConfig { pub mode: RetentionMode, pub retain_until: chrono::DateTime&lt;chrono::Utc&gt; }
+
+pub struct ObjectLockConfig {
+    pub default_mode:  RetentionMode,
+    pub default_days:  Option&lt;u32&gt;,
+    pub default_years: Option&lt;u32&gt;,
+}</code></pre><pre class="code"><code>pub struct BucketPolicy { pub statements: Vec&lt;PolicyStatement&gt; }
+pub struct PolicyStatement {
+    pub sid:        Option&lt;String&gt;,
+    pub effect:      PolicyEffect,
+    pub principals:  Vec&lt;Principal&gt;,
+    pub actions:     Vec&lt;S3Action&gt;,
+    pub resources:   Vec&lt;S3Resource&gt;,
+    pub conditions:  Vec&lt;PolicyCondition&gt;,
+}
+pub enum PolicyEffect { Allow, Deny }
+pub enum Principal { Anonymous, AccessKey(AccessKeyId), Account(String) }
+
+pub struct LifecycleRule { pub id: String, pub filter: LifecycleFilter, pub actions: Vec&lt;LifecycleAction&gt;, pub enabled: bool }
+pub struct LifecycleFilter { pub prefix: Option&lt;String&gt;, pub object_tag: Option&lt;(String,String)&gt;, pub size_gt: Option&lt;u64&gt;, pub size_lt: Option&lt;u64&gt; }
+pub enum LifecycleAction {
+    Expire                      { days: u32 },
+    ExpireNoncurrentVersion     { days: u32 },
+    Transition                  { days: u32, target: StorageClass },
+    TransitionNoncurrentVersion { days: u32, target: StorageClass },
+    AbortIncompleteMultipart    { days: u32 },
+}
+pub enum StorageClass { Standard, InfrequentAccess, Glacier, DeepArchive }
+
+pub struct ReplicationConfig { pub role: AccessKeyId, pub rules: Vec&lt;ReplicationRule&gt; }
+pub struct ReplicationRule { pub id: String, pub priority: u32, pub filter: LifecycleFilter, pub destination: ReplicationDestination, pub delete_marker: bool, pub existing_objects: bool }
+pub struct ReplicationDestination { pub bucket: String, pub region: String, pub storage_class: Option&lt;StorageClass&gt; }</code></pre><pre class="code"><code>pub trait MetadataService: Send + Sync {   // one authoritative writer (I13); async RPC
+    async fn create_bucket(&amp;self, name: &amp;BucketName, cfg: BucketCreateRequest) -&gt; Result&lt;BucketMeta&gt;;
+    async fn put_object_begin(&amp;self, b: &amp;BucketName, k: &amp;ObjectKey, hdrs: UserHeaders) -&gt; Result&lt;PutObjectTicket&gt;;
+    async fn put_object_commit(&amp;self, t: PutObjectTicket, m: ObjectManifest) -&gt; Result&lt;VersionId&gt;;
+    async fn head_object(&amp;self, b: &amp;BucketName, k: &amp;ObjectKey, v: Option&lt;VersionId&gt;) -&gt; Result&lt;Object&gt;;
+    async fn delete_object(&amp;self, b: &amp;BucketName, k: &amp;ObjectKey, v: Option&lt;VersionId&gt;) -&gt; Result&lt;VersionId&gt;;
+    async fn list_objects_v2(&amp;self, b: &amp;BucketName, q: ListV2Query) -&gt; Result&lt;ListV2Response&gt;;
+    async fn mpu_initiate(&amp;self, b: &amp;BucketName, k: &amp;ObjectKey, h: UserHeaders) -&gt; Result&lt;MultipartUpload&gt;;
+    async fn mpu_complete(&amp;self, id: MultipartUploadId, parts: Vec&lt;(PartNumber,[u8;16])&gt;) -&gt; Result&lt;(ObjectManifest, VersionId)&gt;;
+    async fn put_bucket_policy(&amp;self, b: &amp;BucketName, p: BucketPolicy) -&gt; Result&lt;()&gt;;
+    async fn put_bucket_lifecycle(&amp;self, b: &amp;BucketName, l: Vec&lt;LifecycleRule&gt;) -&gt; Result&lt;()&gt;;
+    async fn put_bucket_versioning(&amp;self, b: &amp;BucketName, s: VersioningState) -&gt; Result&lt;()&gt;;
+}
+
+pub trait BlobService: Send + Sync {       // content-addressed (P6); async RPC
+    async fn put_fragment(&amp;self, frag: FragmentId, bytes: bytes::Bytes, plan: PlacementPlan) -&gt; Result&lt;()&gt;;
+    async fn get_fragment(&amp;self, frag: FragmentId, range: Option&lt;(u64,u64)&gt;) -&gt; Result&lt;bytes::Bytes&gt;;
+    async fn checksum(&amp;self, frag: FragmentId) -&gt; Result&lt;[u8; 32]&gt;;
+    async fn repair(&amp;self, frag: FragmentId, from: PlacementPlan, to: PlacementPlan) -&gt; Result&lt;()&gt;;
+}</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>Object-Storage/
+|-- README.md                     # project overview, quickstart
+|-- FINAL_BLUEPRINT.md            # this document
+|-- BUILD_PLAN.md                 # phase status tracker
+|-- CHANGELOG.md                  # Keep-a-Changelog format
+|-- BLUEPRINT_LOG.md              # decision log across sessions
+|-- CONTRIBUTING.md
+|-- CODE_OF_CONDUCT.md
+|-- SECURITY.md                   # vuln disclosure + PGP fingerprint
+|-- LICENSE                       # Apache-2.0 (runtime)
+|-- LICENSES/
+|   `-- ELv2.txt                  # reserved: future hosted control plane
+|-- .github/
+|   `-- workflows/
+|       |-- ci.yml
+|       |-- conformance.yml
+|       |-- chaos.yml
+|       |-- security.yml
+|       `-- release.yml
+|-- Makefile
+|-- Cargo.toml                    # workspace manifest
+|-- rust-toolchain.toml
+|-- Dockerfile                    # multi-stage: build + distroless runtime
+|-- docker-compose.yml            # 1 gateway + 3 storage nodes + Prometheus + Grafana
+|-- .dockerignore
+|-- .gitignore
+|-- crates/                       # see §10.1
+|-- conformance/                  # see §10.2
+|-- benchmarks/                   # see §10.2
+|-- fuzz/                         # see §10.2
+|-- docs/                         # see §10.3
+|-- examples/                     # see §10.3
+|-- templates/                    # see §10.3
+|-- scripts/                      # see §10.3
+|-- tools/                        # see §10.3
+|-- notes/                        # see §10.3
+|-- papers/                       # see §10.3
+|-- legal/                        # see §10.3
+|-- brand/                        # see §10.3
+`-- ops/                          # see §10.3</code></pre><pre class="diagram"><code>crates/
+|-- obj-core/          # BucketName, ObjectKey, VersionId, ETag, Durability, errors (§11.1-11.5)
+|-- obj-proto/          # protobuf: gateway/metadata/blob/admin/replication.proto
+|-- obj-wal/             # delegates rank-71 WriteAheadLog
+|-- obj-index/           # metadata service: bucket/object/version/mpu indices, LSM engine, placement, Raft glue
+|-- obj-blob/            # blob node: fragment_store, bitrot, gc_local, scrub_local
+|-- obj-ec/              # delegates rank-108 Reed-Solomon
+|-- obj-replication/     # cross-region replication worker + queue
+|-- obj-gateway-s3/      # axum S3 REST server: router, handlers, range/conditional parsers
+|-- obj-sigv4/           # canonical_request, string_to_sign, signing_key, verifier, presigned
+|-- obj-lifecycle/       # lifecycle rule evaluator + daily worker
+|-- obj-versioning/      # version ladder + delete-marker state machine
+|-- obj-gc/              # stale-version + orphan-fragment garbage collector
+|-- obj-scrub/           # background scrubber (checksum sweep + EC reconstruct)
+|-- obj-tier/            # tiered-storage transition worker (hot/cold)
+|-- obj-tls/             # delegates rank-50 TLS
+|-- obj-raft/            # delegates rank-39 Raft
+|-- obj-metrics/         # OpenTelemetry + Prometheus integration
+|-- obj-conformance/     # conformance buckets + runner (§10.2)
+|-- obj-cli/             # `obs` CLI: ls, cp, cat, fsck, admin
+|-- obj-admin/           # admin REST surface: rebalance, decommission, policy
+`-- obj-bin/             # gateway + node entry points (one main.rs per binary)
+
+crates/obj-core/src/         bucket_id.rs, object_key.rs, version_id.rs, etag.rs,
+                              multipart.rs, manifest.rs, durability.rs, error.rs
+crates/obj-index/src/        bucket_index.rs, object_index.rs, version_index.rs,
+                              mpu_index.rs, policy_index.rs, placement.rs,
+                              lsm/{memtable.rs, sstable.rs, compactor.rs},
+                              raft_state.rs, snapshot.rs, rpc_server.rs
+crates/obj-blob/src/         fragment_store.rs, bitrot.rs, gc_local.rs, scrub.rs, rpc_server.rs
+crates/obj-gateway-s3/src/   router.rs, handlers_object.rs, handlers_bucket.rs,
+                              handlers_multipart.rs, handlers_admin.rs, range_parser.rs,
+                              conditional.rs, error_xml.rs, listing.rs
+crates/obj-sigv4/src/        canonical_request.rs, string_to_sign.rs, signing_key.rs,
+                              verifier.rs, presigned.rs</code></pre><pre class="diagram"><code>conformance/
+|-- runner/src/            main.rs, bucket.rs, report.rs, assert.rs, fixtures.rs, chaos.rs, replay.rs
+|-- corpora/                core_types/ bucket_ops/ object_io/ range_io/ multipart/
+|                           versioning/ lifecycle/ replication/ sigv4/ ec_pool/ object_lock/ chaos/
+`-- report_schema.json
+benchmarks/
+|-- put_throughput.rs
+|-- get_throughput.rs
+|-- multipart_finalise_latency.rs
+|-- listing_v2_pagination.rs
+|-- sigv4_verify_throughput.rs
+`-- results/
+fuzz/
+|-- sigv4_canonical_request.rs
+|-- range_header_parser.rs
+`-- multipart_complete_body.rs</code></pre><pre class="diagram"><code>docs/
+|-- adr/                   # one file per ADR-01..ADR-25
+|-- runbooks/               triage.md, multipart-leaks.md, orphan-fragments.md,
+|                           gateway-saturation.md, replication-lag.md
+|-- threat-model/           threat-model.md (source for §24)
+|-- performance/            performance-baseline.md (source for §30)
+|-- failure-analysis/       postmortem-template-application.md
+|-- api/                    openapi.yaml (admin), s3-subset.md (documented S3 subset)
+`-- sdk/                    generated client reference
+examples/                   hello-bucket.md, multipart-upload.md, versioning.md,
+                             ec-pool.md, replication.md, object-lock.md
+templates/                  adr.md, postmortem.md, rfc.md, runbook.md, bucket-policy.md
+scripts/                    bootstrap.sh, gen-proto.sh, load-test.sh, release-check.sh
+tools/                      fixture-gen/ (conformance fixture generator CLI)
+notes/                      sigv4-fixtures/ (non-normative working notes)
+papers/                     whitepaper/whitepaper-v1.0.md
+legal/                      terms.md, privacy.md, dpa.md, aup.md
+brand/                      voice.md, typography.md, palette.md
+ops/                        prometheus.yml, grafana-dashboards/, helm/, terraform/, k8s/</code></pre> </section><section class="prose"><h2 id="sec-39">39. Appendix A — File Inventory</h2>
+<p>Every leaf file from the Repository Layout (<a class="cite" href="/system-design-blueprints/systems/object-storage/design/#sec-10">§10</a>), one line each, matching <a class="cite" href="/system-design-blueprints/systems/object-storage/design/#sec-10">§10</a> and <a class="cite" href="/system-design-blueprints/systems/object-storage/design/#sec-11">§11</a>
+exactly.</p>
+<p><strong>Root</strong>
+<code>README.md</code> project overview/quickstart · <code>FINAL_BLUEPRINT.md</code> this document ·
+<code>BUILD_PLAN.md</code> phase status tracker · <code>CHANGELOG.md</code> Keep-a-Changelog · <code>BLUEPRINT_LOG.md</code>
+decision log · <code>CONTRIBUTING.md</code> · <code>CODE_OF_CONDUCT.md</code> · <code>SECURITY.md</code> vuln disclosure ·
+<code>LICENSE</code> Apache-2.0 · <code>LICENSES/ELv2.txt</code> reserved hosted-control-plane license ·
+<code>Makefile</code> build/test/bench/fuzz targets · <code>Cargo.toml</code> workspace manifest ·
+<code>rust-toolchain.toml</code> pinned toolchain · <code>Dockerfile</code> multi-stage build ·
+<code>docker-compose.yml</code> local cluster · <code>.dockerignore</code> · <code>.gitignore</code>.</p>
+<p><strong><code>.github/workflows/</code></strong>
+<code>ci.yml</code> build+unit+lint · <code>conformance.yml</code> twelve-corpora gate · <code>chaos.yml</code> fault
+injection · <code>security.yml</code> fuzzing+dependency audit · <code>release.yml</code> build/sign/SBOM/publish.</p>
+<p><strong><code>crates/obj-core/src/</code></strong>
+<code>lib.rs</code> · <code>bucket_id.rs</code> <code>BucketName</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-1">§11.1</a>) · <code>object_key.rs</code> <code>ObjectKey</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-1">§11.1</a>) ·
+<code>version_id.rs</code> <code>VersionId</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-1">§11.1</a>) · <code>etag.rs</code> <code>ETag</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-2">§11.2</a>) · <code>multipart.rs</code>
+<code>MultipartUploadId</code>/<code>PartNumber</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-3">§11.3</a>) · <code>manifest.rs</code> <code>ManifestEntry</code>/<code>ObjectManifest</code>
+(<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-4">§11.4</a>) · <code>durability.rs</code> <code>Durability</code>/<code>PlacementPlan</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-5">§11.5</a>) · <code>error.rs</code> shared error
+types.</p>
+<p><strong><code>crates/obj-proto/proto/</code></strong>
+<code>gateway.proto</code> · <code>metadata.proto</code> · <code>blob.proto</code> · <code>admin.proto</code> · <code>replication.proto</code>.</p>
+<p><strong><code>crates/obj-wal/</code></strong> delegates rank-71 <code>WriteAheadLog</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-14-2">§14.2</a>).</p>
+<p><strong><code>crates/obj-index/src/</code></strong>
+<code>lib.rs</code> · <code>bucket_index.rs</code> · <code>object_index.rs</code> · <code>version_index.rs</code> <code>VersionIndex</code>
+(<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-18-2">§18.2</a>) · <code>mpu_index.rs</code> · <code>policy_index.rs</code> · <code>placement.rs</code> <code>plan_ec_placement</code>/
+<code>plan_replicated_placement</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-14-2">§14.2</a>, <a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-15-2">§15.2</a>) · <code>lsm/memtable.rs</code> · <code>lsm/sstable.rs</code> ·
+<code>lsm/compactor.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/architecture/#sec-8-4">§8.4</a>) · <code>raft_state.rs</code> · <code>snapshot.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-14-3">§14.3</a>) · <code>rpc_server.rs</code>.</p>
+<p><strong><code>crates/obj-blob/src/</code></strong>
+<code>lib.rs</code> · <code>fragment_store.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/architecture/#sec-8-3">§8.3</a>) · <code>bitrot.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-4">I4</a>) · <code>gc_local.rs</code> · <code>scrub.rs</code> ·
+<code>rpc_server.rs</code>.</p>
+<p><strong><code>crates/obj-ec/</code></strong> delegates <a class="cite" href="/system-design-blueprints/systems/erasure-coding/" title="Erasure Coding (Reed-Solomon)">rank-108</a> <code>ReedSolomon</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-15-2">§15.2</a>).</p>
+<p><strong><code>crates/obj-replication/</code></strong> <code>ReplicationWorker</code>, queue (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-20-2">§20.2</a>).</p>
+<p><strong><code>crates/obj-gateway-s3/src/</code></strong>
+<code>lib.rs</code> · <code>main.rs</code> · <code>router.rs</code> · <code>handlers_object.rs</code> · <code>handlers_bucket.rs</code> ·
+<code>handlers_multipart.rs</code> · <code>handlers_admin.rs</code> · <code>range_parser.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-13-2">§13.2</a>) ·
+<code>conditional.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-22-2">§22.2</a>) · <code>error_xml.rs</code> · <code>listing.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-13-2">§13.2</a>).</p>
+<p><strong><code>crates/obj-sigv4/src/</code></strong>
+<code>lib.rs</code> · <code>canonical_request.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-17-2">§17.2</a>) · <code>string_to_sign.rs</code> · <code>signing_key.rs</code> ·
+<code>verifier.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-12">I12</a>) · <code>presigned.rs</code>. <code>fuzz/</code> fuzz targets for the canonical-request
+parser.</p>
+<p><strong><code>crates/obj-lifecycle/</code></strong> <code>LifecycleWorker</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-19-2">§19.2</a>).</p>
+<p><strong><code>crates/obj-versioning/</code></strong> version-ladder + delete-marker state machine (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-18-2">§18.2</a>).</p>
+<p><strong><code>crates/obj-gc/</code></strong> stale-version + orphan-fragment collector (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-10">I10</a>, <a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-23-2">§23.2</a>).</p>
+<p><strong><code>crates/obj-scrub/</code></strong> background scrubber (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-23-2">§23.2</a>).</p>
+<p><strong><code>crates/obj-tier/</code></strong> hot/cold tiered-transition worker (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-19-2">§19.2</a>).</p>
+<p><strong><code>crates/obj-tls/</code></strong> delegates rank-50 TLS.</p>
+<p><strong><code>crates/obj-raft/</code></strong> delegates rank-39 Raft.</p>
+<p><strong><code>crates/obj-metrics/</code></strong> OpenTelemetry + Prometheus integration (<a class="cite" href="/system-design-blueprints/systems/object-storage/trade-offs/#adr-17">ADR-17</a>).</p>
+<p><strong><code>crates/obj-conformance/</code></strong> conformance buckets + runner (below).</p>
+<p><strong><code>crates/obj-cli/</code></strong> the <code>obs</code> CLI (<code>ls</code>, <code>cp</code>, <code>cat</code>, <code>fsck</code>, <code>admin</code>).</p>
+<p><strong><code>crates/obj-admin/</code></strong> admin REST surface (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-23-2">§23.2</a>).</p>
+<p><strong><code>crates/obj-bin/</code></strong> binary entry points (gateway + node <code>main.rs</code> files).</p>
+<p><strong><code>conformance/</code></strong>
+<code>runner/src/main.rs</code> · <code>bucket.rs</code> · <code>report.rs</code> · <code>assert.rs</code> · <code>fixtures.rs</code> ·
+<code>chaos.rs</code> · <code>replay.rs</code> · <code>corpora/{core_types,bucket_ops,object_io,range_io,multipart, versioning,lifecycle,replication,sigv4,ec_pool,object_lock,chaos}/</code> twelve fixture corpora
+(<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-10-2">§10.2</a>, <a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-28">§28</a>) · <code>report_schema.json</code>.</p>
+<p><strong><code>benchmarks/</code></strong>
+<code>put_throughput.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/numbers/#m-1">M1</a>) · <code>get_throughput.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/numbers/#m-2">M2</a>) · <code>multipart_finalise_latency.rs</code> ·
+<code>listing_v2_pagination.rs</code> · <code>sigv4_verify_throughput.rs</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/numbers/#m-7">M7</a>) · <code>results/</code> recorded runs.</p>
+<p><strong><code>fuzz/</code></strong>
+<code>sigv4_canonical_request.rs</code> · <code>range_header_parser.rs</code> · <code>multipart_complete_body.rs</code>.</p>
+<p><strong><code>docs/</code></strong>
+<code>adr/</code> one file per <a class="cite" href="/system-design-blueprints/systems/object-storage/trade-offs/#adr-1">ADR-01</a>..ADR-25 · <code>runbooks/{triage,multipart-leaks,orphan-fragments, gateway-saturation,replication-lag}.md</code> · <code>threat-model/threat-model.md</code> (source for <a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#sec-24">§24</a>) ·
+<code>performance/performance-baseline.md</code> (source for <a class="cite" href="/system-design-blueprints/systems/object-storage/numbers/#sec-30">§30</a>) ·
+<code>failure-analysis/postmortem-template-application.md</code> · <code>api/openapi.yaml</code> (admin) ·
+<code>api/s3-subset.md</code> documented S3 subset · <code>sdk/</code> generated client reference.</p>
+<p><strong><code>examples/</code></strong>
+<code>hello-bucket.md</code> · <code>multipart-upload.md</code> · <code>versioning.md</code> · <code>ec-pool.md</code> ·
+<code>replication.md</code> · <code>object-lock.md</code>.</p>
+<p><strong><code>templates/</code></strong>
+<code>adr.md</code> · <code>postmortem.md</code> · <code>rfc.md</code> · <code>runbook.md</code> · <code>bucket-policy.md</code>.</p>
+<p><strong><code>scripts/</code></strong>
+<code>bootstrap.sh</code> · <code>gen-proto.sh</code> · <code>load-test.sh</code> · <code>release-check.sh</code>.</p>
+<p><strong><code>tools/</code></strong> <code>fixture-gen/</code> conformance fixture generator CLI.</p>
+<p><strong><code>notes/</code></strong> <code>sigv4-fixtures/</code> non-normative working notes.</p>
+<p><strong><code>papers/</code></strong> <code>whitepaper/whitepaper-v1.0.md</code>.</p>
+<p><strong><code>legal/</code></strong> <code>terms.md</code> · <code>privacy.md</code> · <code>dpa.md</code> · <code>aup.md</code>.</p>
+<p><strong><code>brand/</code></strong> <code>voice.md</code> · <code>typography.md</code> · <code>palette.md</code>.</p>
+<p><strong><code>ops/</code></strong> <code>prometheus.yml</code> · <code>grafana-dashboards/</code> · <code>helm/</code> · <code>terraform/</code> · <code>k8s/</code>.</p>
+<hr>
+</section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

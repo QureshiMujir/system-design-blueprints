@@ -1,0 +1,804 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Parallel Compute Scheduler from Scratch · Engineering Blueprints</title><meta name="description" content="Parallel Compute Scheduler from Scratch, plain words. A single-process, multi-core, NUMA-aware CPU-bound parallel task scheduler written in Rust. The scheduler provides a fixed pool of OS worker threads each owning a lock-free Chase-Lev double-ended…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <span aria-current="page">Parallel Compute Scheduler from Scratch</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Parallel Compute Scheduler from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~28 weeks</li> <li>4,740 lines</li> <li>blueprint #352</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/parallel-compute-scheduler/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/parallel-compute-scheduler/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/parallel-compute-scheduler/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/parallel-compute-scheduler/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/parallel-compute-scheduler/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/parallel-compute-scheduler/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/parallel-compute-scheduler/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/parallel-compute-scheduler/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/parallel-compute-scheduler/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Parallel Compute Scheduler from Scratch">  <p class="note warn">
+The <strong>plain-words page for this system has not been written yet</strong>. Below is the architecture overview taken
+        straight from the blueprint; the other tabs are generated from the blueprint too.
+</p> <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Diagram</h3>
+<pre class="diagram"><code>                user code: spawn / join / scope / parallel_for / task graph
+                                       |
+  +-------------------------------------------------------------------------+
+  |                          ThreadPool (pcs-pool)                          |
+  |   hardware topology / NUMA domains / CpuSet affinity / Injector (global) |
+  |                                                                         |
+  |   Worker 0            Worker 1                       Worker N-1          |
+  |  +-----------+       +-----------+                  +-----------+        |
+  |  | Chase-Lev |       | Chase-Lev |                  | Chase-Lev |        |
+  |  | deque     |       | deque     |       ...        | deque     |        |
+  |  | LIFO pop  |       |           |                  |           |        |
+  |  | (owner)   |&lt;------+ steal FIFO +-----------------&gt;|           |        |
+  |  |           | steal   (thief; victim select; rng)   |           |        |
+  |  +-----+-----+       +-----+-----+                  +-----+-----+        |
+  |        | run task          | run task                     | run task     |
+  +-------------------------------------------------------------------------+
+        ^                       ^                              ^
+        | fork-join             | data-parallel                | DAG ready-set
+  +-----+-------+      +---------+---------+         +----------+-----------+
+  | Scope/join  |      | parallel_for /    |         | TaskGraph (pcs-graph)|
+  | (pcs-       |      | map/reduce/scan   |         | deps -&gt; pending_deps |
+  |  parallel)  |      | splitters         |         | -&gt; Ready -&gt; deque    |
+  +-------------+      +-------------------+         +----------------------+
+        |                                                     
+        v                                                     
+  +-------------------+     +-----------------------+
+  | Future / Promise  |     | StealStats / metrics  |
+  | Latch / Barrier   |     | task trace -&gt; flame   |
+  | (pcs-sync)        |     | (pcs-metrics/trace)   |
+  +-------------------+     +-----------------------+</code></pre>
+<h3 id="sec-3-2">3.2 Subsystem Descriptions</h3>
+<p><strong>ThreadPool / pcs-pool.</strong> Central coordinator. Owns N worker thread handles, a global <code>Injector&lt;Task&gt;</code> for external/overflow submissions, <code>PoolConfig</code> (thread count, stack size, <code>SchedPolicy</code>, affinity), and the result of hardware topology detection (<code>CpuTopology</code>: core IDs, NUMA node membership, cache sizes). Data in: <code>Task</code> submissions from user code and from the <code>Injector</code>. Data out: tasks distributed to per-worker deques; wakeup signals to parked workers. Concurrency boundary: <code>Injector</code> is MPMC; topology is read-only after construction; worker handles are owned exclusively. No persistence boundary; pool state is purely in-process.</p>
+<p><strong>Worker / pcs-worker.</strong> One OS thread per worker, pinned to a physical core via <code>CpuSet</code>. Owns a <code>ChaseLevDeque&lt;Task&gt;</code> (local deque, private push/pop); holds an array of <code>Stealer&lt;Task&gt;</code> handles into every other worker&#39;s deque. Execution loop: pop own deque (LIFO) → try steal from a victim (FIFO, victim chosen by XorShift RNG biased to NUMA-local peers) → park (OS futex) on empty. Unparked by the thread that pushes a task. Thread-local <code>CURRENT_WORKER: *const Worker</code> for fast self-identification during recursive spawns. Concurrency boundary: deque <code>Bottom</code> is accessed only by owner; <code>Top</code> is contested by thieves via CAS.</p>
+<p><strong>ChaseLevDeque / pcs-deque.</strong> Lock-free circular buffer of task pointers. <code>Bottom: AtomicUsize</code> (owner&#39;s write cursor), <code>Top: AtomicUsize</code> (thieves&#39; steal cursor, monotonically increasing). Owner push: write slot, <code>Release</code> fence, increment <code>Bottom</code>. Owner pop (LIFO): decrement <code>Bottom</code> tentatively, <code>SeqCst</code> fence to race with steals, CAS on <code>Top</code> only if single-element contention. Thief steal (FIFO): read slot at <code>Top</code>, CAS <code>Top</code> from old to old+1; fails → retry or abort. Growable: when <code>Bottom - Top == capacity</code>, allocate 2× buffer, copy, publish via <code>AtomicPtr</code>; old buffer deferred-freed when all stealers have passed the epoch. ABA prevented because <code>Top</code> is monotonically increasing (never wraps in practice for <code>u64</code>). Data in: <code>Task</code> pushed by owner or injected. Data out: <code>Task</code> popped by owner or stolen by thief.</p>
+<p><strong>pcs-graph / TaskGraph.</strong> Maintains a DAG of <code>GraphNode</code> entries. Each node: <code>{ task: Task, pending_deps: AtomicUsize, successors: SmallVec&lt;NodeId&gt; }</code>. <code>add_edge(pred, succ)</code> increments <code>succ.pending_deps</code>. On <code>pred</code> completion, for each successor decrement <code>pending_deps</code>; if it reaches 0, push to the completing worker&#39;s local deque (locality hint). Cycle detection at <code>add_edge</code> time via DFS reachability check (offline, before execution). Completion latch signals when all nodes are Done. Data in: node insertion + edge insertion; task-done notifications from worker loop. Data out: Ready tasks pushed to worker deques.</p>
+<p><strong>pcs-parallel / Scope + Data-parallel.</strong> <code>Scope&lt;&#39;s&gt;</code> borrows the calling stack frame&#39;s lifetime; <code>spawn</code> pushes a task carrying a <code>&#39;s</code>-scoped closure; <code>Scope::wait</code> blocks until <code>pending: AtomicUsize</code> reaches 0 (using <code>Latch</code>). Panic in any scope task poisons the scope; <code>wait</code> re-raises via <code>std::panic::resume_unwind</code>. <code>ParallelIterator</code> wraps a <code>Producer</code> (range or slice) with <code>split_at(mid) -&gt; (L, R)</code>; recursive halving spawns right half, processes left half; leaf threshold controlled by <code>SchedPolicy</code>. Adaptive: if steal pressure is low (deque non-empty), split coarser. Data in: user closures + data ranges. Data out: tasks pushed to local deque; results collected into output buffer or reduction accumulator.</p>
+<p><strong>pcs-sync / Future + primitives.</strong> <code>Promise&lt;T&gt;</code> is the write end (fulfills one <code>Future&lt;T&gt;</code>). <code>Future&lt;T&gt;::wait</code> does not block the OS thread: it runs tasks from the local deque (work-helping) until the latch fires. <code>Latch</code> = <code>AtomicUsize</code> counting down to 0 with a parked-waiters list. <code>Barrier</code> coordinates N parties. <code>WaitGroup</code> tracks in-flight task count for pool quiescence. Concurrency boundary: <code>Promise::fulfill</code> is a once-write; <code>Future::wait</code> is poll-then-help loop with no spinlock.</p>
+<p><strong>pcs-sched / SchedPolicy.</strong> Stateless policy object consulted by the worker loop at three decision points: (1) victim selection order (random, NUMA-local-first, round-robin); (2) continuation disposition (work-first: push continuation, run child; help-first: push child, run continuation); (3) granularity threshold for splitters. Owns no mutable state; parameterized by <code>PoolConfig::policy</code>. SchedPolicy is chosen at pool construction time and does not change at runtime (no dynamic adaptation yet; deferred to Phase 7 adaptive tuning).</p>
+<p><strong>pcs-numa / NUMA domains.</strong> Groups workers into <code>NumaDomain</code> sets based on topology query (<code>hwloc</code> or <code>/sys/devices/system/node</code>). Each domain has its own sub-injector for locality-preserving overflow. <code>Worker::steal</code> tries within-domain stealers first (<code>numa_local_stealers</code>), then cross-domain (<code>remote_stealers</code>), reducing cross-socket cache-coherence traffic. Allocation hint: task closures allocated on the worker&#39;s NUMA node (<code>numactl</code>-style). Data flow: topology is immutable after pool construction; domain membership encoded in <code>Worker::numa: NumaNode</code>.</p>
+<p><strong>pcs-metrics / pcs-trace.</strong> <code>SchedMetrics</code>: per-worker <code>StealStats</code> (<code>steals_attempted</code>, <code>steals_won</code>, <code>tasks_run</code>, <code>park_count</code>, <code>idle_ns</code>) stored as <code>AtomicU64</code>; aggregated on demand via <code>metrics_snapshot()</code>. Per-task spans in <code>pcs-trace</code> capture <code>(task_id, worker_id, enqueue_ns, start_ns, done_ns)</code>; written to a ring buffer; flushed to flamegraph JSON on demand. Sampling flag (<code>TRACE_SAMPLE_RATE</code>) controls overhead: 0 = disabled, 1 = every task, N = 1-in-N. Concurrency boundary: all metrics writes are atomic; trace ring buffer is per-worker (no contention on write path).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Core Entity Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Module</th>
+<th>Cardinality</th>
+<th>Owned By</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Task</code></td>
+<td>pcs-core</td>
+<td>one per spawned closure</td>
+<td><code>ChaseLevDeque</code> or <code>Injector</code></td>
+</tr>
+<tr>
+<td><code>TaskId</code></td>
+<td>pcs-core</td>
+<td>unique u64, monotonic</td>
+<td>pool-global counter</td>
+</tr>
+<tr>
+<td><code>TaskState</code></td>
+<td>pcs-core</td>
+<td>per <code>Task</code></td>
+<td><code>AtomicTaskState</code> inside <code>Task</code></td>
+</tr>
+<tr>
+<td><code>ChaseLevDeque&lt;Task&gt;</code></td>
+<td>pcs-deque</td>
+<td>one per <code>Worker</code></td>
+<td><code>Worker</code> struct</td>
+</tr>
+<tr>
+<td><code>Stealer&lt;Task&gt;</code></td>
+<td>pcs-deque</td>
+<td>N-1 clones per worker</td>
+<td><code>Worker.stealers[]</code></td>
+</tr>
+<tr>
+<td><code>Worker</code></td>
+<td>pcs-worker</td>
+<td>one per thread</td>
+<td><code>ThreadPool</code></td>
+</tr>
+<tr>
+<td><code>Injector&lt;Task&gt;</code></td>
+<td>pcs-pool</td>
+<td>one per pool (global)</td>
+<td><code>ThreadPool</code></td>
+</tr>
+<tr>
+<td><code>ThreadPool</code></td>
+<td>pcs-pool</td>
+<td>one per process</td>
+<td>caller</td>
+</tr>
+<tr>
+<td><code>GraphNode</code></td>
+<td>pcs-graph</td>
+<td>one per DAG task</td>
+<td><code>TaskGraph</code></td>
+</tr>
+<tr>
+<td><code>Dependency</code></td>
+<td>pcs-graph</td>
+<td>one per DAG edge</td>
+<td><code>TaskGraph</code></td>
+</tr>
+<tr>
+<td><code>Scope&lt;&#39;s&gt;</code></td>
+<td>pcs-parallel</td>
+<td>stack-lifetime</td>
+<td>calling thread</td>
+</tr>
+<tr>
+<td><code>Future&lt;T&gt;</code> / <code>Promise&lt;T&gt;</code></td>
+<td>pcs-sync</td>
+<td>paired 1:1</td>
+<td>task result path</td>
+</tr>
+<tr>
+<td><code>Latch</code> / <code>Barrier</code> / <code>WaitGroup</code></td>
+<td>pcs-sync</td>
+<td>shared refs</td>
+<td>joining parties</td>
+</tr>
+<tr>
+<td><code>ParallelIterator</code> / <code>Producer</code></td>
+<td>pcs-parallel</td>
+<td>transient</td>
+<td>data-parallel call site</td>
+</tr>
+<tr>
+<td><code>SchedMetrics</code> / <code>StealStats</code></td>
+<td>pcs-metrics</td>
+<td>one per worker</td>
+<td><code>Worker</code></td>
+</tr>
+<tr>
+<td><code>NumaNode</code></td>
+<td>pcs-numa</td>
+<td>one per domain</td>
+<td>topology detection</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-8-2">8.2 TaskState Machine</h3>
+<pre class="diagram"><code>        spawn()
+  [external] ──────► Pending
+                        │
+         deps satisfied │ (or no deps)
+                        ▼
+               ┌──── Ready ◄───── pending_deps == 0 (DAG node)
+               │        │
+    stolen or  │  pop()  │ steal()
+    own pop()  │         │
+               └────────►Running
+                            │
+              ┌─────────────┼──────────────┐
+          panic            Done         cancelled
+              │             │               │
+              ▼             ▼               ▼
+          Panicked        Done           Cancelled</code></pre>
+<p>State-transition table (all transitions are CAS on <code>AtomicTaskState</code>; failed CAS = thief races, retry or drop):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>To</th>
+<th>Trigger</th>
+<th>Actor</th>
+<th>Invariant</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Pending</td>
+<td>Ready</td>
+<td>deps decremented to 0</td>
+<td>completing predecessor</td>
+<td><a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-5">I5</a></td>
+</tr>
+<tr>
+<td>Pending</td>
+<td>Ready</td>
+<td>no deps on spawn</td>
+<td>spawning thread</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Ready</td>
+<td>Running</td>
+<td>pop() or steal() wins</td>
+<td>owner or thief</td>
+<td><a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-1">I1</a></td>
+</tr>
+<tr>
+<td>Running</td>
+<td>Done</td>
+<td>closure returns</td>
+<td>executing worker</td>
+<td><a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-3">I3</a></td>
+</tr>
+<tr>
+<td>Running</td>
+<td>Panicked</td>
+<td>closure panics</td>
+<td>executing worker</td>
+<td><a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-7">I7</a></td>
+</tr>
+<tr>
+<td>Running</td>
+<td>Cancelled</td>
+<td>cancellation token checked</td>
+<td>executing worker</td>
+<td><a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-11">I11</a></td>
+</tr>
+<tr>
+<td>Panicked</td>
+<td>—</td>
+<td>terminal</td>
+<td>—</td>
+<td><a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-7">I7</a> propagated at Scope</td>
+</tr>
+<tr>
+<td>Done</td>
+<td>—</td>
+<td>terminal</td>
+<td>—</td>
+<td><a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-3">I3</a></td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-8-3">8.3 Chase-Lev Deque Memory Layout</h3>
+<pre class="diagram"><code>  ChaseLevDeque&lt;T&gt;
+  ┌──────────────────────────────────────────────────────┐
+  │  bottom: AtomicIsize   (owner pushes here; wraps mod capacity) │
+  │  top:    AtomicIsize   (thieves steal from here; monotonic)    │
+  │  buf:    AtomicPtr&lt;CircularBuf&lt;T&gt;&gt;  (resized via new alloc)    │
+  └──────────────────────────────────────────────────────┘
+
+  CircularBuf&lt;T&gt;
+  ┌──────────────────────────────────┐
+  │  capacity: usize  (power of 2)   │
+  │  data: [UnsafeCell&lt;T&gt;; capacity] │
+  └──────────────────────────────────┘</code></pre>
+<p>Access semantics:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Actor</th>
+<th>Order</th>
+<th>Returns</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>push(t)</code></td>
+<td>owner</td>
+<td>Release on <code>bottom</code></td>
+<td><code>()</code></td>
+<td>Grow if <code>bottom-top &gt;= capacity</code>; allocate new buf, copy, swap ptr (Release), update bottom</td>
+</tr>
+<tr>
+<td><code>pop()</code></td>
+<td>owner</td>
+<td>SeqCst on <code>bottom</code> decrement, Acquire-load <code>top</code></td>
+<td><code>Option&lt;T&gt;</code></td>
+<td>LIFO; if <code>bottom &lt;= top</code> after decrement, CAS top (last item race with thief)</td>
+</tr>
+<tr>
+<td><code>steal()</code></td>
+<td>thief</td>
+<td>Acquire <code>top</code>, SeqCst CAS</td>
+<td><code>Option&lt;T&gt;</code></td>
+<td>FIFO; CAS <code>top</code> from observed to <code>+1</code>; fails if another thief wins or owner empties</td>
+</tr>
+</tbody></table></div>
+<p>ABA prevention: <code>top</code> is monotonically increasing (never reset); old top values cannot recur within a deque&#39;s lifetime.</p>
+<p>Memory ordering matches Le et al. (PPoPP 2013): <code>push</code> uses <code>Release</code> on <code>bottom</code>; <code>steal</code> uses <code>Acquire</code> on <code>top</code>, <code>SeqCst</code> CAS; <code>pop</code> uses <code>SeqCst</code> on <code>bottom</code> to fence against concurrent steals.</p>
+<hr>
+<h3 id="sec-8-4">8.4 Worker Loop State Machine</h3>
+<pre class="diagram"><code>  ┌──────────────┐
+  │  poll_local  │◄────────────────────────────────────┐
+  └──────┬───────┘                                     │
+         │ local deque empty                           │ task done
+         ▼                                             │
+  ┌──────────────┐  found task ┌──────────────┐        │
+  │  try_steal   │────────────►│  run_task    │────────┘
+  └──────┬───────┘             └──────────────┘
+         │ all victims empty
+         ▼
+  ┌──────────────────────┐
+  │  check_injector      │─── found ──► push to local ──► poll_local
+  └──────┬───────────────┘
+         │ still empty
+         ▼
+  ┌──────────────────────┐
+  │  exponential_backoff │  (spin N yields, then park)
+  └──────┬───────────────┘
+         │ parked
+         ▼
+  ┌──────────────────────┐
+  │  parked (futex/condvar) │◄── unpark() on new task submission
+  └──────────────────────┘</code></pre>
+<p>Victim selection order (SchedPolicy):</p>
+<ol>
+<li><code>LocalityAware</code>: own-NUMA workers (shuffled by XorShift RNG), then cross-NUMA workers.</li>
+<li><code>WorkFirst</code>: random uniform over all workers.</li>
+<li><code>HelpFirst</code>: prioritize workers with deepest queues (sample two, pick max).</li>
+</ol>
+<hr>
+<h3 id="sec-8-5">8.5 Fork-Join Execution Model</h3>
+<p><strong>join(a, b)</strong> — work-first semantics:</p>
+<pre class="diagram"><code>  thread T:  push(b) → run(a)
+               │            │
+               │         a done → pop(b) [if still on deque] → run(b)
+               │                 OR b stolen by T&#39; → T runs other tasks
+               │                                    → T waits via Latch
+               ▼
+             join returns after both Done</code></pre>
+<p><strong>Scope&lt;&#39;s&gt;</strong> lifetime contract:</p>
+<pre class="diagram"><code>  scope_enter: allocate Scope on stack; latch count = 0
+     │
+     ├─ spawn(f): latch.increment(); push Task(f) to local deque
+     │
+     └─ scope_exit: latch.wait()
+          → executing worker runs other tasks while waiting (no idle block)
+          → last task Done: latch.decrement_to_zero() → unblock scope owner</code></pre>
+<p>Panic capture: each task&#39;s closure wrapped in <code>catch_unwind</code>; panic payload stored in <code>Task.panic_payload: Option&lt;Box&lt;dyn Any&gt;&gt;</code>; re-raised at <code>scope_exit</code> after all tasks terminate (<a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-8">I8</a>).</p>
+<hr>
+<h3 id="sec-8-6">8.6 Task DAG Model</h3>
+<p>EBNF for DAG construction:</p>
+<pre class="code language-ebnf" data-lang="ebnf"><code>graph      ::= &#39;TaskGraph::new()&#39; { node_decl | edge_decl } &#39;graph.submit(pool)&#39;
+node_decl  ::= &#39;graph.add_node(task_fn)&#39; &#39;-&gt;&#39; &#39;NodeId&#39;
+edge_decl  ::= &#39;graph.add_edge(pred: NodeId, succ: NodeId)&#39;</code></pre>
+<p>Internal node state:</p>
+<pre class="diagram"><code>GraphNode {
+  task:         Task,
+  pending_deps: AtomicUsize,   // decremented by each completing predecessor
+  successors:   Vec&lt;NodeId&gt;,   // notified on this node&#39;s completion
+}</code></pre>
+<p>Readiness propagation (per-node on completion): for each successor in the completing node&#39;s <code>successors</code> list, the runtime performs an <code>AcqRel fetch_sub(1)</code> on that successor&#39;s <code>pending_deps</code>. Whichever decrement observes the return value <code>1</code> (meaning it drove the counter from 1 to 0 — the last outstanding dependency) is the sole decrement that pushes the successor&#39;s task to a worker deque, preferring the completing worker&#39;s own deque for locality (MM8). All other decrements return a value greater than 1 and take no further action, so the push happens exactly once with no lock or secondary check.</p>
+<p>Cycle detection: topological sort at <code>graph.submit()</code>; reject if no ordering exists (return <code>Err(CycleError)</code>).</p>
+<p>Completion latch: <code>TaskGraph</code> owns a <code>Latch</code>; the final node&#39;s completion fires it; <code>graph.wait()</code> participates in scheduling while waiting.</p>
+<hr>
+<h3 id="sec-8-7">8.7 Data-Parallel Splitter Model</h3>
+<div class="filetree" role="tree"><ul><li class="ft-dir"><details open><summary><span class="ft-name">Producer&lt;T&gt;</span></summary><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">len() -&gt; usize</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">split_at(mid: usize) -&gt; (Producer&lt;T&gt;, Producer&lt;T&gt;)   // must be cheap O(1)</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">into_iter() -&gt; impl Iterator&lt;Item=T&gt;                  // leaf execution</span></span></li></ul></details></li></ul></div>
+<p>Recursive halving: the splitter compares the producer&#39;s remaining length against the granularity threshold. At or below threshold, it runs the leaf sequentially by handing the producer&#39;s iterator directly to the user closure <code>f</code>. Above threshold, it splits the producer at its midpoint into a left and right half and recurses on both halves through <code>join</code> — the left half runs on the spawning worker (work-first, <a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/trade-offs/#adr-21">ADR-21</a>) while the right half is exposed on the deque for stealing. Recursion bottoms out only when every leaf has reached the threshold, so the tree depth is <code>O(log(total_len / threshold))</code>.</p>
+<p>Granularity threshold: <code>max(MIN_GRAIN, total_len / (num_threads * OVERDECOMPOSE_FACTOR))</code>; default <code>OVERDECOMPOSE_FACTOR = 8</code> (P6).</p>
+<p>Adaptive splitting: if steal pressure detected (steal_ratio &gt; 0.5 in last epoch), lower threshold by 25%; if low pressure, raise by 10% (bounded by <code>[MIN_GRAIN, MAX_GRAIN]</code>).</p>
+<p>Primitives and associativity requirements:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Primitive</th>
+<th>Combiner constraint</th>
+<th>Output</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>parallel_for</code></td>
+<td>none (side-effectful)</td>
+<td><code>()</code></td>
+</tr>
+<tr>
+<td><code>parallel_map</code></td>
+<td>none</td>
+<td><code>Vec&lt;B&gt;</code></td>
+</tr>
+<tr>
+<td><code>parallel_reduce</code></td>
+<td>associative, identity required</td>
+<td><code>T</code></td>
+</tr>
+<tr>
+<td><code>parallel_scan</code></td>
+<td>associative, identity required</td>
+<td><code>Vec&lt;T&gt;</code> (prefix sums)</td>
+</tr>
+</tbody></table></div>
+<p><a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-9">I9</a>: <code>parallel_reduce</code> result equals sequential left-fold for associative operators; float reassociation documented as non-default.</p>
+<hr>
+<h3 id="sec-8-8">8.8 Future / Promise Ownership Model</h3>
+<pre class="diagram"><code>Promise&lt;T&gt;  ──write-once──►  inner: Arc&lt;PromiseInner&lt;T&gt;&gt;
+Future&lt;T&gt;   ──read──────────►  inner: Arc&lt;PromiseInner&lt;T&gt;&gt;
+
+PromiseInner&lt;T&gt; {
+    value:   UnsafeCell&lt;Option&lt;T&gt;&gt;,
+    state:   AtomicU8,          // 0=Pending, 1=Fulfilled, 2=Panicked
+    waiter:  AtomicPtr&lt;Latch&gt;,  // registered by Future::wait()
+    conts:   Mutex&lt;Vec&lt;Task&gt;&gt;,  // continuation tasks chained post-fulfill
+}</code></pre>
+<p><code>Future::wait()</code> contract: does not block the OS thread; instead, the waiting worker runs other tasks from its deque until the <code>PromiseInner.state</code> transitions to Fulfilled/Panicked (spin + park via the embedded Latch).</p>
+<p>Continuation chaining: <code>future.then(|val| ...)</code> registers a <code>Task</code> in <code>conts</code>; on fulfillment all conts are pushed to the fulfilling worker&#39;s deque (locality).</p>
+<hr>
+<h3 id="sec-8-9">8.9 Sync Primitives Semantics</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Primitive</th>
+<th>Count direction</th>
+<th>Release trigger</th>
+<th>Wait behavior</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Latch</code></td>
+<td>decrement to 0</td>
+<td><code>count == 0</code></td>
+<td>participating (runs tasks)</td>
+</tr>
+<tr>
+<td><code>Barrier</code></td>
+<td>increment to N</td>
+<td>all N arrive</td>
+<td>participating</td>
+</tr>
+<tr>
+<td><code>WaitGroup</code></td>
+<td>decrement to 0</td>
+<td><code>count == 0</code></td>
+<td>participating</td>
+</tr>
+</tbody></table></div>
+<p>&quot;Participating wait&quot;: the blocking worker does not park the OS thread; it polls its local deque and attempts steals until the condition is satisfied.</p>
+<hr>
+<h3 id="sec-8-10">8.10 NUMA Domain Model</h3>
+<pre class="diagram"><code>NumaNode {
+    id:        u32,
+    workers:   Vec&lt;WorkerId&gt;,
+    injector:  Injector&lt;Task&gt;,    // per-domain overflow queue
+    memory:    MemoryBinding,     // OS NUMA memory policy handle
+}</code></pre>
+<p>Steal order (<a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-9">I9</a> in context of Phase 9):</p>
+<ol>
+<li>Own worker&#39;s deque (local pop).</li>
+<li>Other workers in same <code>NumaNode</code> (local steal).</li>
+<li>Per-domain <code>Injector</code> (global domain queue).</li>
+<li>Workers in other <code>NumaNode</code>s (remote steal — last resort).</li>
+</ol>
+<p>Memory binding: <code>TaskData</code> allocated via <code>NumaAllocator</code> that calls <code>mbind</code>/<code>set_mempolicy</code> on Linux to pin data pages to the local NUMA node.</p>
+<hr>
+<h3 id="sec-8-11">8.11 Scheduling Metrics Layout (Storage / Wire)</h3>
+<p>Per-worker atomic counters (no lock; read by sampling thread for aggregation):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Semantics</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>tasks_run</code></td>
+<td><code>AtomicU64</code></td>
+<td>total tasks executed by this worker</td>
+</tr>
+<tr>
+<td><code>steals_attempted</code></td>
+<td><code>AtomicU64</code></td>
+<td>steal attempts (including failed)</td>
+</tr>
+<tr>
+<td><code>steals_won</code></td>
+<td><code>AtomicU64</code></td>
+<td>successful steals</td>
+</tr>
+<tr>
+<td><code>park_count</code></td>
+<td><code>AtomicU64</code></td>
+<td>times worker parked</td>
+</tr>
+<tr>
+<td><code>idle_ns</code></td>
+<td><code>AtomicU64</code></td>
+<td>cumulative nanoseconds parked</td>
+</tr>
+<tr>
+<td><code>deque_depth_max</code></td>
+<td><code>AtomicUsize</code></td>
+<td>high-water mark of local deque depth</td>
+</tr>
+<tr>
+<td><code>task_latency_sum_ns</code></td>
+<td><code>AtomicU64</code></td>
+<td>sum of (done_time - ready_time)</td>
+</tr>
+<tr>
+<td><code>task_latency_count</code></td>
+<td><code>AtomicU64</code></td>
+<td>sample count for latency avg</td>
+</tr>
+</tbody></table></div>
+<p>Export format (pcs-metrics → pcs-trace):</p>
+<pre class="diagram"><code>MetricsSnapshot {
+    timestamp_ns: u64,
+    workers: Vec&lt;WorkerSnapshot&gt;,    // per-worker counters
+    pool_injector_depth: usize,
+    numa_steal_cross: u64,
+}</code></pre>
+<p>Serialized as newline-delimited JSON for prometheus scrape or file export; binary format: little-endian packed struct for low-overhead sampling.</p>
+<hr>
+<h3 id="sec-8-12">8.12 Trace Event Layout (pcs-trace)</h3>
+<p>Event types (stored in a ring buffer per worker; exported on demand):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Event</th>
+<th>Fields</th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>TaskSpawn</code></td>
+<td><code>task_id, parent_id, worker_id, ts_ns</code></td>
+<td>spawn / push</td>
+</tr>
+<tr>
+<td><code>TaskStart</code></td>
+<td><code>task_id, worker_id, ts_ns</code></td>
+<td>pop() or steal() → Running</td>
+</tr>
+<tr>
+<td><code>TaskDone</code></td>
+<td><code>task_id, worker_id, ts_ns, duration_ns</code></td>
+<td>closure returns</td>
+</tr>
+<tr>
+<td><code>TaskStolen</code></td>
+<td><code>task_id, thief_id, victim_id, ts_ns</code></td>
+<td>steal() CAS wins</td>
+</tr>
+<tr>
+<td><code>TaskPanicked</code></td>
+<td><code>task_id, worker_id, ts_ns</code></td>
+<td>catch_unwind catches</td>
+</tr>
+<tr>
+<td><code>WorkerParked</code></td>
+<td><code>worker_id, ts_ns</code></td>
+<td>park() call</td>
+</tr>
+<tr>
+<td><code>WorkerUnparked</code></td>
+<td><code>worker_id, ts_ns, trigger_task_id</code></td>
+<td>unpark() call</td>
+</tr>
+<tr>
+<td><code>ScopeEnter</code></td>
+<td><code>scope_id, worker_id, ts_ns</code></td>
+<td>Scope created</td>
+</tr>
+<tr>
+<td><code>ScopeExit</code></td>
+<td><code>scope_id, worker_id, ts_ns, task_count</code></td>
+<td>Scope drops</td>
+</tr>
+</tbody></table></div>
+<p>Flamegraph export: <code>SpawnTree</code> reconstructed from <code>(parent_id → child_ids)</code> edges in <code>TaskSpawn</code> events; rendered as Brendan Gregg folded-stack format for <code>inferno-flamegraph</code>.</p>
+<p>Ring buffer: lock-free SPSC (one producer = owning worker, one consumer = trace export thread); capacity configurable (default 65536 events); overflow = oldest event dropped + drop counter incremented.</p>
+<hr>
+<h3 id="sec-8-13">8.13 Worked Example — Fork-Join Parallel Mergesort</h3>
+<p>The caller opens one scope (<code>pool.spawn_scope</code>) and spawns a single top-level sort task covering the whole array. That task&#39;s recursive step checks its own span against <code>GRAIN</code>: at or below the threshold it falls back to a sequential insertion sort and returns immediately; above threshold it computes the midpoint and issues one <code>join</code> of two recursive halves. Per the work-first policy (<a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/trade-offs/#adr-21">ADR-21</a>), the left half&#39;s continuation is pushed to the local deque while the right half runs inline on the calling worker — so the pushed half is the one available for another worker to steal. After both halves of the <code>join</code> are Done, the task merges the two sorted halves in place. Every recursive call repeats this same check-split-join-merge pattern until all spans are at or below <code>GRAIN</code>.</p>
+<p>Task tree (4-element, GRAIN=1, 2 workers W0/W1):</p>
+<pre class="diagram"><code>  W0 spawns split(0,4): pushes right(2,4), runs left(0,2)
+    W1 steals right(2,4): splits → pushes (3,4), runs (2,3)
+    W0 after left(0,2) done: pops (1,2) or steals if W1 took it
+  → 4 leaf tasks, 2 internal merges per side, 1 final merge
+  → W0 and W1 share work; no central lock</code></pre>
+<hr>
+<h3 id="sec-8-14">8.14 Failure-Path Example — DAG with Panicking Node</h3>
+<pre class="diagram"><code>  graph:  A → B → D
+              ↓
+          C → D
+
+  A panics:
+    1. A.state CAS: Running → Panicked
+    2. A&#39;s successors (B, C): pending_deps.fetch_sub(1) → B.pending = 0, C.pending = 0
+    3. B and C become Ready; both execute
+    4. B.run() → B detects A panicked via shared PanicFlag → B transitions to Panicked (propagation policy)
+    5. D&#39;s pending decrements from both B and C; if policy=abort-on-first-panic, D is never pushed
+    6. graph.wait() returns Err(PropagatedPanic { origin: A.id, payload: ... })</code></pre>
+<p>Alternative policy (best-effort): run B, C, D regardless; collect all panics; return <code>Err(MultiPanic(vec))</code>.</p>
+<hr>
+<h3 id="sec-8-15">8.15 Edge Cases and Pitfalls</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Risk</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Single-item deque: owner pop races with steal</td>
+<td>Lost task or double-run</td>
+<td>CAS on <code>top</code> by owner in pop() last-item path; loser retries or returns None</td>
+</tr>
+<tr>
+<td>Buffer growth during steal</td>
+<td>Thief reads stale buffer pointer</td>
+<td>Buffer swap uses <code>Release</code> store; thief does <code>Acquire</code> load before reading slot</td>
+</tr>
+<tr>
+<td><code>join(a,b)</code> — b stolen before a finishes</td>
+<td>Owner has no work; may park</td>
+<td>Owner&#39;s park wakes on any unpark, including b&#39;s completion latch</td>
+</tr>
+<tr>
+<td>Scope with 0 spawned tasks</td>
+<td><code>latch.wait()</code> blocks forever</td>
+<td>Latch initialized to 0 → <code>wait()</code> returns immediately</td>
+</tr>
+<tr>
+<td>DAG with 0-dep nodes all submitted at once</td>
+<td>Thundering herd on injector</td>
+<td>Distribute across per-NUMA injectors round-robin</td>
+</tr>
+<tr>
+<td><code>parallel_scan</code> with non-associative op</td>
+<td>Wrong prefix sums</td>
+<td>Static assertion / trait bound requiring <code>Associative</code> marker trait</td>
+</tr>
+<tr>
+<td>Cancellation mid-steal</td>
+<td>Task stolen after cancel issued</td>
+<td>Cancellation token checked at task start; late steal sees token, drops task</td>
+</tr>
+<tr>
+<td>All workers blocking in <code>Future::wait()</code></td>
+<td>Pool deadlock</td>
+<td>Compensation thread injection (Phase 12); bounded at <code>2 × num_threads</code></td>
+</tr>
+<tr>
+<td><code>TaskId</code> overflow (u64 wrap)</td>
+<td>Duplicate IDs in trace</td>
+<td>Saturating counter + pool restart required (documented; ~10^19 tasks)</td>
+</tr>
+<tr>
+<td>Scope panic with in-flight tasks</td>
+<td>Resources not freed</td>
+<td><code>scope_exit</code> still waits (<a class="cite" href="/system-design-blueprints/systems/parallel-compute-scheduler/reliability/#inv-8">I8</a>); all tasks reach terminal state before propagating</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

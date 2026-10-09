@@ -1,0 +1,326 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed File System — Design · Engineering Blueprints</title><meta name="description" content="Distributed File System, lld: core types, repo tree, file inventory. A cluster-scale distributed file system in the GFS/HDFS lineage: one logical Master (metadata server — namespace tree, file→chunk map, chunk→replica map, operation log, checkpoints) coordinating many…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/distributed-file-system/">Distributed File System</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Distributed File System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~24 weeks</li> <li>1,814 lines</li> <li>blueprint #86</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-file-system/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-file-system/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-file-system/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-file-system/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-file-system/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-file-system/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-file-system/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-file-system/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-file-system/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-file-system/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed File System — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/distributed-file-system/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>// dfs-core: identifiers
+pub struct ChunkId(pub u64);
+pub struct FileId(pub u64);
+pub struct ChunkserverId(pub u64);
+pub struct LeaseId(pub u128);
+
+pub const CHUNK_SIZE_DEFAULT: u64;        // 64 MiB
+pub const CHUNK_SIZE_LARGE: u64;          // 128 MiB, optional
+pub const REPLICATION_FACTOR_DEFAULT: u8; // 3
+pub const REPLICATION_FACTOR_MAX: u8;     // 7
+pub const LEASE_DURATION_DEFAULT: Duration;  // 60s
+pub const LEASE_RENEW_INTERVAL: Duration;    // 20s
+pub const MAX_RECORD_SIZE: u32;              // 16 MiB</code></pre><pre class="code"><code>// dfs-core: namespace types — ownership: Master exclusive; concurrency: RwLock-guarded (§13)
+pub struct Path(Vec&lt;String&gt;);          // normalised, no trailing slash
+pub enum InodeKind { File, Directory, Symlink }
+pub enum Durability { Replication { rf: u8 }, Erasure { k: u8, m: u8 } }  // Erasure deferred, §36
+
+pub struct Inode {
+    pub id: FileId, pub kind: InodeKind, pub mode: u32,
+    pub uid: u32, pub gid: u32,
+    pub mtime_ns: i64, pub atime_ns: i64, pub ctime_ns: i64,
+    pub size: u64, pub replication: u8, pub chunk_size: u64,
+    pub durability: Durability,
+    pub chunks: Vec&lt;ChunkId&gt;,          // ordered by index within file
+}</code></pre><pre class="code"><code>// dfs-core: lease + replica — persistence: logged (I7); concurrency: per-chunk mutex (§13)
+pub struct Lease {
+    pub id: LeaseId, pub chunk_id: ChunkId, pub primary: ChunkserverId,
+    pub replicas: Vec&lt;ChunkserverId&gt;,
+    pub issued_at: Timestamp, pub expires_at: Timestamp,
+    pub epoch: u64,                   // I10: monotonic per chunk
+}
+
+pub struct ReplicaSet {
+    pub chunk_id: ChunkId, pub members: Vec&lt;ChunkserverId&gt;,
+    pub primary: Option&lt;ChunkserverId&gt;, pub durability: Durability,
+}
+
+pub enum ChunkState { Allocating, Open, Closed, UnderReplicated, Corrupt }
+
+pub struct ChunkMeta {
+    pub id: ChunkId, pub file: FileId, pub index: u32,
+    pub size: u64, pub epoch: u64, pub durability: Durability,
+    pub replicas: Vec&lt;ChunkserverId&gt;, pub primary: Option&lt;ChunkserverId&gt;,
+    pub state: ChunkState,
+}</code></pre><pre class="code"><code>// dfs-core: cluster topology &amp; heartbeat — serialization: protobuf (ADR-12)
+pub struct ClusterTopology { pub regions: BTreeMap&lt;String, Region&gt; }
+pub struct Region { pub zones: BTreeMap&lt;String, Zone&gt; }
+pub struct Zone { pub racks: BTreeMap&lt;String, Rack&gt; }
+pub struct Rack { pub chunkservers: Vec&lt;ChunkserverId&gt; }
+
+pub enum ChunkserverStatus { Live, Suspect, Dead, Decommissioning, Decommissioned }
+
+pub struct Heartbeat {
+    pub from: ChunkserverId, pub at: Timestamp,
+    pub used_bytes: u64, pub free_bytes: u64,
+    pub chunk_report: Vec&lt;ChunkReportItem&gt;,   // delta since last report
+    pub failed_replicas: Vec&lt;ChunkId&gt;,
+}
+
+pub struct ChunkReportItem { pub chunk_id: ChunkId, pub epoch: u64, pub bytes: u64, pub crc: u64 }</code></pre><pre class="code"><code>// dfs-core: RPC payloads — compatibility: versioned (P13); no bodies, signatures only
+pub struct WriteChunk { pub chunk_id: ChunkId, pub epoch: u64, pub offset: u64, pub data: Bytes, pub crc: u64 }
+pub struct ReadChunk { pub chunk_id: ChunkId, pub offset: u64, pub length: u32 }
+pub struct RecordAppend { pub chunk_id: ChunkId, pub epoch: u64, pub data: Bytes, pub crc: u64 }
+
+pub trait MasterService {
+    fn create(&amp;self, path: &amp;Path, mode: u32) -&gt; Result&lt;FileId&gt;;
+    fn open(&amp;self, path: &amp;Path) -&gt; Result&lt;(Inode, Vec&lt;ChunkId&gt;)&gt;;
+    fn list(&amp;self, path: &amp;Path) -&gt; Result&lt;Vec&lt;(String, FileId)&gt;&gt;;
+    fn rename(&amp;self, src: &amp;Path, dst: &amp;Path) -&gt; Result&lt;()&gt;;
+    fn delete(&amp;self, path: &amp;Path, recursive: bool) -&gt; Result&lt;()&gt;;
+    fn allocate_chunk(&amp;self, file: FileId) -&gt; Result&lt;(ChunkId, ReplicaSet, Lease)&gt;;
+    fn complete_chunk(&amp;self, chunk: ChunkId, len: u64, crc: u64) -&gt; Result&lt;()&gt;;
+    fn lease(&amp;self, chunk: ChunkId) -&gt; Result&lt;Lease&gt;;
+    fn renew_lease(&amp;self, id: LeaseId) -&gt; Result&lt;Lease&gt;;
+    fn snapshot(&amp;self, path: &amp;Path, name: &amp;str) -&gt; Result&lt;()&gt;;
+    fn fsck(&amp;self, path: &amp;Path) -&gt; Result&lt;FsckReport&gt;;
+}
+
+pub trait ChunkserverService {
+    fn write(&amp;self, w: WriteChunk) -&gt; Result&lt;()&gt;;
+    fn read(&amp;self, r: ReadChunk) -&gt; Result&lt;Bytes&gt;;
+    fn record_append(&amp;self, a: RecordAppend) -&gt; Result&lt;u64&gt;;   // returns offset
+    fn replicate(&amp;self, chunk: ChunkId, peer: ChunkserverId) -&gt; Result&lt;()&gt;;
+    fn merkle_root(&amp;self, chunk: ChunkId) -&gt; Result&lt;[u8; 32]&gt;;
+    fn report(&amp;self) -&gt; Result&lt;Vec&lt;ChunkReportItem&gt;&gt;;
+}
+
+pub trait Placement {
+    fn place(&amp;self, chunk_id: ChunkId, topology: &amp;ClusterTopology, durability: Durability)
+        -&gt; Result&lt;Vec&lt;ChunkserverId&gt;&gt;;
+}</code></pre><pre class="code"><code>// dfs-core: quota &amp; fsck — ownership: Master exclusive; used by Phase 8 (§20) and fsck audits (§7, §24)
+pub struct Quota { pub bytes: Option&lt;u64&gt;, pub files: Option&lt;u64&gt; }
+
+pub struct QuotaUsage {
+    pub limit_bytes: Option&lt;u64&gt;, pub limit_files: Option&lt;u64&gt;,
+    pub used_bytes: u64, pub used_files: u64,
+}
+
+pub struct FsckReport {
+    pub under_replicated: Vec&lt;ChunkId&gt;,
+    pub over_replicated: Vec&lt;ChunkId&gt;,
+    pub corrupt_replicas: Vec&lt;(ChunkId, ChunkserverId)&gt;,
+    pub misplaced: Vec&lt;ChunkId&gt;,       // violates I2
+    pub orphan_chunks: Vec&lt;(ChunkserverId, ChunkId)&gt;,
+}</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>Distributed-File-System/
+|-- README.md                    # entry point, links to FINAL_BLUEPRINT.md
+|-- FINAL_BLUEPRINT.md
+|-- BUILD_PLAN.md                # phase status tracker
+|-- BLUEPRINT_LOG.md
+|-- CHANGELOG.md                 # Keep-a-Changelog format
+|-- CONTRIBUTING.md
+|-- CODE_OF_CONDUCT.md
+|-- SECURITY.md
+|-- LICENSE                      # Apache-2.0 (ADR-22)
+|-- Makefile                     # bootstrap/build/test/lint/compose-up/release-check
+|-- Cargo.toml                   # workspace manifest
+|-- rust-toolchain.toml
+|-- Dockerfile                   # multi-stage build + runtime
+|-- docker-compose.yml           # 1 Master + 3 chunkservers + Prometheus + Grafana
+|-- .github/
+|   `-- workflows/
+|       |-- ci.yml
+|       |-- conformance.yml
+|       |-- chaos.yml
+|       |-- security.yml
+|       `-- release.yml
+`-- .gitignore</code></pre><pre class="diagram"><code>crates/
+|-- dfs-core/                    # ChunkId, FileId, Path, Lease, ReplicaSet, Inode (§11)
+|-- dfs-proto/                   # protobuf schemas: master.proto, chunkserver.proto, client.proto
+|-- dfs-wal/                     # operation log (Phase 2)
+|-- dfs-merkle/                  # Merkle-tree anti-entropy (Phase 7)
+|-- dfs-raft/                    # Master HA consensus (Phase 10)
+|-- dfs-master/                  # Master binary: namespace, chunk map, replica map, lease mgr
+|   `-- src/
+|       |-- namespace.rs
+|       |-- chunk_map.rs
+|       |-- replica_map.rs
+|       |-- lease_mgr.rs
+|       |-- heartbeat.rs
+|       |-- placement.rs
+|       |-- under_replicated.rs
+|       |-- snapshot.rs
+|       `-- raft_state.rs        # Phase 10
+|-- dfs-chunkserver/             # chunkserver binary
+|   `-- src/
+|       |-- chunk_store.rs
+|       |-- block_io.rs
+|       |-- lease_holder.rs
+|       |-- replication.rs
+|       |-- record_append.rs
+|       `-- anti_entropy.rs
+|-- dfs-client/                  # libdfs: session, read/write path, chunk cache, failover
+|-- dfs-cli/                     # `dfs ls`, `dfs cat`, `dfs fsck`
+`-- dfs-admin/                   # decommission, snapshot, quota tools</code></pre><pre class="diagram"><code>conformance/
+|-- runner/                      # deterministic simulator + fault injection (§7 methodology)
+|-- corpora/
+|   |-- namespace/                # mkdir/ls/rename/delete fixtures
+|   |-- chunk-io/                 # write/read/append fixtures
+|   |-- replication/              # replica-loss, lease-loss fixtures
+|   |-- ha/                       # Master failover fixtures
+|   `-- chaos/                    # partitions, disk-full, clock skew
+`-- report_schema.json
+benchmarks/
+|-- chunk_throughput.rs
+|-- master_metadata_ops.rs
+|-- e2e_p99_read_latency.rs
+`-- results/
+docs/
+|-- adr/                          # one file per ADR-01..24
+|-- runbook/
+|   |-- triage.md
+|   |-- under-replicated.md
+|   |-- master-failover.md
+|   `-- decommission.md
+`-- threat-model.md
+examples/
+|-- three-node-cluster/
+`-- record-append-log/</code></pre> </section><section aria-labelledby="sec-38"> <h2 id="sec-38">File inventory <small class="muted">(Appendix A · 62 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">Path</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td>README.md</td><td>entry point, links to FINAL_BLUEPRINT.md</td></tr><tr><td>FINAL_BLUEPRINT.md</td><td>this specification</td></tr><tr><td>BUILD_PLAN.md</td><td>phase status tracker</td></tr><tr><td>BLUEPRINT_LOG.md</td><td>append-only log of blueprint revisions</td></tr><tr><td>CHANGELOG.md</td><td>Keep-a-Changelog-format release notes</td></tr><tr><td>CONTRIBUTING.md</td><td>contribution workflow</td></tr><tr><td>CODE_OF_CONDUCT.md</td><td>community conduct policy</td></tr><tr><td>SECURITY.md</td><td>vulnerability-disclosure policy</td></tr><tr><td>LICENSE</td><td>Apache-2.0 license text (<a class="cite" href="/system-design-blueprints/systems/distributed-file-system/trade-offs/#adr-22">ADR-22</a>)</td></tr><tr><td>Makefile</td><td>bootstrap/build/test/lint/compose-up/release-check targets</td></tr><tr><td>Cargo.toml</td><td>Rust workspace manifest</td></tr><tr><td>rust-toolchain.toml</td><td>pinned toolchain version (<a class="cite" href="/system-design-blueprints/systems/distributed-file-system/trade-offs/#adr-23">ADR-23</a>)</td></tr><tr><td>Dockerfile</td><td>multi-stage build + runtime image</td></tr><tr><td>docker-compose.yml</td><td>1 Master + 3 chunkservers + Prometheus + Grafana</td></tr><tr><td>.gitignore</td><td>VCS ignore rules</td></tr><tr><td>.github/workflows/ci.yml</td><td>build + unit + integration CI</td></tr><tr><td>.github/workflows/conformance.yml</td><td>full conformance-fixture CI run</td></tr><tr><td>.github/workflows/chaos.yml</td><td>nightly chaos-schedule CI run</td></tr><tr><td>.github/workflows/security.yml</td><td>fuzzing + dependency-audit CI run</td></tr><tr><td>.github/workflows/release.yml</td><td>tag-triggered build/sign/SBOM/publish</td></tr><tr><td>crates/dfs-core/</td><td>shared types: ChunkId, FileId, Path, Lease, ReplicaSet, Inode (<a class="cite" href="/system-design-blueprints/systems/distributed-file-system/design/#sec-11">§11</a>)</td></tr><tr><td>crates/dfs-proto/</td><td>protobuf schemas: master.proto, chunkserver.proto, client.proto</td></tr><tr><td>crates/dfs-wal/</td><td>operation log implementation (Phase 2)</td></tr><tr><td>crates/dfs-merkle/</td><td>Merkle-tree anti-entropy implementation (Phase 7)</td></tr><tr><td>crates/dfs-raft/</td><td>Master HA consensus implementation (Phase 10)</td></tr><tr><td>crates/dfs-master/src/namespace.rs</td><td>namespace tree: inodes, children index, path resolution</td></tr><tr><td>crates/dfs-master/src/chunk_map.rs</td><td>file→chunk and chunk→metadata index</td></tr><tr><td>crates/dfs-master/src/replica_map.rs</td><td>chunkserver→chunk-set inverse index</td></tr><tr><td>crates/dfs-master/src/lease_mgr.rs</td><td>lease issuance, renewal, revocation, epoch tracking</td></tr><tr><td>crates/dfs-master/src/heartbeat.rs</td><td>heartbeat ingestion, suspect/dead transitions</td></tr><tr><td>crates/dfs-master/src/placement.rs</td><td>placement function implementations (default, CRUSH stub)</td></tr><tr><td>crates/dfs-master/src/under_replicated.rs</td><td>under-replicated priority queue</td></tr><tr><td>crates/dfs-master/src/snapshot.rs</td><td>snapshot manager, chunk refcounting</td></tr><tr><td>crates/dfs-master/src/raft_state.rs</td><td>Raft integration (Phase 10)</td></tr><tr><td>crates/dfs-chunkserver/src/chunk_store.rs</td><td>chunk directory management (data/meta/crc files)</td></tr><tr><td>crates/dfs-chunkserver/src/block_io.rs</td><td>per-block read/write, page-cache interaction</td></tr><tr><td>crates/dfs-chunkserver/src/lease_holder.rs</td><td>primary-lease tracking, serial-number issuance</td></tr><tr><td>crates/dfs-chunkserver/src/replication.rs</td><td>pipeline forwarding, fan-out apply</td></tr><tr><td>crates/dfs-chunkserver/src/record_append.rs</td><td>record-append protocol implementation</td></tr><tr><td>crates/dfs-chunkserver/src/anti_entropy.rs</td><td>Merkle-diff scrub and repair</td></tr><tr><td>crates/dfs-client/</td><td>libdfs: session, read/write path, chunk cache, failover</td></tr><tr><td>crates/dfs-cli/</td><td>operator CLI: dfs ls, dfs cat, dfs fsck</td></tr><tr><td>crates/dfs-admin/</td><td>decommission, snapshot, quota admin tools</td></tr><tr><td>conformance/runner/</td><td>deterministic simulator + fault injection harness (<a class="cite" href="/system-design-blueprints/systems/distributed-file-system/reliability/#sec-7">§7</a>)</td></tr><tr><td>conformance/corpora/namespace/</td><td>mkdir/ls/rename/delete fixtures</td></tr><tr><td>conformance/corpora/chunk-io/</td><td>write/read/append fixtures</td></tr><tr><td>conformance/corpora/replication/</td><td>replica-loss, lease-loss fixtures</td></tr><tr><td>conformance/corpora/ha/</td><td>Master failover fixtures</td></tr><tr><td>conformance/corpora/chaos/</td><td>partition, disk-full, clock-skew fixtures</td></tr><tr><td>conformance/report_schema.json</td><td>schema for conformance.report.json output</td></tr><tr><td>benchmarks/chunk_throughput.rs</td><td>chunk write/read throughput benchmark</td></tr><tr><td>benchmarks/master_metadata_ops.rs</td><td>metadata op/s benchmark</td></tr><tr><td>benchmarks/e2e_p99_read_latency.rs</td><td>end-to-end read-latency benchmark</td></tr><tr><td>benchmarks/results/</td><td>stored benchmark result history</td></tr><tr><td>docs/adr/</td><td>one file per <a class="cite" href="/system-design-blueprints/systems/distributed-file-system/trade-offs/#adr-1">ADR-01</a>..24</td></tr><tr><td>docs/runbook/triage.md</td><td>general first-response runbook</td></tr><tr><td>docs/runbook/under-replicated.md</td><td><a class="cite" href="/system-design-blueprints/systems/distributed-file-system/reliability/#fm-3">FM-3</a>/<a class="cite" href="/system-design-blueprints/systems/distributed-file-system/reliability/#inv-11">I11</a> runbook</td></tr><tr><td>docs/runbook/master-failover.md</td><td><a class="cite" href="/system-design-blueprints/systems/distributed-file-system/reliability/#fm-1">FM-1</a>/Phase-10 failover runbook</td></tr><tr><td>docs/runbook/decommission.md</td><td><a class="cite" href="/system-design-blueprints/systems/distributed-file-system/reliability/#t-9">T9</a>-aware decommission runbook</td></tr><tr><td>docs/threat-model.md</td><td>rendered copy of <a class="cite" href="/system-design-blueprints/systems/distributed-file-system/reliability/#sec-23">§23</a></td></tr><tr><td>examples/three-node-cluster/</td><td>minimal <code>make compose-up</code> walkthrough</td></tr><tr><td>examples/record-append-log/</td><td>shared-log record-append usage example</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

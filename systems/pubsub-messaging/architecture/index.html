@@ -1,0 +1,402 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Pub/Sub Messaging System — Architecture · Engineering Blueprints</title><meta name="description" content="Pub/Sub Messaging System, hld: §3 overview + §8 domain model. Build an in-memory publish/subscribe messaging broker that speaks the Redis pub/sub wire surface (RESP2 and RESP3) unmodified by existing client libraries, adds a bounded-durability Streams tier with…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/pubsub-messaging/">Pub/Sub Messaging System</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Pub/Sub Messaging System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~14 weeks</li> <li>2,453 lines</li> <li>blueprint #60</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/pubsub-messaging/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/pubsub-messaging/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/pubsub-messaging/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/pubsub-messaging/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/pubsub-messaging/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/pubsub-messaging/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/pubsub-messaging/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/pubsub-messaging/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/pubsub-messaging/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/pubsub-messaging/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Pub/Sub Messaging System — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌──────────────────────────────────────────────────────────────────────┐
+│ Clients: redis-py, redis-rb, lettuce, ioredis, jedis, redis-cli      │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                 │ TCP / TLS  (:6380 plaintext, :6390 TLS)
+┌────────────────────────────────▼─────────────────────────────────────┐
+│ Listener (Phase 0/1, §12/§13)                                        │
+│  accept loop · TLS termination · per-connection state · RESP2/RESP3  │
+│  framer + encoder · inline-command form                              │
+└────────────────────────────────┬──────────────────────────────────────┘
+                                 │ Command frames
+┌────────────────────────────────▼──────────────────────────────────────┐
+│ Command Dispatcher (Phase 2, §14)                                     │
+│  SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH · PUBSUB * ·   │
+│  XADD/XREAD/XREADGROUP/XACK/XPENDING/XCLAIM (§18) · CLUSTER * (§19) · │
+│  ACL * (§20)                                                          │
+└──────┬─────────────────────────────────────────────────┬─────────────┘
+       │                                                 │
+┌──────▼───────────────┐                    ┌────────────▼────────────┐
+│ Topic Store (§14)     │                    │ Pattern Index (§16)      │
+│ channel → subscribers │                    │ pattern → subscribers    │
+│ 256-shard RwLock map  │                    │ Redis-glob matcher       │
+└──────┬────────────────┘                    └────────────┬─────────────┘
+       └────────────────────────┬───────────────────────────┘
+                                 │
+┌────────────────────────────────▼──────────────────────────────────────┐
+│ Fanout Engine (Phase 3, §15)                                          │
+│  PUBLISH → per-subscriber bounded output buffer · vectored writes     │
+│  (writev) · slow-consumer disconnect policy                          │
+└────────────────────────────────┬───────────────────────────────────────┘
+                                 │
+┌────────────────────────────────▼──────────────────────────────────────┐
+│ Streams Tier (Phase 6, §18) — the only cross-disconnect state         │
+│  ordered log per stream · consumer groups · pending-entry list (PEL) │
+└────────────────────────────────┬───────────────────────────────────────┘
+                                 │
+┌────────────────────────────────▼──────────────────────────────────────┐
+│ Cluster (Phase 7, §19)                                                │
+│  16384-slot map · gossip membership · binary cluster bus (lossy for  │
+│  fanout, reliable for Streams cluster traffic) · MOVED/ASK redirect  │
+└────────────────────────────────┬───────────────────────────────────────┘
+                                 │
+┌────────────────────────────────▼──────────────────────────────────────┐
+│ Operability (Phase 8/9, §20/§21)                                      │
+│  ACL · TLS · slow-log · hotkey-log · Prometheus · OpenTelemetry       │
+└────────────────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>Listener.</strong> Owns the TCP/TLS boundary and per-connection state; the trust boundary between an
+untrusted network peer and the broker begins here (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#sec-23">§23</a> <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#t-1">T1</a>, <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#t-7">T7</a>).</p>
+<p><strong>Command Dispatcher.</strong> The single mutation point for per-connection subscription state and the
+routing point into every subsystem; concurrency boundary between one connection&#39;s command
+sequence and the shared topic/pattern/Streams state.</p>
+<p><strong>Topic Store / Pattern Index.</strong> The persistence boundary for pub/sub state is deliberately
+<em>absent</em> here — both structures hold only live-connection references (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-2">P2</a>, <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-5">P5</a>); sharding bounds
+lock contention (256 buckets, <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/build/#sec-14">§14</a>).</p>
+<p><strong>Fanout Engine.</strong> The queue/channel boundary: the per-subscriber output buffer is the <em>only</em>
+queue in the pub/sub path (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-3">P3</a>); this is where backpressure is decided.</p>
+<p><strong>Streams Tier.</strong> The one true persistence boundary in this design — the only state that
+survives a client disconnect (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-5">P5</a>); consistency semantics are at-least-once via PEL (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-2">I2</a>).</p>
+<p><strong>Cluster.</strong> The distribution boundary: slot ownership, gossip membership, and the binary bus
+that is lossy for fanout and reliable for Streams cluster traffic (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/trade-offs/#adr-8">ADR-08</a>, <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/trade-offs/#sec-9">§9</a>).</p>
+<p><strong>Operability.</strong> Not a separate subsystem bolted at the edge — every box above emits metrics/
+spans/log lines into this layer (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-10">P10</a>).</p>
+<p>Three properties hold everywhere below: (1) the pub/sub fanout path is one-way with no
+broker-side queue — the queue is the per-subscriber output buffer; (2) Streams is the only
+surface with state outliving a connection; (3) cluster mode is a superset of single-node mode —
+a single-node broker is a one-node cluster with the bus disabled, served by the same dispatcher.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-1">8.1 Wire grammar (RESP2/RESP3, EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>frame        = simple | error | integer | bulk | array
+             | null | double | boolean | map | set
+             | push | bignum | verbatim ;
+simple       = &quot;+&quot; , text , CRLF ;
+error        = &quot;-&quot; , text , CRLF ;
+integer      = &quot;:&quot; , [&quot;-&quot;] , digit+ , CRLF ;
+bulk         = &quot;$&quot; , length , CRLF , length*OCTET , CRLF ;
+array        = &quot;*&quot; , count , CRLF , count*frame ;
+null         = &quot;_&quot; , CRLF ;                       (* RESP3 *)
+double       = &quot;,&quot; , float , CRLF ;                (* RESP3 *)
+boolean      = &quot;#&quot; , (&quot;t&quot; | &quot;f&quot;) , CRLF ;           (* RESP3 *)
+map          = &quot;%&quot; , count , CRLF , count*(frame,frame) ; (* RESP3 *)
+set          = &quot;~&quot; , count , CRLF , count*frame ;   (* RESP3 *)
+push         = &quot;&gt;&quot; , count , CRLF , count*frame ;   (* RESP3, subscriber deliveries *)
+bignum       = &quot;(&quot; , [&quot;-&quot;] , digit+ , CRLF ;        (* RESP3 *)
+verbatim     = &quot;=&quot; , length , CRLF , 3*OCTET , &quot;:&quot; , (length-4)*OCTET , CRLF ; (* RESP3 *)
+inline       = token , (SP , token)* , CRLF ;       (* rejected for binary-safe payload cmds *)
+length       = [&quot;-&quot;] , digit+ ;                     (* &quot;-1&quot; encodes null bulk/array *)</code></pre>
+<h3 id="sec-8-2">8.2 Connection state machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entered via</th>
+<th>Permitted commands</th>
+<th>Exits to</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Normal</code></td>
+<td>connection accept</td>
+<td>full command set (per ACL)</td>
+<td><code>Subscriber</code> (any <code>SUBSCRIBE</code>/<code>PSUBSCRIBE</code>), <code>Closed</code></td>
+</tr>
+<tr>
+<td><code>Subscriber</code></td>
+<td><code>subs.total() &gt; 0</code></td>
+<td><code>SUBSCRIBE</code>,<code>UNSUBSCRIBE</code>,<code>PSUBSCRIBE</code>,<code>PUNSUBSCRIBE</code>,<code>PING</code>,<code>QUIT</code>,<code>RESET</code> only</td>
+<td><code>Normal</code> (<code>subs.total() == 0</code>), <code>Closed</code></td>
+</tr>
+<tr>
+<td><code>TlsHandshaking</code></td>
+<td>connect on <code>:6390</code></td>
+<td>none (pre-handshake)</td>
+<td><code>Normal</code> (post-handshake), <code>Closed</code> (handshake fail)</td>
+</tr>
+<tr>
+<td><code>Migrating</code> (cluster)</td>
+<td>node enters slot-migration source role</td>
+<td>full set, double-writes fanout</td>
+<td><code>Normal</code> (drain window elapses, <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/blueprint/#sec-19-6">§19.6</a>)</td>
+</tr>
+<tr>
+<td><code>Closed</code></td>
+<td><code>QUIT</code>, hard-limit disconnect, RST</td>
+<td>none</td>
+<td>terminal</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 PUBLISH/SUBSCRIBE sequence (worked example)</h3>
+<pre class="diagram"><code>Client A                Broker                  Client B
+   │  SUBSCRIBE news       │                        │
+   │──────────────────────▶│                        │
+   │  push[subscribe,news,1]│                        │
+   │◀──────────────────────│                        │
+   │                       │   PUBLISH news hello   │
+   │                       │◀───────────────────────│
+   │  push[message,news,hello]                       │
+   │◀──────────────────────│    :1  (recipient count)│
+   │                       │───────────────────────▶│</code></pre>
+<h3 id="sec-8-4">8.4 Malformed-input example</h3>
+<p>Client sends <code>$18446744073709551615\r\n...</code> (a bulk length that overflows <code>i64</code> and exceeds
+<code>proto-max-bulk-len</code>). Framer rejects at the length-parse step (before allocating), emits
+<code>-ERR Protocol error: invalid bulk length</code>, increments <code>psm_wire_parse_errors_total</code>, and closes
+the connection (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-11">I11</a>).</p>
+<h3 id="sec-8-5">8.5 Failure-path example — PUBLISH during slot migration</h3>
+<pre class="diagram"><code>Publisher          Source Node (migrating slot N)      Dest Node (importing slot N)
+   │ PUBLISH ch v      │                                    │
+   │──────────────────▶│  double-write: local fanout        │
+   │                   │──────────────────────────────────▶│ fanout to dest-side subs
+   │        :3         │  (subscriber count from both sides)│
+   │◀──────────────────│                                    │
+       … drain window elapses (≤ 30 s, §4) …
+   │ PUBLISH ch v2      │                                    │
+   │──────────────────▶│  -ASK N dest-ip:port               │
+   │◀──────────────────│                                    │
+   │ ASKING; PUBLISH ch v2                                   │
+   │─────────────────────────────────────────────────────────▶│  :3</code></pre>
+<h3 id="sec-8-6">8.6 Streams data model</h3>
+<p>A stream is an ordered log of <code>(StreamId, fields)</code> entries, <code>StreamId = (ms: u64, seq: u64)</code>
+compared lexicographically (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-7">I7</a>). A consumer group holds <code>last_delivered: StreamId</code> and a
+per-consumer PEL: <code>{StreamId → (consumer, delivery_time, delivery_count)}</code>. <code>XREADGROUP … id=&quot;&gt;&quot;</code>
+delivers entries past <code>last_delivered</code> and inserts them into the PEL; <code>XACK</code> removes; <code>XCLAIM</code>
+reassigns PEL entries idle beyond <code>min-idle-time</code> to a new consumer (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/build/#sec-18">§18</a>).</p>
+<h3 id="sec-8-7">8.7 Cluster bus packet layout</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Offset</th>
+<th>Size</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>magic</code></td>
+<td>0</td>
+<td>4 B</td>
+<td>must equal <code>&#39;PSMB&#39;</code>; else drop (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-10">I10</a>)</td>
+</tr>
+<tr>
+<td><code>version</code></td>
+<td>4</td>
+<td>2 B</td>
+<td>receiver drops packets with <code>version &gt;</code> its own</td>
+</tr>
+<tr>
+<td><code>kind</code></td>
+<td>6</td>
+<td>2 B</td>
+<td><code>Ping|Pong|FanoutPublish|FanoutPattern|StreamsAppend|StreamsAck|GossipDelta|SlotMigrationStart|SlotMigrationEnd</code></td>
+</tr>
+<tr>
+<td><code>sender</code></td>
+<td>8</td>
+<td>16 B</td>
+<td><code>NodeId</code></td>
+</tr>
+<tr>
+<td><code>epoch</code></td>
+<td>24</td>
+<td>8 B</td>
+<td>monotonic per-node epoch, used for <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-8">I8</a> fencing</td>
+</tr>
+<tr>
+<td><code>flags</code></td>
+<td>32</td>
+<td>2 B</td>
+<td>reserved</td>
+</tr>
+<tr>
+<td><code>body_len</code></td>
+<td>34</td>
+<td>4 B</td>
+<td>length of the typed body that follows</td>
+</tr>
+</tbody></table></div>
+<p>Header is 38 bytes, little-endian, followed by a <code>kind</code>-typed body (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/blueprint/#sec-11-8">§11.8</a>).</p>
+<h3 id="sec-8-8">8.8 Delivery-semantics summary</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Semantics</th>
+<th>Mechanism</th>
+<th>Invariant</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Pub/sub (channel, pattern)</td>
+<td>At-most-once</td>
+<td>No backlog; connection-scoped subscription</td>
+<td><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-1">I1</a></td>
+</tr>
+<tr>
+<td>Streams, no consumer group</td>
+<td>At-most-once per <code>XREAD</code> call (client tracks its own last-seen id)</td>
+<td>Client-held cursor</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Streams, consumer group</td>
+<td>At-least-once</td>
+<td>PEL + <code>XACK</code>/<code>XCLAIM</code></td>
+<td><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-2">I2</a></td>
+</tr>
+<tr>
+<td>Any tier</td>
+<td>Exactly-once</td>
+<td>Not provided</td>
+<td><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-3">I3</a></td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-1">P1</a> — The wire is RESP, not a parallel API.</strong> Existing RESP2/RESP3 clients connect unchanged. Tradeoff: no room for a leaner native protocol without breaking compatibility. Operational implication: every wire fixture in <code>conformance/corpora/wire/</code> is a compatibility contract, not a test convenience. Violate it and every existing Redis client library breaks.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-2">P2</a> — Pub/sub is fanout, not queueing.</strong> A <code>PUBLISH</code> with zero subscribers is dropped; a late-joining subscriber never sees history. Tradeoff: zero durability for the pub/sub tier in exchange for zero broker-side backlog memory. Violating it (adding a backlog &quot;just in case&quot;) turns this into a slower, worse Streams tier.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-3">P3</a> — Each subscriber owns its own bounded output buffer.</strong> No global queue, no broker-side spool, no priority. Tradeoff: a subscriber&#39;s own slowness cannot be smoothed by broker memory beyond its bound. Violating it removes the isolation that keeps one slow subscriber from starving others.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-4">P4</a> — Pattern subscriptions are O(patterns), not O(channels), per publish.</strong> The pattern index is keyed by pattern; a publish walks the pattern set once regardless of subscriber count per pattern. Tradeoff: cost scales with the number of <em>distinct patterns</em>, which is unbounded without an index refinement (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/build/#sec-16">§16</a>, Deferred Register item 1). Violating the design (indexing by channel) makes a single busy channel touch every subscriber&#39;s per-message cost.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-5">P5</a> — The Streams tier is the only stateful surface.</strong> Pub/sub state lives in the connection; Streams state (the log, the PEL) is the only thing that survives disconnect. Tradeoff: any cross-disconnect guarantee must be built on Streams, never on pub/sub. Violating it (adding pub/sub replay) breaks <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-1">I1</a> (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#sec-7">§7</a>).</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-6">P6</a> — Cluster mode shards channel space, not the broker.</strong> Channel <code>c</code> lives on slot <code>CRC16(c) &amp; 0x3FFF</code>; a single-node broker is a one-node cluster. Tradeoff: slot ownership changes require a migration protocol (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/build/#sec-19">§19</a>), not a code fork. Violating it (a special-cased single-node code path) doubles the maintenance surface.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-7">P7</a> — The cluster bus is binary and lossy for fanout traffic.</strong> A missed bus packet for fanout is accepted loss, mirroring a missed pub/sub message to a disconnected subscriber; Streams cluster traffic uses a retried channel instead. Tradeoff: simpler bus code, at the cost of best-effort cross-node fanout. Violating it (retrying fanout) risks duplicate delivery with no dedup mechanism.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-8">P8</a> — The broker is single-process, multi-threaded.</strong> Tokio&#39;s multi-thread runtime owns the listener and fanout; no fork-on-publish, no thread-per-connection, no embedded scripting. Tradeoff: no in-process user code (Lua/WASM deferred, <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/trade-offs/#sec-36">§36</a>). Violating it (a scripting escape hatch) reopens the security surface <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-12">P12</a> closes.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-9">P9</a> — Determinism is best-effort for pub/sub, strict for Streams.</strong> Fanout order across subscribers is undefined; per-subscriber order from one publisher is preserved; Streams entries are strictly ordered by <code>XADD</code> (<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/reliability/#inv-7">I7</a>). Tradeoff: cross-subscriber ordering guarantees would require a broker-side sequencer, adding latency <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-2">P2</a> rejects.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-10">P10</a> — Operability ships with the core, never bolted on.</strong> ACL, TLS, slow-log, hotkey-log, Prometheus, OpenTelemetry land in the same Phase-0 arc (Phases 8–9, <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/build/#sec-20">§20</a>–<a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/build/#sec-21">§21</a>), not a later release. Tradeoff: more Phase-0 surface area. Violating it produces a broker nobody can safely run in production.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-11">P11</a> — Backpressure resolves by disconnection, never by blocking the publisher.</strong> The output buffer is unbounded in channel capacity but bounded in byte count; exceeding the bound disconnects the subscriber, never stalls <code>PUBLISH</code>. Tradeoff: a slow subscriber loses messages (already true per <a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-2">P2</a>) rather than the whole broker losing throughput. Violating it (a bounded channel) turns one slow reader into a global outage.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-12">P12</a> — Security is default-deny.</strong> A new ACL user has zero privileges; TLS and plaintext ports are separate with no in-band downgrade. Tradeoff: every new command needs an explicit ACL category. Violating it is the single most common way brokers get owned in production.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/pubsub-messaging/architecture/#p-13">P13</a> — The client wire and the cluster bus are distinct protocols on distinct ports.</strong> Client traffic never shares a port or trust domain with inter-node traffic. Tradeoff: two listeners, two framers to maintain. Violating it lets a client-facing bug become a cluster-wide compromise vector.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

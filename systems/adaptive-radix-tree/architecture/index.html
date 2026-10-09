@@ -1,0 +1,881 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Adaptive Radix Tree (ART) + Trie Family — Architecture · Engineering Blueprints</title><meta name="description" content="Adaptive Radix Tree (ART) + Trie Family, hld: §3 overview + §8 domain model. Build a production-grade, from-scratch, in-memory ordered index library in Rust progressing through the full trie family — baseline 256-way trie → radix/PATRICIA with path compression → the Adaptive…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/data-structures-algorithms/">Data Structures &amp; Algorithms</a> </li><li> <a href="/system-design-blueprints/systems/adaptive-radix-tree/">Adaptive Radix Tree (ART) + Trie Family</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:353"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/data-structures-algorithms/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Data Structures &amp; Algorithms</span></a> </p> <h1>Adaptive Radix Tree (ART) + Trie Family</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~18 weeks</li> <li>4,135 lines</li> <li>blueprint #403</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/adaptive-radix-tree/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/adaptive-radix-tree/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/adaptive-radix-tree/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/adaptive-radix-tree/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/adaptive-radix-tree/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/adaptive-radix-tree/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/adaptive-radix-tree/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/adaptive-radix-tree/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/adaptive-radix-tree/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/adaptive-radix-tree/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Adaptive Radix Tree (ART) + Trie Family — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-canonical-structure">Canonical structure</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend side: the caller (CLI or library user)
+%% legend rt: the main index and its core crates
+%% legend ingest: baselines, SIMD helper, reclamation
+  APP([&quot;&lt;b&gt;Application&lt;/b&gt;&lt;br/&gt;artdb CLI / library user&quot;])
+  CORE[&quot;&lt;b&gt;art-core&lt;/b&gt;&lt;br/&gt;OrderedMap&amp;lt;V&amp;gt; trait + KeyEnc&lt;br/&gt;(u64/i64/f64/str →&lt;br/&gt;binary-comparable bytes)&quot;]
+  TRIE[&quot;&lt;b&gt;art-trie&lt;/b&gt; (baselines)&lt;br/&gt;Trie256 (256-way per-byte)&lt;br/&gt;RadixTree (compressed labels)&lt;br/&gt;Patricia (binary radix)&quot;]
+  ART[&quot;&lt;b&gt;art-art&lt;/b&gt; (the main index)&lt;br/&gt;Art&amp;lt;V&amp;gt; root: NodePtr (tagged)&lt;br/&gt;NodeHeader { node_type, num_children,&lt;br/&gt;prefix_len, prefix[8] }&lt;br/&gt;Node4 → Node16 → Node48 → Node256&lt;br/&gt;(grow/shrink)&lt;br/&gt;Leaf { full_key: Box&amp;lt;[u8]&amp;gt;, value: V }&lt;br/&gt;lazy expansion&lt;br/&gt;pessimistic + optimistic prefix&quot;]
+  SIMD[&quot;&lt;b&gt;art-simd&lt;/b&gt;&lt;br/&gt;Node16 SSE2 search&lt;br/&gt;_mm_cmpeq_epi8 + movemask&lt;br/&gt;+ trailing_zeros&lt;br/&gt;cfg-gated, scalar fallback&quot;]
+  CONC[&quot;&lt;b&gt;art-concurrent&lt;/b&gt;: ArtOlc&amp;lt;V&amp;gt;&lt;br/&gt;per-node Version(AtomicU64)&lt;br/&gt;read_lock_or_restart / check_or_restart&lt;br/&gt;upgrade_to_write_lock_or_restart&lt;br/&gt;restart-on-conflict&lt;br/&gt;lock-free point reads&quot;]
+  EBR[&quot;&lt;b&gt;Ebr&lt;/b&gt;: epoch-based reclamation&lt;br/&gt;global epoch + per-thread epochs&lt;br/&gt;retire lists, quiescent states&quot;]
+  APP -- &quot;get / insert / remove / range / prefix_iter&lt;br/&gt;keys are order-preserving bytes via KeyEnc&quot; --&gt; CORE
+  CORE --&gt; TRIE
+  CORE --&gt; ART
+  ART -- &quot;find_child(byte) → Option&amp;lt;NodePtr&amp;gt;&quot; --&gt; SIMD
+  TRIE -- &quot;height + memory baseline&quot; --&gt; CONC
+  SIMD --&gt; CONC
+  CONC --&gt; EBR
+  classDef side stroke-width:1.5px
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  class APP side
+  class CORE,ART,CONC rt
+  class TRIE,SIMD,EBR ingest</pre><figcaption><ul class="diagram-legend"><li><span class="swatch side"></span>the caller (CLI or library user)</li><li><span class="swatch rt"></span>the main index and its core crates</li><li><span class="swatch ingest"></span>baselines, SIMD helper, reclamation</li></ul><p class="diagram-note">Drawn from the text diagram in “Canonical structure”.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>Application (artdb CLI / library user)
+        |  get / insert / remove / range / prefix_iter
+        |  keys are order-preserving bytes via KeyEnc
+        v
+art-core : OrderedMap&lt;V&gt; trait  +  KeyEnc (u64/i64/f64/str -&gt; binary-comparable bytes)
+        |                                  |
+        v                                  v
+art-trie (baselines)               art-art (the main index)
+  Trie256 (256-way per-byte)         Art&lt;V&gt;  root: NodePtr (tagged)
+  RadixTree (compressed labels)      NodeHeader { node_type, num_children,
+  Patricia (binary radix)                         prefix_len, prefix[8] }
+        |  height + memory baseline  Node4 -&gt; Node16 -&gt; Node48 -&gt; Node256 (grow/shrink)
+        |                            Leaf { full_key: Box&lt;[u8]&gt;, value: V }
+        |                            lazy expansion; pessimistic + optimistic prefix
+        |                                  |  find_child(byte) -&gt; Option&lt;NodePtr&gt;
+        |                                  v
+        |                            art-simd : Node16 SSE2 search
+        |                              _mm_cmpeq_epi8 + movemask + trailing_zeros
+        |                              cfg-gated; scalar fallback
+        |                                  |
+        +----------------------------------+--&gt; art-concurrent : ArtOlc&lt;V&gt;
+                                                 per-node Version(AtomicU64)
+                                                 read_lock_or_restart / check_or_restart
+                                                 upgrade_to_write_lock_or_restart
+                                                 restart-on-conflict; lock-free point reads
+                                                     |
+                                                 Ebr : epoch-based reclamation
+                                                   global epoch + per-thread epochs
+                                                   retire lists; quiescent states</code></pre></details>
+<h3 id="sec-3-trust-boundaries">Trust boundaries</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Boundary</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Keys + values</td>
+<td>Caller-supplied; <code>Key</code> is <code>Vec&lt;u8&gt;</code>; key length capped at <code>MAX_KEY_LEN</code> (enforced → <code>ArtError::KeyTooLong</code>); values are moved in, no validation</td>
+</tr>
+<tr>
+<td>Key ordering</td>
+<td>Library assumes <code>KeyEnc</code> produces order-preserving bytes; caller must use <code>KeyEnc</code> or supply correctly encoded bytes</td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td><code>Art&lt;V&gt;</code> is <code>!Send + !Sync</code>; <code>ArtOlc&lt;V&gt;</code> is <code>Send + Sync</code>; mixing them is a type error</td>
+</tr>
+<tr>
+<td>Memory</td>
+<td>Manual node allocation; no GC; callers must not retain raw <code>NodePtr</code> values</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-3-component-responsibilities">Component responsibilities</h3>
+<p><strong>art-core</strong></p>
+<ul>
+<li><code>Key(Vec&lt;u8&gt;)</code> — logical key; <code>KeyEnc</code> trait — <code>encode(&amp;self, out: &amp;mut Vec&lt;u8&gt;)</code>; order-preserving contract.</li>
+<li><code>OrderedMap&lt;V&gt;</code> — trait with <code>get / insert / remove / range / prefix_iter</code>; all trie variants + <code>Art&lt;V&gt;</code> + <code>ArtOlc&lt;V&gt;</code> implement it.</li>
+<li><code>ArtError</code> — <code>KeyTooLong</code> | <code>PrefixOverflow</code>; returned from fallible ops; no panics.</li>
+<li>Invariant: <code>memcmp(enc(a), enc(b)) == cmp(a, b)</code> for all <code>KeyEnc</code> impls.</li>
+</ul>
+<p><strong>Trie256 (art-trie)</strong></p>
+<ul>
+<li>256-way per-byte inner nodes; each node is an array of 256 optional child pointers.</li>
+<li><code>insert</code> / <code>get</code> / <code>remove</code> / ordered iteration via in-order traversal.</li>
+<li>Role: pedagogic baseline; documents height = <code>key_len</code> levels, memory = 256 pointers per node regardless of fanout.</li>
+<li>Output: memory waste figures and height measurements feed Phase-3 motivation.</li>
+</ul>
+<p><strong>RadixTree / Patricia (art-trie)</strong></p>
+<ul>
+<li><code>RadixTree</code>: compressed edge labels; split-on-mismatch insert creates new inner node with shared prefix.</li>
+<li><code>Patricia</code>: binary radix (one bit per level); nodes store only the discriminating bit position; no edge-label storage.</li>
+<li>Quantify: height reduction, memory saving vs <code>Trie256</code>; compare on uniform random u64 keys and skewed string sets.</li>
+<li>Invariant: in-order traversal of <code>RadixTree</code> matches BTreeMap order.</li>
+</ul>
+<p><strong>Art&lt;V&gt; + node types (art-art)</strong></p>
+<ul>
+<li><code>NodePtr(*mut ())</code>: tagged pointer; low 3 bits (or a header byte) encode <code>NodeType</code>; alignment of all node structs ≥ 8.</li>
+<li><code>NodeHeader</code>: <code>node_type: NodeType</code>, <code>num_children: u16</code>, <code>prefix_len: u32</code>, <code>prefix: [u8; 8]</code>; prefix_len may exceed 8 (optimistic mode).</li>
+<li><code>Node4</code>: <code>keys: [u8; 4]</code> sorted; <code>children: [NodePtr; 4]</code>; linear scan; <code>~56 B</code>.</li>
+<li><code>Node16</code>: <code>keys: [u8; 16]</code> sorted; <code>children: [NodePtr; 16]</code>; SIMD scan via art-simd; <code>~160 B</code>.</li>
+<li><code>Node48</code>: <code>child_index: [u8; 256]</code> (0xFF = empty); <code>children: [NodePtr; 48]</code>; <code>~432 B</code>.</li>
+<li><code>Node256</code>: <code>children: [NodePtr; 256]</code>; direct index; <code>~2 KB</code>.</li>
+<li><code>Leaf&lt;V&gt;</code>: <code>key: Box&lt;[u8]&gt;</code> (full key, needed for optimistic prefix verification); <code>value: V</code>.</li>
+<li><code>find_child(node, byte) -&gt; Option&lt;NodePtr&gt;</code> — dispatches by NodeType.</li>
+<li><code>add_child(&amp;mut node, byte, child)</code> — may trigger grow (Node4→Node16, Node16→Node48, Node48→Node256).</li>
+<li><code>remove_child(&amp;mut node, byte)</code> — may trigger shrink (reverse transitions).</li>
+<li>Capacity thresholds: grow Node4 when <code>num_children == 4</code>; Node16 at 16; Node48 at 48. Shrink Node16 when <code>num_children &lt; 5</code>; Node48 &lt; 17; Node256 &lt; 49.</li>
+</ul>
+<p><strong>NodeHeader prefix machinery (art-art)</strong></p>
+<ul>
+<li><strong>Pessimistic prefix:</strong> up to <code>MAX_PREFIX_LEN = 8</code> bytes stored inline; compared byte-by-byte during traversal; always correct.</li>
+<li><strong>Optimistic prefix:</strong> <code>prefix_len &gt; 8</code>; only first 8 bytes stored; extra bytes NOT stored; at leaf, verify full key matches the claimed prefix length by comparing against the leaf&#39;s <code>key: Box&lt;[u8]&gt;</code>.</li>
+<li><strong>Lazy expansion:</strong> a single-descendant path is represented as a lone <code>Leaf</code> placed directly at the parent slot; only when a second key diverges does an inner node split materialize.</li>
+<li>Invariant: every <code>Leaf</code> stores its complete key so optimistic-prefix verification can always proceed.</li>
+</ul>
+<p><strong>art-simd (art-simd)</strong></p>
+<ul>
+<li><code>node16_find_child(keys: *const u8, byte: u8, num_children: u8) -&gt; Option&lt;usize&gt;</code> — SSE2: broadcast <code>byte</code> into a 16-byte vector; <code>_mm_cmpeq_epi8</code> vs <code>keys[0..16]</code>; <code>_mm_movemask_epi8</code> → bitmask; <code>trailing_zeros</code> gives slot index; mask against <code>(1 &lt;&lt; num_children) - 1</code> to exclude garbage slots.</li>
+<li><code>cfg(target_feature = &quot;sse2&quot;)</code> gate; scalar fallback (linear scan) compiled otherwise.</li>
+<li>AVX2 variant for Node48 helpers: <code>PhaseDeferred(&quot;Deferred Features Register&quot;)</code>.</li>
+<li>Benchmark: SIMD vs scalar Node16 on random byte lookups; expected ≥ 2× throughput gain at num_children = 16.</li>
+</ul>
+<p><strong>ArtOlc&lt;V&gt; (art-concurrent)</strong></p>
+<ul>
+<li>Same node layout as <code>Art&lt;V&gt;</code> plus an <code>AtomicU64</code> <code>version</code> per node (embedded in <code>NodeHeader</code>).</li>
+<li><code>Version</code> encoding: bit 0 = obsolete (node freed), bit 1 = write-locked, bits 2..63 = monotone counter.</li>
+<li>Read path: <code>read_lock_or_restart(node) -&gt; Version</code> — spin while lock bit set; return version. Descend. <code>check_or_restart(node, v)</code> — CAS-free version re-read; if changed → restart.</li>
+<li>Write path: <code>upgrade_to_write_lock_or_restart(node, v)</code> — CAS bit 1 from 0→1; if CAS fails → restart. On release, increment counter and clear bit 1.</li>
+<li>Invariant: writers couple parent→child locks (parent locked before child accessed for structural modification).</li>
+<li>Lock-free reads: readers never set any lock bit; worst case is a restart loop, not a block.</li>
+</ul>
+<p><strong>Ebr (art-concurrent)</strong></p>
+<ul>
+<li>Global epoch (<code>AtomicU64</code>, values 0/1/2 cycling); per-thread local epoch + retire list.</li>
+<li><strong>Quiescent state:</strong> when a read-side critical section ends, thread updates its local epoch to global; when all threads observe epoch E, epoch E-2&#39;s retire list is safe to free.</li>
+<li><code>retire(node_ptr)</code> — adds to thread-local list; checked for collection on each quiescent state.</li>
+<li>ABA avoidance: version counter increment on every write; a reader sees a stale version before a node is freed (obsolete bit) → restarts before using freed memory.</li>
+</ul>
+<p><strong>art-cli (art-cli)</strong></p>
+<ul>
+<li>Binary: <code>artdb</code>; subcommands: <code>insert &lt;key&gt; &lt;value&gt;</code>, <code>get &lt;key&gt;</code>, <code>del &lt;key&gt;</code>, <code>scan &lt;lo&gt; &lt;hi&gt;</code>, <code>prefix &lt;prefix&gt;</code>, <code>load &lt;file&gt;</code> (bulk import), <code>stats</code> (node-type histogram, height, memory bytes), <code>bench</code> (throughput vs BTreeMap + HashMap), <code>viz</code> (ASCII tree dump).</li>
+<li>Drives all five library crates; the integration harness for manual testing.</li>
+<li>Key encoding CLI flags: <code>--enc u64|i64|f64|str|raw</code>; internally calls the appropriate <code>KeyEnc</code> impl.</li>
+</ul>
+<h3 id="sec-3-invariants-across-all-components">Invariants across all components</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Invariant</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>memcmp order == logical order</td>
+<td>art-core KeyEnc — all impls</td>
+</tr>
+<tr>
+<td>Every Leaf stores full key</td>
+<td>art-art — required by optimistic prefix</td>
+</tr>
+<tr>
+<td>NodePtr tagged bits never alias node alignment</td>
+<td>art-art — all node structs aligned ≥ 8</td>
+</tr>
+<tr>
+<td>num_children accurate</td>
+<td>art-art — grow/shrink transitions</td>
+</tr>
+<tr>
+<td>Version bit 0 (obsolete) set before node freed</td>
+<td>art-concurrent — EBR protocol</td>
+</tr>
+<tr>
+<td>No panic on any caller-supplied key</td>
+<td>art-core → all crates</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — The Trie Family, ART Node Layout, Key Encoding</h2>
+<h3 id="sec-8-1">8.1 Trie Family Progression</h3>
+<p>Keys used for illustration: <code>&quot;ann&quot;</code>, <code>&quot;ant&quot;</code>, <code>&quot;anti&quot;</code>, <code>&quot;be&quot;</code>, <code>&quot;bee&quot;</code>, <code>&quot;beet&quot;</code> (all as byte strings).</p>
+<p><strong>256-way Trie (Trie256)</strong> — one node per byte, 256 child slots each:</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: inner trie nodes (256 slots each)
+%% legend store: leaves holding a key
+  R[&quot;&lt;b&gt;root&lt;/b&gt; [256 slots]&quot;]
+  N1[&quot;&lt;b&gt;N1&lt;/b&gt;[256]&quot;]
+  N2[&quot;&lt;b&gt;N2&lt;/b&gt;[256]&quot;]
+  N3[&quot;&lt;b&gt;N3&lt;/b&gt;[256]&quot;]
+  N4[&quot;&lt;b&gt;N4&lt;/b&gt;[256]&quot;]
+  N5[&quot;&lt;b&gt;N5&lt;/b&gt;[256]&quot;]
+  N6[&quot;&lt;b&gt;N6&lt;/b&gt;[256]&quot;]
+  N7[&quot;&lt;b&gt;N7&lt;/b&gt;[256]&quot;]
+  N8[&quot;&lt;b&gt;N8&lt;/b&gt;[256]&quot;]
+  N9[&quot;&lt;b&gt;N9&lt;/b&gt;[256]&quot;]
+  LANN[(&quot;Leaf(#quot;ann#quot;)&quot;)]
+  LANT[(&quot;Leaf(#quot;ant#quot;)&quot;)]
+  LANTI[(&quot;Leaf(#quot;anti#quot;)&quot;)]
+  LBE[(&quot;Leaf(#quot;be#quot;)&quot;)]
+  LBEE[(&quot;Leaf(#quot;bee#quot;)&quot;)]
+  LBEET[(&quot;Leaf(#quot;beet#quot;)&quot;)]
+  R -- &quot;[a]&quot; --&gt; N1
+  N1 -- &quot;[n]&quot; --&gt; N2
+  N2 -- &quot;[n]&quot; --&gt; N3
+  N3 --&gt; LANN
+  N2 -- &quot;[t]&quot; --&gt; N4
+  N4 --&gt; LANT
+  N4 -- &quot;[i]&quot; --&gt; N5
+  N5 --&gt; LANTI
+  R -- &quot;[b]&quot; --&gt; N6
+  N6 -- &quot;[e]&quot; --&gt; N7
+  N7 --&gt; LBE
+  N7 -- &quot;[e]&quot; --&gt; N8
+  N8 --&gt; LBEE
+  N8 -- &quot;[t]&quot; --&gt; N9
+  N9 --&gt; LBEET
+  classDef rt stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  class R,N1,N2,N3,N4,N5,N6,N7,N8,N9 rt
+  class LANN,LANT,LANTI,LBE,LBEE,LBEET store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>inner trie nodes (256 slots each)</li><li><span class="swatch store"></span>leaves holding a key</li></ul><p class="diagram-note">Drawn from the text diagram in §8.1.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>root [256 slots]
+ ├─[a]─ N1[256] ─[n]─ N2[256] ─[n]─ N3[256]→ Leaf(&quot;ann&quot;)
+ │                             └─[t]─ N4[256]→ Leaf(&quot;ant&quot;)
+ │                                    └─[i]─ N5[256]→ Leaf(&quot;anti&quot;)
+ └─[b]─ N6[256] ─[e]─ N7[256]→ Leaf(&quot;be&quot;)
+                               ├─[e]─ N8[256]→ Leaf(&quot;bee&quot;)
+                               │      └─[t]─ N9[256]→ Leaf(&quot;beet&quot;)</code></pre></details>
+<p>Height = max key length (4). Nodes = 9 inner. Memory per node ≈ 256×8 = 2048 B (64-bit ptrs). Total inner ≈ 18 KB for 6 keys.</p>
+<p><strong>RadixTree (path-compressed)</strong> — merge single-child chains into edge labels:</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: inner radix nodes
+%% legend store: leaves holding a key
+  R[&quot;&lt;b&gt;root&lt;/b&gt;&quot;]
+  N1[&quot;&lt;b&gt;N1&lt;/b&gt;&quot;]
+  N2[&quot;&lt;b&gt;N2&lt;/b&gt;&quot;]
+  N3[&quot;&lt;b&gt;N3&lt;/b&gt;&quot;]
+  N4[&quot;&lt;b&gt;N4&lt;/b&gt;&quot;]
+  LANN[(&quot;Leaf(#quot;ann#quot;)&quot;)]
+  LANT[(&quot;Leaf(#quot;ant#quot;)&quot;)]
+  LANTI[(&quot;Leaf(#quot;anti#quot;)&quot;)]
+  LBE[(&quot;Leaf(#quot;be#quot;)&quot;)]
+  LBEE[(&quot;Leaf(#quot;bee#quot;)&quot;)]
+  LBEET[(&quot;Leaf(#quot;beet#quot;)&quot;)]
+  R -- &quot;#quot;an#quot;&quot; --&gt; N1
+  N1 -- &quot;#quot;n#quot;&quot; --&gt; LANN
+  N1 -- &quot;#quot;t#quot;&quot; --&gt; N2
+  N2 -- &quot;#quot;#quot;&quot; --&gt; LANT
+  N2 -- &quot;#quot;i#quot;&quot; --&gt; LANTI
+  R -- &quot;#quot;be#quot;&quot; --&gt; N3
+  N3 --&gt; LBE
+  N3 -- &quot;#quot;e#quot;&quot; --&gt; N4
+  N4 --&gt; LBEE
+  N4 -- &quot;#quot;t#quot;&quot; --&gt; LBEET
+  classDef rt stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  class R,N1,N2,N3,N4 rt
+  class LANN,LANT,LANTI,LBE,LBEE,LBEET store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>inner radix nodes</li><li><span class="swatch store"></span>leaves holding a key</li></ul><p class="diagram-note">Drawn from the text diagram in §8.1.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>root
+ ├─&quot;an&quot;─ N1 ─&quot;n&quot;─ Leaf(&quot;ann&quot;)
+ │        └─&quot;t&quot;─ N2 ─&quot;&quot;─ Leaf(&quot;ant&quot;)
+ │                └─&quot;i&quot;─ Leaf(&quot;anti&quot;)
+ └─&quot;be&quot;─ N3→ Leaf(&quot;be&quot;)
+          ├─&quot;e&quot;─ N4→ Leaf(&quot;bee&quot;)
+          │      └─&quot;t&quot;─ Leaf(&quot;beet&quot;)</code></pre></details>
+<p>Height = 3. Nodes = 4 inner. Edge labels reduce traversal depth; each node stores a byte-string label + children map.</p>
+<p><strong>PATRICIA (binary radix)</strong> — bit-by-bit discrimination; no node stores labels, just the bit-position tested:</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: the bit-test node
+  R[&quot;&lt;b&gt;root&lt;/b&gt;&lt;br/&gt;[test bit 0]&quot;]
+  A[&quot;subtree for &#39;a&#39;&lt;br/&gt;(bit 0 = 0 in ASCII &#39;a&#39;=97)&quot;]
+  B[&quot;subtree for &#39;b&#39;&lt;br/&gt;(bit 0 = 1 in ASCII &#39;b&#39;=98)&quot;]
+  MORE[&quot;...&quot;]
+  R -- &quot;0&quot; --&gt; A
+  R -- &quot;1&quot; --&gt; B
+  B -.-&gt; MORE
+  classDef rt stroke-width:1.5px
+  class R rt</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the bit-test node</li></ul><p class="diagram-note">Drawn from the text diagram in §8.1.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>root [test bit 0]
+ ├─0: subtree for &#39;a&#39; (bit 0 = 0 in ASCII &#39;a&#39;=97)
+ └─1: subtree for &#39;b&#39; (bit 0 = 1 in ASCII &#39;b&#39;=98)
+  ...</code></pre></details>
+<p>Height = max bit-length of key. Advantage: fixed branching factor = 2, no label storage. Disadvantage: height ∝ bits, worse cache locality than wide fan-out.</p>
+<p><strong>ART</strong> — adapts node representation to actual child count; 256 max fan-out like a trie but compact:</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: Node4 inner nodes (key bytes + children)
+%% legend store: leaves holding a key
+  R[&quot;&lt;b&gt;root: Node4&lt;/b&gt;&lt;br/&gt;[keys=a,b | 2 children]&quot;]
+  A1[&quot;&lt;b&gt;Node4&lt;/b&gt; [keys=n | 1 child]&lt;br/&gt;#quot;an#quot; stored as 2 hops&quot;]
+  A2[&quot;&lt;b&gt;Node4&lt;/b&gt;&lt;br/&gt;[keys=n,t | 2 children]&quot;]
+  A3[&quot;&lt;b&gt;Node4&lt;/b&gt;&lt;br/&gt;[keys=\0,i | 2 children]&quot;]
+  LANN[(&quot;Leaf(#quot;ann#quot;)&quot;)]
+  LANT[(&quot;Leaf(#quot;ant#quot;)&lt;br/&gt;terminator byte&quot;)]
+  LANTI[(&quot;Leaf(#quot;anti#quot;)&quot;)]
+  B1[&quot;&lt;b&gt;Node4&lt;/b&gt; [keys=e | 1 child]&quot;]
+  B2[&quot;&lt;b&gt;Node4&lt;/b&gt;&lt;br/&gt;[keys=\0,e | 2 children]&quot;]
+  B4[&quot;&lt;b&gt;Node4&lt;/b&gt;&lt;br/&gt;[keys=\0,t | 2 children]&quot;]
+  LBE[(&quot;Leaf(#quot;be#quot;)&quot;)]
+  LBEE[(&quot;Leaf(#quot;bee#quot;)&quot;)]
+  LBEET[(&quot;Leaf(#quot;beet#quot;)&quot;)]
+  R -- &quot;[a]&quot; --&gt; A1
+  A1 -- &quot;[n]&quot; --&gt; A2
+  A2 -- &quot;[n]&quot; --&gt; LANN
+  A2 -- &quot;[t]&quot; --&gt; A3
+  A3 -- &quot;[\0]&quot; --&gt; LANT
+  A3 -- &quot;[i]&quot; --&gt; LANTI
+  R -- &quot;[b]&quot; --&gt; B1
+  B1 -- &quot;[e]&quot; --&gt; B2
+  B2 -- &quot;[\0]&quot; --&gt; LBE
+  B2 -- &quot;[e]&quot; --&gt; B4
+  B4 -- &quot;[\0]&quot; --&gt; LBEE
+  B4 -- &quot;[t]&quot; --&gt; LBEET
+  classDef rt stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  class R,A1,A2,A3,B1,B2,B4 rt
+  class LANN,LANT,LANTI,LBE,LBEE,LBEET store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>Node4 inner nodes (key bytes + children)</li><li><span class="swatch store"></span>leaves holding a key</li></ul><p class="diagram-note">Drawn from the text diagram in §8.1.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>root: Node4 [keys=a,b | 2 children]
+ ├─[a] Node4 [keys=n | 1 child]  ← &quot;an&quot; stored as 2 hops
+ │      └─[n] Node4 [keys=n,t | 2 children]
+ │             ├─[n] Leaf(&quot;ann&quot;)
+ │             └─[t] Node4 [keys=\0,i | 2 children]
+ │                    ├─[\0] Leaf(&quot;ant&quot;)   ← terminator byte
+ │                    └─[i]  Leaf(&quot;anti&quot;)
+ └─[b] Node4 [keys=e | 1 child]
+        └─[e] Node4 [keys=\0,e | 2 children]
+               ├─[\0] Leaf(&quot;be&quot;)
+               └─[e]  Node4 [keys=\0,t | 2 children]
+                       ├─[\0] Leaf(&quot;bee&quot;)
+                       └─[t]  Leaf(&quot;beet&quot;)</code></pre></details>
+<p>Height = max key length (bytes). Inner node memory ∝ actual children: Node4 = 52 B, vs 2048 B for Trie256.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Structure</th>
+<th>Inner nodes</th>
+<th>Max height</th>
+<th>Bytes/inner node</th>
+<th>Per-node child cost</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Trie256</td>
+<td>O(n·L)</td>
+<td>L</td>
+<td>≥2048</td>
+<td>8 B ptr</td>
+</tr>
+<tr>
+<td>RadixTree</td>
+<td>O(n)</td>
+<td>O(L)</td>
+<td>variable label</td>
+<td>ptr + label</td>
+</tr>
+<tr>
+<td>PATRICIA</td>
+<td>O(n)</td>
+<td>O(L·8)</td>
+<td>24–32</td>
+<td>2 ptrs + bit pos</td>
+</tr>
+<tr>
+<td>ART</td>
+<td>O(n)</td>
+<td>L</td>
+<td>52–2072</td>
+<td>adaptive (see <a class="cite" href="/system-design-blueprints/systems/adaptive-radix-tree/architecture/#sec-8-3">§8.3</a>)</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-8-2">8.2 Binary-Comparable Key Encoding (KeyEnc)</h3>
+<p><strong>Rule:</strong> <code>memcmp(encode(a), encode(b)) == 0 iff a==b</code>; sign of <code>memcmp</code> equals sign of <code>cmp(a,b)</code> under the type&#39;s natural order. This is the invariant that makes ART an ordered index.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Encoding rule</th>
+<th>Byte width</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>u8</code></td>
+<td>identity</td>
+<td>1</td>
+</tr>
+<tr>
+<td><code>u32</code></td>
+<td>big-endian (<code>to_be_bytes()</code>)</td>
+<td>4</td>
+</tr>
+<tr>
+<td><code>u64</code></td>
+<td>big-endian (<code>to_be_bytes()</code>)</td>
+<td>8</td>
+</tr>
+<tr>
+<td><code>i64</code></td>
+<td>flip bit 63 (MSB), then big-endian → all negatives sort before positives</td>
+<td>8</td>
+</tr>
+<tr>
+<td><code>f64</code></td>
+<td>if bit 63 set (negative): flip all 64 bits; else flip only bit 63 → IEEE 754 total order</td>
+<td>8</td>
+</tr>
+<tr>
+<td><code>str</code></td>
+<td>UTF-8 bytes as-is, append <code>0x00</code> terminator</td>
+<td>len+1</td>
+</tr>
+<tr>
+<td>composite</td>
+<td>concatenate individual encodings in declaration order</td>
+<td>sum of parts</td>
+</tr>
+</tbody></table></div>
+<p><strong>Worked example — proving memcmp order:</strong></p>
+<pre class="diagram"><code>Logical values:   -3i64,  0i64,  1i64
+i64 encode:
+  -3 → 0x8000_0000_0000_0000 XOR 0xFFFF... = flip bit63 on raw two&#39;s-complement
+       raw -3 = 0xFFFF_FFFF_FFFF_FFFD → flip MSB → 0x7FFF_FFFF_FFFF_FFFD
+   0 → 0x0000_0000_0000_0000 → flip MSB → 0x8000_0000_0000_0000
+   1 → 0x0000_0000_0000_0001 → flip MSB → 0x8000_0000_0000_0001
+
+memcmp order: 0x7FFF... &lt; 0x8000...0000 &lt; 0x8000...0001  ✓ (-3 &lt; 0 &lt; 1)</code></pre>
+<pre class="diagram"><code>f64 encode:
+  -1.0 → IEEE bits = 0xBFF0_0000_0000_0000 (bit63=1) → flip all → 0x400F_FFFF_FFFF_FFFF
+   0.0 → IEEE bits = 0x0000_0000_0000_0000 (bit63=0) → flip bit63 → 0x8000_0000_0000_0000
+  +1.0 → IEEE bits = 0x3FF0_0000_0000_0000 (bit63=0) → flip bit63 → 0xBFF0_0000_0000_0000
+
+memcmp order: 0x400F... &lt; 0x8000... &lt; 0xBFF0...  ✓ (-1.0 &lt; 0.0 &lt; +1.0)</code></pre>
+<p><strong>str terminator necessity:</strong> <code>&quot;ant&quot;</code> encodes as <code>61 6E 74 00</code>; without terminator <code>&quot;ant&quot;</code> would be a byte prefix of <code>&quot;anti&quot;</code> at the byte level, breaking radix traversal (two distinct keys would share a full traversal path). The <code>0x00</code> terminator guarantees no encoded key is a prefix of another.</p>
+<hr>
+<h3 id="sec-8-3">8.3 ART Node Layouts</h3>
+<p><strong>NodeHeader</strong> — common prefix; embedded at byte offset 0 of every inner node:</p>
+<pre class="diagram"><code>struct NodeHeader {
+    version:     AtomicU64,      //  8 B  (used by ArtOlc; zero in single-threaded Art)
+    node_type:   NodeType,       //  1 B  (Node4=0, Node16=1, Node48=2, Node256=3, Leaf=4)
+    num_children: u16,           //  2 B
+    prefix_len:  u32,            //  4 B  (may exceed MAX_PREFIX_LEN for optimistic)
+    prefix:      [u8; 8],        //  8 B  MAX_PREFIX_LEN = 8
+}                                // = 23 B; padded to 24 B</code></pre>
+<p><strong>Node4</strong> — capacity 1–4 children; linear scan:</p>
+<pre class="diagram"><code>struct Node4 {
+    hdr:      NodeHeader,        // 24 B
+    keys:     [u8; 4],           //  4 B  sorted partial-key bytes (unused slots = 0)
+    _pad:     [u8; 4],           //  4 B  align children to 8 B
+    children: [NodePtr; 4],      // 32 B  (4 × 8 B)
+}                                // = 64 B total (one cache line)</code></pre>
+<p><strong>Node16</strong> — capacity 5–16 children; SIMD scan (SSE2 on 16-byte aligned <code>keys</code>):</p>
+<pre class="diagram"><code>struct Node16 {
+    hdr:      NodeHeader,        // 24 B
+    keys:     [u8; 16],          // 16 B  sorted, 16-byte aligned for SSE load
+    children: [NodePtr; 16],     //128 B
+}                                // = 168 B ≈ 3 cache lines</code></pre>
+<p><strong>Node48</strong> — capacity 17–48 children; 256-byte index + 48 child slots:</p>
+<pre class="diagram"><code>struct Node48 {
+    hdr:         NodeHeader,     //  24 B
+    child_index: [u8; 256],      // 256 B  key_byte -&gt; slot (0xFF = empty)
+    children:    [NodePtr; 48],  // 384 B
+}                                // = 664 B ≈ 11 cache lines</code></pre>
+<p><strong>Node256</strong> — capacity 49–256 children; direct index:</p>
+<pre class="diagram"><code>struct Node256 {
+    hdr:      NodeHeader,        //   24 B
+    children: [NodePtr; 256],    // 2048 B
+}                                // = 2072 B ≈ 33 cache lines</code></pre>
+<p><strong>Leaf</strong> — stores the FULL original key (required for optimistic-prefix verification):</p>
+<pre class="diagram"><code>struct Leaf&lt;V&gt; {
+    hdr:   NodeHeader,   // 24 B  (node_type = Leaf; prefix/num_children unused)
+    key:   Box&lt;[u8]&gt;,    //  pointer + len
+    value: V,
+}</code></pre>
+<p><strong>NodePtr</strong> — tagged pointer, 8 B. Low 3 bits encode NodeType (Node4=0b000…Node256=0b011, Leaf=0b100); the upper bits are the real pointer &gt;&gt; 3. On 64-bit targets with 8-B-aligned nodes the bottom 3 bits are always 0 before tagging. Null = <code>0</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Node type</th>
+<th>Capacity band</th>
+<th>Bytes</th>
+<th>Cache lines</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Node4</td>
+<td>1–4</td>
+<td>64</td>
+<td>1</td>
+</tr>
+<tr>
+<td>Node16</td>
+<td>5–16</td>
+<td>168</td>
+<td>3</td>
+</tr>
+<tr>
+<td>Node48</td>
+<td>17–48</td>
+<td>664</td>
+<td>11</td>
+</tr>
+<tr>
+<td>Node256</td>
+<td>49–256</td>
+<td>2072</td>
+<td>33</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-8-4">8.4 Grow / Shrink State Diagram</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">stateDiagram-v2
+  direction LR
+  state &quot;Node4 (cap=4)&quot; as N4
+  state &quot;Node16 (cap=16)&quot; as N16
+  state &quot;Node48 (cap=48)&quot; as N48
+  state &quot;Node256 (cap=256)&quot; as N256
+  N4 --&gt; N16 : insert child when full
+  N16 --&gt; N48 : insert child when full
+  N48 --&gt; N256 : insert child when full
+  N16 --&gt; N4 : remove, num_children #lt; 2
+  N48 --&gt; N16 : remove, num_children #lt; 5
+  N256 --&gt; N48 : remove, num_children #lt; 17</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.4.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>        insert child when full           insert child when full
+Node4 ──────────────────────&gt; Node16 ──────────────────────&gt; Node48 ──────────&gt; Node256
+ (cap=4)                       (cap=16)                       (cap=48)           (cap=256)
+
+Node4 &lt;────────────────────── Node16 &lt;────────────────────── Node48 &lt;────────── Node256
+        remove: num_children&lt;2          remove: num_children&lt;5          remove: num_children&lt;17</code></pre></details>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Transition</th>
+<th>Trigger condition</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Node4→Node16</td>
+<td><code>num_children == 4</code> + insert</td>
+<td>allocate Node16, copy 4 keys+children, insert 5th</td>
+</tr>
+<tr>
+<td>Node16→Node48</td>
+<td><code>num_children == 16</code> + insert</td>
+<td>allocate Node48, build child_index, copy children</td>
+</tr>
+<tr>
+<td>Node48→Node256</td>
+<td><code>num_children == 48</code> + insert</td>
+<td>allocate Node256, scatter via child_index</td>
+</tr>
+<tr>
+<td>Node256→Node48</td>
+<td><code>num_children == 17</code> + remove</td>
+<td>allocate Node48, compact from direct array</td>
+</tr>
+<tr>
+<td>Node48→Node16</td>
+<td><code>num_children == 5</code> + remove</td>
+<td>allocate Node16, sort from index</td>
+</tr>
+<tr>
+<td>Node16→Node4</td>
+<td><code>num_children == 2</code> + remove</td>
+<td>allocate Node4, copy 2 remaining</td>
+</tr>
+</tbody></table></div>
+<p>Shrink threshold is <code>capacity_lower - 1</code> to avoid thrashing at exactly the boundary.</p>
+<hr>
+<h3 id="sec-8-5">8.5 Path Compression: Pessimistic, Optimistic, Lazy Expansion</h3>
+<p><strong>Pessimistic prefix</strong> — up to <code>MAX_PREFIX_LEN=8</code> bytes stored inline in <code>NodeHeader.prefix</code>. During traversal: compare <code>prefix[0..min(prefix_len, 8)]</code> byte by byte. If mismatch → key not present (for get) or split node (for insert). All bytes are verified on every traversal step; no false-positive traversal.</p>
+<p><strong>Optimistic prefix</strong> — when the shared prefix exceeds 8 bytes, <code>prefix_len</code> is stored accurately but only the first 8 bytes are in <code>prefix</code>. During traversal, skip over <code>prefix_len</code> bytes without checking the hidden tail. At the leaf, do a full key comparison to verify; if mismatch, the key is absent. Avoids storing long prefixes at every node; costs one extra leaf-key comparison.</p>
+<p><strong>Lazy expansion</strong> — when only a single descendant exists below a branch point, skip creating inner nodes; store the leaf directly. When a second key arrives that diverges, materialize the inner node(s) at that point.</p>
+<p><strong>Worked prefix-split insert</strong> — keys <code>&quot;antidote&quot;</code> and <code>&quot;antelope&quot;</code> share prefix <code>&quot;ant&quot;</code>:</p>
+<pre class="diagram"><code>State before: root → Node4[key=&#39;a&#39;] → Node4[key=&#39;n&#39;] → Node4[key=&#39;t&#39;]
+              → Leaf(&quot;antidote&quot;) [lazy, no inner node for &#39;idote&#39;]
+
+Insert &quot;antelope&quot;:
+1. Traverse: root→&#39;a&#39;→&#39;n&#39;→&#39;t&#39;, reach Leaf(&quot;antidote&quot;)
+2. Compare &quot;antelope&quot; vs stored key &quot;antidote&quot; byte-by-byte from position 3:
+   pos3: &#39;i&#39; vs &#39;e&#39; → mismatch at pos 3
+3. Create new Node4 at this point, prefix = &quot;&quot; (no common bytes after &#39;ant&#39;)
+4. Node4.add_child(&#39;i&#39;, Leaf(&quot;antidote&quot;))
+5. Node4.add_child(&#39;e&#39;, Leaf(&quot;antelope&quot;))
+6. Replace the slot in parent that pointed to Leaf(&quot;antidote&quot;) with new Node4.
+
+Result:
+  ...→&#39;t&#39;→ Node4[keys=&#39;e&#39;,&#39;i&#39;]
+            ├─&#39;e&#39;→ Leaf(&quot;antelope&quot;)
+            └─&#39;i&#39;→ Leaf(&quot;antidote&quot;)</code></pre>
+<hr>
+<h3 id="sec-8-6">8.6 find_child Semantics Per Node Type</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Node</th>
+<th>find_child(byte) strategy</th>
+<th>Complexity</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Node4</td>
+<td>linear scan <code>keys[0..num_children]</code>; branchless compare with early exit</td>
+<td>O(4)</td>
+</tr>
+<tr>
+<td>Node16</td>
+<td>SIMD: load <code>keys[0..16]</code> into XMM, <code>_mm_cmpeq_epi8(xmm, broadcast(byte))</code>, movemask→ctz; scalar fallback: binary search</td>
+<td>O(1) / O(log16)</td>
+</tr>
+<tr>
+<td>Node48</td>
+<td><code>child_index[byte]</code>; if <code>!= 0xFF</code>: <code>children[child_index[byte]]</code></td>
+<td>O(1)</td>
+</tr>
+<tr>
+<td>Node256</td>
+<td><code>children[byte]</code>; if non-null: return</td>
+<td>O(1)</td>
+</tr>
+</tbody></table></div>
+<p>Node4 linear scan is branchless (compare all 4, mask with <code>num_children</code>, find first match) to avoid branch mispredictions on tiny arrays.</p>
+<hr>
+<h3 id="sec-8-7">8.7 Worked INSERT Sequence (6 Keys)</h3>
+<p>Keys in insertion order: <code>&quot;be&quot;</code>, <code>&quot;bee&quot;</code>, <code>&quot;beet&quot;</code>, <code>&quot;ann&quot;</code>, <code>&quot;ant&quot;</code>, <code>&quot;anti&quot;</code>.</p>
+<pre class="diagram"><code>Step 1: insert &quot;be&quot;
+  root = Leaf(&quot;be&quot;)   [lazy: no inner node]
+
+Step 2: insert &quot;bee&quot;
+  &quot;bee&quot; vs &quot;be&quot;: &quot;be&quot; is a prefix → need inner node
+  Create Node4 at root, prefix=&quot;&quot;
+  Add &#39;b&#39;→ new Node4(prefix=&quot;e&quot;), which holds:
+    child[0x00]→Leaf(&quot;be&quot;)   [0x00 = string terminator]
+    child[&#39;e&#39;]→Leaf(&quot;bee&quot;)
+  root = Node4[key=&#39;b&#39;]→Node4(prefix=&quot;e&quot;)[keys=0x00,&#39;e&#39;]
+
+Step 3: insert &quot;beet&quot;
+  Traverse: root→&#39;b&#39;→Node4(prefix=&quot;e&quot;)→check prefix &quot;e&quot; vs &quot;eet&quot;[0]=&#39;e&#39; ✓ advance 1
+  At Node4(prefix=&quot;e&quot;), partial key byte = &#39;e&#39; → find_child(&#39;e&#39;) → Leaf(&quot;bee&quot;)
+  &quot;beet&quot; vs &quot;bee&quot;: diverge at pos 3, &quot;beet&quot;[3]=&#39;t&#39;, &quot;bee&quot; ends (0x00 terminator)
+  Create Node4: child[0x00]→Leaf(&quot;bee&quot;), child[&#39;t&#39;]→Leaf(&quot;beet&quot;)
+  replace Leaf(&quot;bee&quot;) slot with new Node4
+
+Step 4: insert &quot;ann&quot;
+  Traverse root Node4: find_child(&#39;a&#39;) → miss
+  add_child(&#39;a&#39;, Leaf(&quot;ann&quot;)) to root Node4 → root Node4 now has 2 children: &#39;a&#39;,&#39;b&#39;
+
+Step 5: insert &quot;ant&quot;
+  root→&#39;a&#39;→Leaf(&quot;ann&quot;); &quot;ant&quot; vs &quot;ann&quot;: diverge at pos 2, &#39;n&#39; vs &#39;t&#39;
+  prefix split: create Node4(prefix=&quot;an&quot;)[keys=&#39;n&#39;,&#39;t&#39;]
+    &#39;n&#39;→Leaf(&quot;ann&quot;), &#39;t&#39;→Leaf(&quot;ant&quot;)
+  replace Leaf(&quot;ann&quot;) in root with new Node4
+
+Step 6: insert &quot;anti&quot;
+  root→&#39;a&#39;→Node4(prefix=&quot;an&quot;)→find_child(&#39;t&#39;)→Leaf(&quot;ant&quot;)
+  &quot;anti&quot; vs &quot;ant&quot;: diverge at pos 3, &#39;i&#39; vs 0x00 (terminator)
+  create Node4: child[0x00]→Leaf(&quot;ant&quot;), child[&#39;i&#39;]→Leaf(&quot;anti&quot;)
+  replace Leaf(&quot;ant&quot;) slot
+
+[No Node4→Node16 grow in this sequence; root Node4 has 2 children. Grow would trigger at 5th child insert into a full Node4.]
+
+Grow example: if we then insert &quot;bat&quot;,&quot;bad&quot;,&quot;ban&quot;,&quot;bar&quot;,&quot;bay&quot; into the &#39;b&#39; subtree,
+  the Node4 holding &#39;e&#39; fills (4 keys); inserting a 5th triggers:
+  allocate Node16, copy 4 keys+children, insert 5th → num_children=5.</code></pre>
+<hr>
+<h3 id="sec-8-8">8.8 Worked RANGE Scan</h3>
+<p><code>range(lo=Bound::Included(&quot;ant&quot;), hi=Bound::Excluded(&quot;bee&quot;))</code>:</p>
+<pre class="diagram"><code>In-order DFS from root; at each node:
+1. If current_key_prefix &gt; hi → prune entire subtree
+2. If node is Leaf → emit if lo &lt;= leaf.key &lt; hi
+3. For inner node: iterate children in sorted key-byte order (ascending)
+   Node4/Node16: already sorted by keys[] array
+   Node48: iterate 0..=255, emit child_index[b] != 0xFF slots in order
+   Node256: iterate 0..=255
+
+Traversal result (ascending):
+  &quot;ant&quot;  → included (&gt;= lo, &lt; hi)  ✓
+  &quot;anti&quot; → included                 ✓
+  &quot;be&quot;   → &quot;be&quot; &lt; &quot;bee&quot; so included ✓
+  &quot;bee&quot;  → excluded (== hi, Excluded bound)
+
+Emitted: [&quot;ant&quot;, &quot;anti&quot;, &quot;be&quot;]</code></pre>
+<p>The iterator reconstructs full keys by tracking the current byte-path as it descends (stack of <code>(NodePtr, child_index)</code> pairs); each Leaf emits <code>leaf.key</code> directly.</p>
+<hr>
+<h3 id="sec-8-9">8.9 Edge and Degenerate Cases</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Behavior / Invariant</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Empty key <code>&quot;&quot;</code></td>
+<td>Encodes as single 0x00 terminator (str) or zero-length for raw bytes; valid Leaf at root</td>
+</tr>
+<tr>
+<td>Key A is prefix of key B</td>
+<td>str encoding with 0x00 terminator prevents this: <code>&quot;ant\0&quot;</code> ≠ prefix of <code>&quot;anti\0&quot;</code> at byte level</td>
+</tr>
+<tr>
+<td>Max-length key (e.g., 2048 B)</td>
+<td>Height ≤ 2048; all node operations O(key_len); no structural issue; <code>ArtError::KeyTooLong</code> if exceeds configured limit</td>
+</tr>
+<tr>
+<td>Duplicate insert</td>
+<td><code>insert</code> returns <code>Some(old_value)</code>, replaces in-place; Leaf.value overwritten; no structural change</td>
+</tr>
+<tr>
+<td>Delete last child of Node4</td>
+<td>After shrink: if parent had exactly one non-leaf child pointing to this now-empty Node4, path-collapse: replace inner node with its sole remaining Leaf</td>
+</tr>
+<tr>
+<td>Delete causing Node4 with 1 child (non-leaf)</td>
+<td>Compress: merge the single child&#39;s prefix into the grandparent; remove the now-redundant Node4</td>
+</tr>
+<tr>
+<td>Optimistic prefix mismatch on get</td>
+<td>Reach leaf, compare <code>leaf.key</code> vs query; return <code>None</code> — no false positive</td>
+</tr>
+<tr>
+<td>Concurrent insert + read (ArtOlc)</td>
+<td>Reader restarts if version counter changes mid-traversal; correctness via OLC protocol</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

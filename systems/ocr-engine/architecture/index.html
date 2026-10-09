@@ -1,0 +1,451 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>OCR Engine from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="OCR Engine from Scratch, hld: §3 overview + §8 domain model. From-scratch OCR engine: decode image (#173) → Image<Gray8> → binarize (Otsu/Sauvola) → preprocess (denoise/deskew/normalize) → layout (connected components → blocks → reading order) → segment lines…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/ocr-engine/">OCR Engine from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>OCR Engine from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~41 weeks</li> <li>1,811 lines</li> <li>blueprint #387</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/ocr-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/ocr-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/ocr-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/ocr-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/ocr-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/ocr-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/ocr-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/ocr-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/ocr-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/ocr-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:OCR Engine from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Diagram</h3>
+<pre class="diagram"><code> Rust callers ─────────►┌──────────────────────────────────────────────────────────────────┐
+ C / Py-ctypes callers ►│  Public API surface                                                │
+ CLI ocrc ─────────────►│  ocr (facade) :: recognize_page / binarize / analyze_layout / train│
+                        │  cabi (extern &quot;C&quot;) :: ocr_open / ocr_recognize / ocr_result_*       │
+                        └───────────────┬──────────────────────────────────────────────────┘
+                                        │ (Image, Config, model handle) → Page tree
+                                        ▼
+   ┌────────────────────────────────────────────────────────────────────────────────────────┐
+   │                                       ocr-core                                           │
+   │  Image&lt;Gray8|Rgb8|F32&gt; (stride/ROI) · Rect/Point/Polygon · Page▸Block▸Line▸Word▸Glyph    │
+   │  · Confidence · OcrError · Rng(seed) · CoordFrame (origin=top-left, px)                  │
+   └───┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────────┘
+       │          │          │          │          │          │          │          │
+       ▼          ▼          ▼          ▼          ▼          ▼          ▼          ▼
+ ┌─────────┐┌──────────┐┌────────┐┌────────┐┌────────┐┌──────────┐┌────────┐┌──────────┐
+ │ imageio ││ binarize ││preproc ││ layout ││ lines  ││ segment  ││features││recognizer│
+ │ #173    ││ Otsu /   ││denoise/││ CC(#389││proj-   ││ word-gap ││zoning/ ││ Classical│
+ │ decode/ ││ Sauvola  ││ deskew ││)+RLSA+ ││profile ││ + char   ││ HOG /  ││ (kNN/SVM │
+ │ PGM/PBM ││(integral)││(#389)  ││ XY-cut ││baseline││ overseg  ││profiles││ #372) || │
+ │         ││          ││        ││reading-││x-height││ + merge  ││ bitmap ││ Neural   │
+ │         ││          ││        ││ order  ││        ││          ││        ││ CNN+BiLSTM│
+ └────┬────┘└────┬─────┘└───┬────┘└───┬────┘└───┬────┘└────┬─────┘└───┬────┘└────┬─────┘
+      │          │          │         │         │          │          │          │+CTC head
+      └──────────┴──────────┴────┬────┴─────────┴──────────┴──────────┴──────────┘
+                                 │ line image + posteriors (T×|alphabet+blank|)
+                                 ▼
+   ┌────────────────────────────────────────────────────────────────────────────────────────┐
+   │ ctc :: forward-backward loss · greedy collapse · prefix-beam decode                      │
+   └───────────────────────────────────────────────┬────────────────────────────────────────┘
+                                                    ▼
+   ┌────────────────────────────────────────────────────────────────────────────────────────┐
+   │ lexicon (trie/DAWG + edit-distance + char/word n-gram) ──► decode :: LM-fused beam       │
+   │ search → word lattice → confidence-scored Word/Glyph                                     │
+   └───────────────────────────────────────────────┬────────────────────────────────────────┘
+                                                    ▼
+   ┌────────────────────────────────────────────────────────────────────────────────────────┐
+   │ output :: plain text · hOCR (HTML) · ALTO (XML) · JSON  (reading-order, bbox, conf)      │
+   └────────────────────────────────────────────────────────────────────────────────────────┘
+
+ deps: #389 CV(conv/Sobel/Canny/Hough/morph/CC) · #385 TrueType(synthetic) · #112 autograd(train)
+       · #349 BLAS(CNN/SVM) · #173 codec(decode) · #372 ML(kNN/SVM)
+ side: train (synthetic-line gen + CTC SGD) · bench (pages/s, CER/WER) · conformance (Tesseract diff)</code></pre>
+<h3 id="sec-3-2">3.2 Box Narratives</h3>
+<ul>
+<li><strong>Public API / <code>ocr</code> facade.</strong> Re-exports the staged entry points; <code>recognize_page(&amp;Image, &amp;Config, &amp;Model) -&gt; Page</code>. Thin — validates image dtype/dims, selects engine (classical|neural), orchestrates stages, never holds learning logic. Enforces the stage ordering at the type level (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/architecture/#sec-3-4">§3.4</a>).</li>
+<li><strong><code>cabi</code> ABI.</strong> <code>#[repr(C)]</code> opaque <code>OcrEngine*</code>/<code>OcrResult*</code>; marshals a row-major <code>uint8*</code>+dims into an <code>Image</code> view; walks the <code>Page</code> tree out via index accessors (<code>ocr_result_block_count</code>, <code>ocr_result_line_text</code>); never unwinds across the boundary (catch → code).</li>
+<li><strong><code>ocr-core</code>.</strong> The vocabulary. <code>Image&lt;T&gt;</code> (typed pixels, explicit stride, ROI sub-views that borrow, never copy); the <code>Page▸Block▸Line▸Word▸Glyph</code> tree with every node carrying a <code>Rect</code> in the page coordinate frame (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-1">I1</a>); <code>Confidence∈[0,1]</code>; <code>OcrError</code>; seeded <code>Rng</code> (no global RNG, <a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-7">I7</a>). No algorithms.</li>
+<li><strong><code>imageio</code>.</strong> Wraps #173 for PNG/JPEG decode; native readers for PGM/PBM (the simplest test inputs). Converts to <code>Image&lt;Gray8&gt;</code> (luminance) for the pipeline; preserves DPI metadata (used for size-normalization).</li>
+<li><strong><code>binarize</code>.</strong> Image → bilevel. Global <strong>Otsu</strong> (maximize between-class variance over the histogram). Adaptive <strong>Sauvola/Niblack/Wolf</strong> (per-pixel threshold from a local window&#39;s mean+std, computed in O(1) via <strong>integral images</strong>). Output <code>Image&lt;Gray8&gt;</code> ∈ {0,255}. Idempotent on already-binary input (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-8">I8</a>).</li>
+<li><strong><code>preprocess</code>.</strong> Denoise (median / small Gaussian / morphological open, via #389); <strong>deskew</strong> (rotate-candidate horizontal-projection-variance maximization, or dominant Hough-line angle, via #389) to ±0.1°; contrast/height normalization for the recognizer; border + black-margin removal. Each op records the transform so output boxes map back to original pixels.</li>
+<li><strong><code>layout</code>.</strong> Connected components (#389 union-find) → component graph; <strong>RLSA</strong> (run-length smoothing) bridges intra-line gaps; <strong>XY-cut</strong> (recursive projection-valley splitting) / Voronoi yields blocks; block classification (text vs image/rule, by CC statistics); <strong>reading-order detection</strong> (topological sort of blocks by column + vertical position) producing a total order (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-2">I2</a>).</li>
+<li><strong><code>lines</code>.</strong> Within a text block: horizontal projection profile → smoothed → valley detection → text lines; <strong>baseline + x-height</strong> estimation (for normalization and for the neural recognizer&#39;s fixed input height); line-polygon extraction (handles slight curvature). Emits ordered <code>Line</code>s with boxes.</li>
+<li><strong><code>segment</code>.</strong> <em>Classical path only.</em> Word segmentation by inter-CC gap thresholding (intra- vs inter-word gap bimodality); character <strong>over-segmentation</strong> (split at gradient/projection minima) + <strong>merge</strong> search (the recognizer scores merge hypotheses) to handle touching/broken glyphs. The neural path skips this entirely (CTC is segmentation-free).</li>
+<li><strong><code>features</code>.</strong> <em>Classical path.</em> From a normalized glyph bitmap: <strong>zoning</strong> (per-cell ink density), <strong>HOG</strong> (gradient-orientation histograms), projection/contour profiles, raw downsampled bitmap. Output a fixed-length vector → #372 classifier.</li>
+<li><strong><code>recognizer</code>.</strong> The <code>Recognizer</code> trait: <code>recognize_line(&amp;LineImage) -&gt; (Posteriors | GlyphString)</code>. <code>ClassicalRecognizer</code>: per-segmented-glyph feature → kNN/SVM (#372) → char + score. <code>NeuralRecognizer</code>: line image (fixed height H, variable width W) → CNN (downsamples to a feature sequence) → BiLSTM (context) → linear+softmax → <code>T×(|alphabet|+1)</code> posteriors for CTC. Both behind one trait so <code>decode</code> is engine-agnostic.</li>
+<li><strong><code>ctc</code>.</strong> The alignment-free bridge. Training: forward-backward over the blank-augmented label lattice → <code>−log p(label|posteriors)</code> + gradient (to #112). Inference: <strong>greedy</strong> (argmax/frame → collapse repeats → strip blanks) and <strong>prefix-beam</strong> (sum alignment probabilities per label prefix, fold in LM). Shared verbatim with #388.</li>
+<li><strong><code>lexicon</code>.</strong> Dictionary as a <strong>trie/DAWG</strong> (compact, prefix-shared); <strong>edit-distance</strong> correction (Levenshtein over the DAWG with a cutoff); <strong>char + word n-gram LM</strong> (counts + backoff) for the decode prior. Word-frequency weights bias the beam.</li>
+<li><strong><code>decode</code>.</strong> Fuses recognizer posteriors with the lexicon + LM in a <strong>beam search</strong>: extend hypotheses character-by-character (or word-by-word), score = acoustic(posterior) + α·LM + β·word-insertion; constrain/encourage dictionary words; emit a word <strong>lattice</strong> + 1-best with per-word/per-glyph <strong>confidence</strong>.</li>
+<li><strong><code>output</code>.</strong> Serializes the <code>Page</code> tree: <strong>plain text</strong> (reading order, line breaks), <strong>hOCR</strong> (HTML with <code>ocr_line</code>/<code>ocrx_word</code> + <code>bbox</code> + <code>x_wconf</code>), <strong>ALTO</strong> (XML, library-standard), <strong>JSON</strong> (full tree). All in the original-image coordinate frame (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-1">I1</a>).</li>
+<li><strong><code>train</code>.</strong> <em>Builds models, not part of inference.</em> Synthetic line generator: render text (sampled from a corpus) via <strong>#385</strong> at varied fonts/sizes, apply degradations (blur, noise, skew, ink bleed, JPEG artifacts) → <code>(line image, transcription)</code> pairs with exact boxes. CTC training loop on #112 (Adam/SGD, LR schedule, validation CER early-stop). Classical path: fit kNN/SVM on glyph features.</li>
+<li><strong><code>bench</code>.</strong> Throughput (pages/s, lines/s), per-stage latency breakdown, CER/WER vs degradation level, neural-vs-classical A/B. Pinned, median-of-k.</li>
+<li><strong><code>conformance</code>.</strong> Synthetic ground-truth (exact transcription from the renderer), the <strong>Tesseract differential harness</strong> (offline golden outputs), pipeline-invariant asserts, fuzzing (garbage/blank/huge images).</li>
+</ul>
+<h3 id="sec-3-3">3.3 Boundaries</h3>
+<ul>
+<li><strong>Trust boundary:</strong> C ABI (untrusted dims/pointers/config → validated) + untrusted image data (truncated/huge/adversarial pixels → bounded, never UB) + untrusted model files (version/checksum-checked, <a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-14">I14</a>).</li>
+<li><strong>Concurrency boundary:</strong> blocks, lines, and glyphs are independent recognition tasks over a shared read-only binarized page → data-parallel by construction (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-11">I11</a>).</li>
+<li><strong>Coordinate boundary:</strong> every stage transforms boxes back to the <strong>original</strong> image frame; the deskew/crop/normalize transforms are invertible and recorded (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-1">I1</a>). Origin top-left, +x right, +y down, units = source pixels.</li>
+<li><strong>Numerical boundary:</strong> CNN/CTC FP reductions are order-dependent; match Tesseract/oracle <em>within CER/WER tolerance</em>, not bit-for-bit (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/trade-offs/#adr-18">ADR-18</a>).</li>
+<li><strong>Stage-ordering boundary:</strong> the type system forbids recognizing an un-binarized image or segmenting an un-analyzed page (typed stage handles, <a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-9">I9</a>).</li>
+</ul>
+<h3 id="sec-3-4">3.4 Data-flow walk — one <code>recognize_page</code> (neural engine)</h3>
+<ol>
+<li><code>imageio</code> decodes <code>scan.png</code> (#173) → <code>Image&lt;Rgb8&gt;</code> → luminance <code>Image&lt;Gray8&gt;</code>; DPI read for normalization.</li>
+<li><code>binarize::sauvola</code> (integral-image window) → bilevel <code>Image&lt;Gray8&gt;</code>; skew estimated.</li>
+<li><code>preprocess::deskew</code> rotates by −θ (projection-variance argmax, #389); denoise (morphological open, #389); transform <code>T_deskew</code> recorded.</li>
+<li><code>layout</code>: connected components (#389) → RLSA bridge → XY-cut blocks → classify text blocks → reading-order total order (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-2">I2</a>).</li>
+<li><code>lines</code>: per text block, projection-profile line detection + baseline/x-height; ordered <code>Line</code> boxes.</li>
+<li>Per line (parallel, <a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-11">I11</a>): normalize to height H; <code>NeuralRecognizer</code> → CNN → BiLSTM → softmax → <code>T×(|A|+1)</code> posteriors.</li>
+<li><code>decode</code>: prefix-beam over posteriors + lexicon DAWG + word n-gram LM → word sequence + per-word confidence; boxes from CTC alignment back-projected through <code>T_deskew⁻¹</code> to source pixels (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-1">I1</a>).</li>
+<li>Assemble <code>Page▸Block▸Line▸Word▸Glyph</code>; <code>output::hocr</code> serializes with bbox + <code>x_wconf</code>.</li>
+<li>Optional <code>PageTrace</code> (per-stage ms, CC count, skew angle, mean line confidence, beam stats).</li>
+</ol>
+<p><strong>Where the classical engine diverges (steps 6–7):</strong> steps 1–5 are identical. At step 6, instead of one segmentation-free neural pass, <code>segment</code> splits each line into words (gap analysis) and over-segments characters; <code>features</code> (zoning/HOG) feeds the #372 kNN/SVM, which scores merge hypotheses (the recognizer is <em>in</em> the segmentation loop). At step 7, <code>decode</code> runs over <code>GlyphString</code> (chars + scores) with the same lexicon/LM rerank — no CTC, no posteriors. This is the <a class="cite" href="/system-design-blueprints/systems/ocr-engine/study/#sec-34">MM8</a> contrast made operational: the classical path&#39;s accuracy is bounded by step-6 segmentation, the neural path&#39;s is not. Both converge again at step 8 (one <code>Page</code> tree, one output path), so the engine choice is invisible downstream — exactly what the single <code>Recognizer</code> trait (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/blueprint/#sec-11-4">§11.4</a>) buys.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Document Image → Text</h2>
+<h3 id="sec-8-1">8.1 The page tree &amp; coordinate frame</h3>
+<pre class="diagram"><code>Page { image_dims, dpi, blocks: Vec&lt;Block&gt;, reading_order: Vec&lt;usize&gt; }
+Block { bbox: Rect, kind: Text|Image|Rule|Table, lines: Vec&lt;Line&gt; }
+Line  { bbox: Rect, baseline: LineSeg, x_height: f32, words: Vec&lt;Word&gt; }
+Word  { bbox: Rect, text: String, conf: Confidence, glyphs: Vec&lt;Glyph&gt; }
+Glyph { bbox: Rect, ch: char, conf: Confidence }   // boxes nest: Glyph⊆Word⊆Line⊆Block⊆Page (I1)
+CoordFrame: origin top-left, +x→right, +y→down, units = source pixels (pre-deskew)</code></pre>
+<h3 id="sec-8-2">8.2 Pipeline stage types (the ordering contract, <a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-9">I9</a>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Input type</th>
+<th>Output type</th>
+<th>Crate</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>decode</td>
+<td>bytes</td>
+<td><code>Image&lt;Rgb8&gt;</code>/<code>Gray8</code></td>
+<td>imageio</td>
+</tr>
+<tr>
+<td>binarize</td>
+<td><code>Image&lt;Gray8&gt;</code></td>
+<td><code>BinaryImage</code></td>
+<td>binarize</td>
+</tr>
+<tr>
+<td>preprocess</td>
+<td><code>BinaryImage</code></td>
+<td><code>BinaryImage</code> + <code>T_deskew</code></td>
+<td>preprocess</td>
+</tr>
+<tr>
+<td>layout</td>
+<td><code>BinaryImage</code></td>
+<td><code>AnalyzedPage</code> (blocks+order)</td>
+<td>layout</td>
+</tr>
+<tr>
+<td>line detect</td>
+<td><code>AnalyzedPage</code></td>
+<td><code>SegmentedLines</code></td>
+<td>lines</td>
+</tr>
+<tr>
+<td>recognize</td>
+<td><code>SegmentedLines</code></td>
+<td><code>Posteriors</code>/<code>GlyphString</code></td>
+<td>recognizer</td>
+</tr>
+<tr>
+<td>decode</td>
+<td><code>Posteriors</code>+lexicon+LM</td>
+<td><code>RecognizedPage</code></td>
+<td>ctc+decode</td>
+</tr>
+<tr>
+<td>serialize</td>
+<td><code>RecognizedPage</code></td>
+<td>text/hOCR/ALTO/JSON</td>
+<td>output</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Binarization criteria</h3>
+<pre class="diagram"><code>Otsu: t* = argmax_t  ω0(t)·ω1(t)·(μ0(t) − μ1(t))²   (between-class variance; ω=class prob, μ=class mean)
+Sauvola: T(x,y) = m(x,y) · [ 1 + k·( s(x,y)/R − 1 ) ]   (m=local mean, s=local std, R=128, k≈0.34)
+Niblack: T(x,y) = m(x,y) + k·s(x,y)   ;   Wolf: normalizes Sauvola by global min + max contrast
+Integral image: I(x,y)=Σ_{x&#39;≤x,y&#39;≤y} p(x&#39;,y&#39;) ⇒ window sum/mean/var in O(1) (4 lookups)</code></pre>
+<h3 id="sec-8-4">8.4 CTC objective (the alignment-free recognizer core)</h3>
+<pre class="diagram"><code>Alphabet A; augment with blank ⊘. Posteriors y_t(k) = P(k at frame t), Σ_k y_t(k)=1 (I4).
+A path π ∈ (A∪{⊘})^T ; collapse B(π): merge equal adjacent labels, then delete ⊘.  e.g. B(a⊘aab)= aab? → &quot;aab&quot; then... → &quot;ab&quot; handling.
+Loss: −log P(l|x) = −log Σ_{π: B(π)=l} ∏_t y_t(π_t)
+Forward α_t(s), backward β_t(s) over the 2|l|+1 augmented label states; P(l|x)=α_T(2|l|+1)+α_T(2|l|)
+Gradient (to #112): ∂(−lnP)/∂y_t(k) = y_t(k) − (1/P)·Σ_{s∈lab(k)} α_t(s)β_t(s)
+All in log-space (log-sum-exp) for stability (I4).</code></pre>
+<h3 id="sec-8-5">8.5 Decoding (beam search with LM fusion)</h3>
+<pre class="diagram"><code>Greedy: ĉ_t = argmax_k y_t(k) ; output = strip⊘(collapse(ĉ_1..T))         (fast, no LM)
+Prefix-beam: maintain prefixes with (p_blank, p_nonblank); extend by each char;
+   score(prefix) = logP_ctc(prefix) + α·logP_LM(prefix) + β·|words(prefix)|   (α=LM weight, β=word bonus)
+   prune to top-B; lexicon constrains/encourages dictionary paths (DAWG walk).
+Word boundaries from space symbol or geometric gaps; per-word conf = exp(normalized beam logprob) (I10).</code></pre>
+<h3 id="sec-8-6">8.6 Reading order &amp; segmentation</h3>
+<pre class="diagram"><code>RLSA: smear runs of background shorter than threshold → connects intra-line/word ink.
+XY-cut: recursively split a region at the widest valley in its horizontal/vertical projection profile
+        until valleys &lt; threshold → blocks; order = pre-order of the cut tree (top→bottom, left→right).
+Reading order: build block DAG (A before B if A entirely above, or same band and left); topo-sort (I2).
+Line detect: smoothed horizontal projection of a text block; lines = peaks separated by valleys;
+        baseline = lower envelope fit; x-height from the projection mode.</code></pre>
+<h3 id="sec-8-7">8.7 Worked example (one short word, neural path)</h3>
+<pre class="diagram"><code>Line image of &quot;to&quot; → CNN+BiLSTM → T=6 frames, A={t,o,…}+⊘. Greedy argmax per frame: ⊘ t t ⊘ o ⊘
+collapse adjacent equal → ⊘ t ⊘ o ⊘ → strip blanks → &quot;to&quot;.  Beam adds LM: P_LM(&quot;to&quot;)≫P_LM(&quot;ta&quot;) breaks ties.
+Boxes: frames mapped back to x-ranges via CNN receptive field → glyph bboxes in line frame → page frame (I1/I15).</code></pre>
+<h3 id="sec-8-8">8.8 Edge / Failure-Path Examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Expected</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>blank page</td>
+<td>layout finds 0 text blocks → empty <code>Page</code>, not an error</td>
+</tr>
+<tr>
+<td>inverted (white-on-black) text</td>
+<td>binarization polarity detected (ink-fraction heuristic) → normalized</td>
+</tr>
+<tr>
+<td>45° rotated page</td>
+<td>deskew clamps to ±15° (Phase-0); beyond → <code>LargeSkew</code> warning, best-effort</td>
+</tr>
+<tr>
+<td>touching characters</td>
+<td>neural path unaffected (CTC); classical path → over-seg+merge search</td>
+</tr>
+<tr>
+<td>broken/split glyph</td>
+<td>merge search reassembles (classical); CTC robust (neural)</td>
+</tr>
+<tr>
+<td>non-text image block</td>
+<td>classified <code>Image</code>, skipped by recognizer (no garbage text)</td>
+</tr>
+<tr>
+<td>out-of-vocabulary word</td>
+<td>beam allows non-dictionary path (penalized, not forbidden)</td>
+</tr>
+<tr>
+<td>huge image (50 MP)</td>
+<td>dim cap (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-13">I13</a>); tile or <code>ImageTooLarge</code> per config</td>
+</tr>
+<tr>
+<td>truncated/corrupt input</td>
+<td>decode error from #173 → typed <code>DecodeFailed</code></td>
+</tr>
+<tr>
+<td>unknown glyph (emoji)</td>
+<td><code>⟨unk⟩</code>, <code>unk_count</code> incremented (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-6">I6</a>)</td>
+</tr>
+<tr>
+<td>all-noise page</td>
+<td>low mean confidence → <code>LowConfidence</code> flag, text still emitted</td>
+</tr>
+<tr>
+<td>model/alphabet mismatch</td>
+<td><code>IncompatibleVersion</code> on load (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-14">I14</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-9">8.9 Pipeline stage-transition table (the <a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-9">I9</a> state machine)</h3>
+<p>The typed handles (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/blueprint/#sec-11-3">§11.3</a>) form a state machine; each transition has a guard and a defined error/degenerate edge. A stage may only fire when its input handle exists (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-9">I9</a> enforces this at compile time); the table records the <em>runtime</em> guards and where control diverges.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From state</th>
+<th>Event / guard</th>
+<th>To state</th>
+<th>Error / degenerate transition</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>bytes</code></td>
+<td>decode succeeds (#173 / PNM)</td>
+<td><code>RawImage</code></td>
+<td>decode fails → <code>DecodeFailed</code> (terminal)</td>
+</tr>
+<tr>
+<td><code>RawImage</code></td>
+<td>dims valid, ≤ pixel cap</td>
+<td><code>BinaryImage</code> (via Otsu/Sauvola)</td>
+<td>dims 0 / &gt; cap → <code>BadParam</code> / <code>ImageTooLarge</code> (terminal)</td>
+</tr>
+<tr>
+<td><code>BinaryImage</code></td>
+<td>skew estimable</td>
+<td><code>BinaryImage</code>+<code>T_deskew</code> (deskewed)</td>
+<td>|skew| &gt; 15° → <code>LargeSkew</code> flag, best-effort identity transform</td>
+</tr>
+<tr>
+<td><code>BinaryImage</code>+<code>T_deskew</code></td>
+<td>≥1 CC found</td>
+<td><code>AnalyzedPage</code> (blocks + order)</td>
+<td>0 CCs (blank) → <code>AnalyzedPage</code> with 0 text blocks → empty <code>Page</code> (not an error)</td>
+</tr>
+<tr>
+<td><code>AnalyzedPage</code></td>
+<td>text block has ≥1 line</td>
+<td><code>SegmentedLines</code></td>
+<td>0 lines in block → block contributes no lines (skipped)</td>
+</tr>
+<tr>
+<td><code>SegmentedLines</code></td>
+<td>engine selected</td>
+<td><code>Posteriors</code> (neural) / <code>GlyphString</code> (classical)</td>
+<td>label-longer-than-T → guard, drop line + telemetry</td>
+</tr>
+<tr>
+<td><code>Posteriors</code></td>
+<td>valid distribution (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-4">I4</a>)</td>
+<td><code>RecognizedPage</code> (via decode)</td>
+<td>unnormalized → renormalize or fail (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-4">I4</a>)</td>
+</tr>
+<tr>
+<td><code>RecognizedPage</code></td>
+<td>boxes ⊆ parents (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-1">I1</a>)</td>
+<td>serialized text/hOCR/ALTO/JSON</td>
+<td>containment violation → clamp/reject node (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-1">I1</a>)</td>
+</tr>
+</tbody></table></div>
+<p>Terminal error states abort the call cleanly with a typed <code>OcrError</code> (crash-only, <a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#sec-27">§27</a>); degenerate-but-valid states (blank page, skipped block, low confidence) flow through to a valid (possibly empty) <code>Page</code>.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Correctness before speed; Tesseract + synthetic ground truth are the oracles.</strong> Gate every stage on CER/WER vs the renderer&#39;s exact transcription and vs Tesseract before optimizing. <em>Violation:</em> tuning throughput on an uncalibrated pipeline → fast wrong text.</li><li id="p-2"><strong>Every region carries a bounding box in the original-image frame.</strong> Deskew/crop/normalize transforms are recorded and inverted on output (<a class="cite" href="/system-design-blueprints/systems/ocr-engine/reliability/#inv-1">I1</a>). <em>Violation:</em> boxes drift from pixels → useless hOCR, broken downstream highlight/search.</li><li id="p-3"><strong>Stages are typed and ordered; you cannot skip one.</strong> <code>RawImage → BinaryImage → AnalyzedPage → SegmentedLines → RecognizedPage</code> as distinct types. <em>Violation:</em> recognizing an un-deskewed page → silent accuracy collapse.</li><li id="p-4"><strong>The recognizer is segmentation-free by default (CTC); the classical path is the contrast, not the product.</strong> Neural CNN+BiLSTM+CTC is the primary engine. <em>Violation:</em> depending on character segmentation → brittle on touching/broken glyphs.</li><li id="p-5"><strong>CTC is the alignment contract: blank-augmented forward-backward, log-space.</strong> The loss marginalizes all alignments; decode collapses repeats then strips blanks, deterministically. <em>Violation:</em> ad-hoc per-frame argmax without blank semantics → duplicated/dropped characters.</li><li id="p-6"><strong>The language model is a prior, fused at decode, never baked into the pixel model.</strong> Lexicon + n-gram rescoring is a separable, tunable beam-search term (α, β). <em>Violation:</em> hard-coding the dictionary into recognition → can&#39;t OCR out-of-vocabulary or tune the prior.</li><li id="p-7"><strong>Deterministic given a seed (and thread count + model).</strong> All randomness (training augmentation, k-means init, beam tie-breaks) from an explicit seeded <code>Rng</code>. <em>Violation:</em> irreproducible training/decoding → untestable.</li><li id="p-8"><strong>Binarization is idempotent and illumination-robust.</strong> Re-binarizing a binary image is identity; adaptive thresholding handles gradients. <em>Violation:</em> global-only thresholding → shadowed regions lost.</li><li id="p-9"><strong>Confidence is calibrated and emitted everywhere.</strong> Per-glyph/word/line confidence ∈ [0,1] reflects true error probability. <em>Violation:</em> uncalibrated confidence → downstream can&#39;t gate/triage.</li><li id="p-10"><strong>Numerical behavior is a CER/WER-tolerance contract, not bit-equality.</strong> Promise per-engine error-rate bounds; reductions order-deterministic per config. <em>Violation:</em> promising bits → broken by any GEMM order change.</li><li id="p-11"><strong>Reuse #389/#385/#112/#349/#173/#372; never reimplement a dependency.</strong> Convolution, fonts, autograd, BLAS, codecs, classifiers go through their owning projects. <em>Violation:</em> a private Sobel → numeric drift + duplicated maintenance.</li><li id="p-12"><strong>Bounded memory; stream pages, parallelize lines.</strong> O(W·H) page + O(T·A)/line, not O(pages·…) materialized. <em>Violation:</em> whole-batch buffering → OOM on a multipage scan.</li><li id="p-13"><strong>Validate inputs and config at the boundary.</strong> Zero dims, absurd DPI, NaN config, truncated image, incompatible model version → typed error pre-compute. <em>Violation:</em> trusting inputs → panics, OOB, garbage pages.</li><li id="p-14"><strong>Observability by default.</strong> Every page can emit per-stage timings, CC counts, skew angle, line/word confidences, beam statistics, CER on a labeled eval set. <em>Violation:</em> opaque failures → can&#39;t localize &quot;which stage produced garbage.&quot;</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

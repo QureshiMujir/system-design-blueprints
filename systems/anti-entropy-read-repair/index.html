@@ -1,0 +1,664 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Anti-Entropy Read Repair · Engineering Blueprints</title><meta name="description" content="Take a store that keeps several copies of every key and accepts a write once W of the N copies have it (§4, §15.1). One copy goes dark for 6 hours. The reachable copies keep taking writes, so the absent copy falls behind (§23.3). The coordinator buffers writes meant for it, up…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <span aria-current="page">Anti-Entropy Read Repair</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Anti-Entropy Read Repair</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~20 weeks</li> <li>3,064 lines</li> <li>blueprint #182</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/anti-entropy-read-repair/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/anti-entropy-read-repair/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/anti-entropy-read-repair/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/anti-entropy-read-repair/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/anti-entropy-read-repair/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Anti-Entropy Read Repair"> <div class="doc-grid"> <aside class="doc-toc" data-pagefind-ignore> <details class="toc" open data-collapse-narrow> <summary>On this page</summary> <ol><li><a href="#ex-in-one-paragraph">In one paragraph</a></li><li><a href="#ex-the-problem-concretely">The problem, concretely</a></li><li><a href="#ex-how-it-works-end-to-end">How it works, end to end</a></li><li><a href="#ex-the-core-ideas">The core ideas</a></li><li><a href="#ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</a></li><li><a href="#ex-what-must-never-be-false">What must never be false</a></li><li><a href="#ex-what-breaks-in-production">What breaks in production</a></li><li><a href="#ex-the-numbers">The numbers</a></li><li><a href="#ex-how-it-compares">How it compares</a></li><li><a href="#ex-building-it-the-phase-plan">Building it — the phase plan</a></li><li><a href="#ex-questions-to-test-yourself">Questions to test yourself</a></li><li><a href="#ex-if-you-only-remember-three-things">If you only remember three things</a></li><li><a href="#ex-words-used-here">Words used here</a></li></ol> </details> </aside> <div class="doc-main"> <p class="meta doc-meta" data-pagefind-ignore> <span>Plain-words explainer</span> <span>status: checked</span> <span>written 2026-10-09</span> <span>checked by Opus 5.5 on 2026-10-09</span> <span>462 lines</span> </p>  <div class="prose explainer"><h2 id="ex-in-one-paragraph">In one paragraph</h2>
+<p>Anti-Entropy Read Repair is a Rust library embedded in a replicated key-value store. It makes the
+copies of each key agree again after a crash, a network split, clock skew, or a write that missed
+a replica (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-1">§1</a>). It is not a store: the host supplies sorted-range iteration, replica RPC and cluster
+membership (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-1">§1</a>). It runs three repair mechanisms side by side: background comparison of hash
+summaries, buffered writes for a replica that is down, and fixes made while serving reads (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-2">P2</a>). On
+top sit a pluggable rule for picking a winner among conflicting values and a fast path for small
+differences (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-1">§1</a>). Storage engineers building Dynamo/Cassandra-style stores embed it, and SREs run
+it through the <code>ae</code> CLI (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-1">§1</a>).</p>
+<h2 id="ex-the-problem-concretely">The problem, concretely</h2>
+<p>Take a store that keeps several copies of every key and accepts a write once <code>W</code> of the <code>N</code> copies
+have it (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-1">§15.1</a>). One copy goes dark for 6 hours. The reachable copies keep taking writes, so the
+absent copy falls behind (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-23-3">§23.3</a>). The coordinator buffers writes meant for it, up to the queue caps.
+When it returns, those buffered writes must be replayed, and a full comparison must catch anything
+the buffer dropped or never captured: cold keys nobody wrote during the outage that drifted anyway,
+for example through a sibling resolved on another replica (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-23-3">§23.3</a>).</p>
+<p>The naive fix is the one <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-2">§2</a> names, <code>if a != b { sync(a, b) }</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-2">§2</a>). <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM1</a> calls unconditionally
+shipping full range payloads &quot;to be safe&quot; the <code>O(N)</code> design this subsystem exists to avoid; the
+blueprint ships a 32-byte summary and descends only where summaries disagree (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM1</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>). A second
+naive fix is to repair only on reads. It fails on &quot;cold&quot; ranges that are never read and never hinted at, which drift
+indefinitely (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-24">§24</a> <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#fm-1">FM-1</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-34">§34</a> question 1). A third is to buffer every missed write for the downed
+replica. Without a bound that is a disk problem: a target down 24 hours at 1,000 writes per second
+and about 1 KB per hint accumulates about 86.4 GB (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 3). So the blueprint requires all three
+mechanisms, because dropping any one creates a distinct persistent-divergence class (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-2">P2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>,
+<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-24">§24</a>).</p>
+<h2 id="ex-how-it-works-end-to-end">How it works, end to end</h2>
+<p>Follow one write and one read through the boxes of <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>. The diagram is drawn from <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>, boxes folded, coloured by role:</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+  %% legend rt: Core repair path: coordinator and replica
+  %% legend ingest: Supporting crates beneath a replica
+  %% legend side: Client (external)
+  %% legend store: Disagreement event log
+  CL([&quot;&lt;b&gt;Client&lt;/b&gt;&lt;br/&gt;read / write requests&lt;br/&gt;with a consistency level&quot;])
+  CO[&quot;&lt;b&gt;Coordinator&lt;/b&gt;&lt;br/&gt;ae-repair::coordinator&lt;br/&gt;quorum (W, R, N), hints&lt;br/&gt;sync + async read repair&quot;]
+  RN[&quot;&lt;b&gt;Replica Node ×N&lt;/b&gt;&lt;br/&gt;host storage engine&lt;br/&gt;Merkle tree per range&lt;br/&gt;hint queue (ae-hints)&lt;br/&gt;gossip endpoint (ae-gossip)&lt;br/&gt;resolver (ae-resolver)&quot;]
+  EL[(&quot;&lt;b&gt;Disagreement Event Log&lt;/b&gt;&lt;br/&gt;repair triggers, sibling-rate&lt;br/&gt;metrics, resolver traces&quot;)]
+  MK[&quot;&lt;b&gt;ae-merkle&lt;/b&gt;&lt;br/&gt;build + diff (§13)&quot;]
+  GS[&quot;&lt;b&gt;ae-gossip&lt;/b&gt;&lt;br/&gt;active anti-entropy scheduler&lt;br/&gt;peers, scope, token bucket,&lt;br/&gt;adaptive cycle (§14)&quot;]
+  IB[&quot;&lt;b&gt;ae-iblt&lt;/b&gt;&lt;br/&gt;set reconciliation when Merkle&lt;br/&gt;is too coarse, Merkle fallback (§19)&quot;]
+  RS[&quot;&lt;b&gt;ae-resolver&lt;/b&gt;&lt;br/&gt;conflict resolution (§18)&quot;]
+  HN[&quot;&lt;b&gt;ae-hints&lt;/b&gt;&lt;br/&gt;persistent hinted-handoff queue (§15)&quot;]
+  NT[&quot;&lt;b&gt;ae-net&lt;/b&gt;&lt;br/&gt;wire protocol (§8)&quot;]
+  CL --&gt; CO
+  CO --&gt; RN
+  CO --&gt; EL
+  RN --&gt; MK
+  RN --&gt; GS
+  MK --&gt; IB
+  IB --&gt; RS
+  RS --&gt; HN
+  HN --&gt; NT
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef side stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  class CO,RN rt
+  class MK,GS,IB,RS,HN,NT ingest
+  class CL side
+  class EL store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>Core repair path: coordinator and replica</li><li><span class="swatch ingest"></span>Supporting crates beneath a replica</li><li><span class="swatch side"></span>Client (external)</li><li><span class="swatch store"></span>Disagreement event log</li></ul></figcaption></figure>
+<ol>
+<li><strong>Coordinator</strong> (<code>ae-repair::coordinator</code>) handles every client request. On a write it needs <code>W</code>
+real acknowledgments; a replica that times out or is marked down gets a hint recorded instead
+(<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-2">§15.2</a>). A hint never substitutes for one of the <code>W</code> acknowledgments, and if the hint cannot
+be durably stored the write must not be reported as successful (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-8">§15.8</a>).</li>
+<li><strong>Hint queue</strong> (<code>ae-hints</code>) stores hints in RocksDB, one column family per target replica,
+bounded in bytes and in age (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-2">§15.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-9">ADR-09</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-10">ADR-10</a>). When gossip sees the downed replica&#39;s
+heartbeat resume, <code>ReplayDriver</code> (<code>ae-hints/src/replay.rs</code>) replays its hints at a rate limit
+and deletes each one only after the replica acknowledges it (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-2">§15.2</a>).</li>
+<li><strong>Read path.</strong> <code>ReadCoordinator::get</code> collects <code>R</code> responses. If they are equal it returns
+directly. In synchronous-non-blocking mode, if they differ it calls <code>Resolver::resolve</code>, returns
+the winner, and spawns the write-back in the background (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-2">§16.2</a>). A read at <code>R = 1</code> never
+repairs, because one response cannot be compared with itself (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-4">§16.4</a>). In asynchronous mode, a
+sampled fraction of reads (10% by default) is repaired by a background task (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-17-2">§17.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-11">ADR-11</a>).
+The mode is a per-request or per-keyspace policy value (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-10">§16.10</a>).</li>
+<li><strong>Background reconciliation.</strong> <code>GossipScheduler</code> in <code>ae-gossip</code> picks a <code>(peer, range)</code> pair
+every cycle (1 s intra-DC by default) (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-2">§14.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-6">ADR-06</a>). It sends a <code>FingerprintExchange</code> carrying
+the Merkle root; if roots differ, <code>ae-merkle::diff::locate_divergence</code> walks down with
+<code>SubtreeQuery</code>/<code>SubtreeReply</code> until it reaches the divergent leaves (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-8-1">§8.1</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-8-3">§8.3</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-13-2">§13.2</a>).</li>
+<li><strong>Fix-up.</strong> The two sides fetch the divergent leaf entries, <code>Resolver::resolve</code> picks the
+outcome and the write-back applies it (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-13-2">§13.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-8-3">§8.3</a>).</li>
+<li><strong>Fast path.</strong> For small, bounded differences <code>ae-iblt</code> ships a compact table instead, and falls
+back to the Merkle walk if it cannot decode (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-2">§19.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-15">ADR-15</a>).</li>
+</ol>
+<p>All replica traffic goes over <code>ae-net</code> as length-prefixed CBOR on Tokio TCP (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-8-1">§8.1</a>). Every
+repair trigger, located divergent leaf and resolver decision emits an event into the
+<strong>Disagreement Event Log</strong>, which operators and the adaptive scheduler consume (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-11">I11</a>).</p>
+<p>Each repair attempt is a small state machine (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-8-2">§8.2</a>). The transition list reads <code>Queued → InFlight → Applying → Done</code>; <code>InFlight</code> or <code>Applying</code> go to <code>Failed</code> on an RPC error or resolver
+panic, and <code>Failed → Retrying</code> up to <code>max_retries</code> (default 3, backoff 1 s / 2 s / 4 s). Past that
+the task becomes <code>Abandoned</code> and is re-queued at <code>Background</code> priority on the next gossip cycle
+rather than dropped (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-8-2">§8.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-2">P2</a>). The <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-8-2">§8.2</a> diagram instead draws <code>InFlight → Retrying</code> on
+timeout/error and a <code>Queued → Abandoned</code> arrow, neither of which the list has.</p>
+<h2 id="ex-the-core-ideas">The core ideas</h2>
+<h3 id="ex-merkle-descent-compare-summaries-not-data-13-i1-i2-p3-mm1">Merkle descent: compare summaries, not data (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-13">§13</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-3">P3</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM1</a>)</h3>
+<p>A <strong>Merkle tree</strong> is a tree of hashes: leaves hash the keys in a slice of the range, and each parent
+hashes its children. Two replicas first compare only the root, 32 bytes. If equal, they stop (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM1</a>,
+<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-13-8">§13.8</a>). If not, they compare children and recurse only into the subtrees that differ.</p>
+<ul>
+<li>Leaves are bucketed by the key&#39;s 16-bit prefix (65,536 leaves at the default depth), using BLAKE3
+with distinct prefixes for leaf and internal-node hashes (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-13-2">§13.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-4">ADR-04</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-7">ADR-07</a>).</li>
+<li>The leaf hash covers <code>(key, ts, value_hash)</code>, so two replicas with the same value but different
+HLCs are detected as divergent (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-13-8">§13.8</a>).</li>
+<li>The combine step is order-independent, so the same data gives bit-identical roots whatever order
+storage iterates (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-1">I1</a>).</li>
+<li>Cost for <code>d</code> divergent keys of <code>N</code> total is <code>O(d log N)</code> fingerprints plus <code>O(d)</code> payload (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-3">P3</a>).
+The acceptance bound is <code>bytes_exchanged ≤ 2 × d × log2(leaf_count) × 40</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-13-4">§13.4</a>).</li>
+</ul>
+<p>The blueprint&#39;s own trace (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-8-3">§8.3</a>): replica A holds <code>key1 → &quot;old&quot;</code> at <code>Hlc{100, 0, node 1}</code>, replica B
+holds <code>&quot;new&quot;</code> at <code>Hlc{100, 1, node 1}</code>. The gossip cycle sends A&#39;s root to B; roots differ;
+<code>SubtreeQuery</code>/<code>SubtreeReply</code> descend to the single divergent leaf; both sides fetch it;
+<code>LwwResolver::resolve</code> returns <code>&quot;new&quot;</code> because logical 1 beats 0; the write-back updates A; the
+roots for that range now match (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-8-3">§8.3</a>).</p>
+<h3 id="ex-the-gossip-scheduler-who-repairs-what-and-how-fast-14-p4-p13-i10-i13">The gossip scheduler: who repairs what, and how fast (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-14">§14</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-4">P4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-13">P13</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-10">I10</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-13">I13</a>)</h3>
+<p>There is no central scheduler. Each node decides locally, every cycle, which peer and which range to
+reconcile (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-4">P4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-2">§14.2</a>). Choice is random but weighted by <code>last_reconciled</code>, because purely random
+choice starves some ranges (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-6">§14.6</a>). Three safeguards:</p>
+<ul>
+<li><strong>Partition-aware scope</strong>: only pairs where both endpoints currently own the range are scheduled
+(<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-2">§14.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#t-12">T12</a>).</li>
+<li><strong>Token bucket</strong> (a counter that refills at a fixed rate): caps repair bandwidth at 25 MB/s per
+<code>(peer, range)</code>, with a 50 KB credit needed before an exchange starts. It must be per pair, never
+global, or a fast pair starves a slow one (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-2">§14.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-6">§14.6</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-10">I10</a>).</li>
+<li><strong>Adaptive throttling</strong>: when the 5-minute request rate exceeds 1.5 times baseline, halve the cycle
+frequency and the cap, restoring on cooldown, with a floor of one exchange per minute per node so
+nothing starves (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-2">§14.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-11">P11</a>). Concurrent range repairs are capped at 4 per node (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-8">ADR-08</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-13">I13</a>).</li>
+</ul>
+<p>Why gossip converges quickly: a rumor reaches all <code>N</code> nodes in <code>O(log N)</code> rounds (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM3</a>). The
+blueprint&#39;s worked case is <code>N = 1000</code>: about 10 rounds, so about 10 s at a 1 Hz cycle (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 7,
+<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-6">ADR-06</a>).</p>
+<h3 id="ex-hinted-handoff-a-bounded-memo-for-a-down-replica-15-i4-i5-p5">Hinted handoff: a bounded memo for a down replica (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-15">§15</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-5">P5</a>)</h3>
+<p><strong>Hinted handoff</strong> means the coordinator stores a write meant for an unreachable replica and replays
+it later; accepting the write at <code>W</code> real acks is called a <strong>sloppy quorum</strong> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-1">§15.1</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>). The queue
+is bounded three ways:</p>
+<ol>
+<li>Bytes: a cap per target (default 1 GiB) inside a 4 GiB total, enforced by oldest-first eviction
+and a drop counter, so it is never silent (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-2">§15.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-9">ADR-09</a>).</li>
+<li>Age: hints older than the TTL (24 h default) are never replayed (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-2">§15.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-10">ADR-10</a>).</li>
+<li>Replay speed: rate-limited so a recovering replica is not swamped (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-2">§15.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-6">§15.6</a>).</li>
+</ol>
+<p>A three-step trace: the target goes down, so hints accumulate in its column family; the target&#39;s
+heartbeat returns, so <code>ReplayDriver</code> replays and deletes only after acknowledgment; any hints that
+were dropped are covered later by active anti-entropy (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-2">§15.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#t-2">T2</a>). Replay is
+at-least-once: a crash mid-replay re-sends, and the receiver deduplicates by HLC (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-2">§15.2</a>). The
+blueprint states the default replay rate limit as 1,000 hints per second (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-2">§15.2</a>) yet requires at
+least 10K hints per second &quot;under the default rate limiter&quot; (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-4">§15.4</a>).</p>
+<h3 id="ex-read-repair-fix-what-clients-actually-touch-16-17-p6-adr-11">Read repair: fix what clients actually touch (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-16">§16</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-17">§17</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-6">P6</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-11">ADR-11</a>)</h3>
+<p><strong>Read repair</strong> compares replica answers during a read and writes the winner back. Two modes exist.</p>
+<ul>
+<li><strong>Synchronous-non-blocking</strong> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-2">§16.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-4">§16.4</a>): resolve, return to the client at once, <code>tokio::spawn</code>
+the write-back. Target added latency at p99 is at most 0.5 ms (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-7">M7</a>). <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-2">§16.2</a> says a same-value,
+different-HLC pair is not divergence for read repair, while <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-13-8">§13.8</a> requires the Merkle leaf hash
+to flag exactly that pair as divergent.</li>
+<li><strong>Asynchronous probabilistic</strong> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-17-2">§17.2</a>): after collecting <code>R</code> responses, a Bernoulli draw at the
+sample rate (10% default) decides whether to spawn repair. The queue is a bounded channel (10K
+pending by default); when full, work is dropped and counted, never buffered without limit (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-17-2">§17.2</a>,
+<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM7</a>).</li>
+</ul>
+<p>The blueprint names both as &quot;the default&quot;. <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-1">§16.1</a> and <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-2">§16.2</a> call synchronous-non-blocking the
+default, and the <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a> glossary calls it the &quot;adopted default&quot;. <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-6">P6</a> and <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-11">ADR-11</a> call asynchronous
+sampling at 10% the default, with synchronous opt-in per request (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-6">P6</a>), and <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-17-1">§17.1</a> calls the
+asynchronous mode &quot;the production default read-repair mode&quot;.</p>
+<p>The write-back is idempotent: the replica&#39;s storage layer rejects a write-back whose timestamp is not
+strictly greater than the stored one (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-2">§16.2</a>). Example from the blueprint: at 100,000 reads per second
+and a 10% rate, that is 10,000 background resolver-plus-write-back invocations per second (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a>
+item 9).</p>
+<h3 id="ex-conflict-resolution-picking-a-winner-safely-18-i3-i6-p7-p8-p9-mm8">Conflict resolution: picking a winner safely (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-18">§18</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-7">P7</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-8">P8</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-9">P9</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM8</a>)</h3>
+<p>When two replicas hold different values for one key, a <code>Resolver</code> reduces them to one outcome (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-18">§18</a>).
+The <strong>hybrid logical clock</strong> (HLC) gives a total order: <code>(physical, logical, node_id)</code> compared left
+to right, always (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-7">P7</a>). Plain wall-clock LWW is rejected because skew then decides the winner
+(<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-7">P7</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-12">ADR-12</a>). Four resolvers share one trait (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>):</p>
+<ul>
+<li><code>LwwResolver</code>: highest HLC wins, and a winning tombstone is returned as <code>Tombstone</code>, not <code>Single</code>.</li>
+<li><code>SiblingsResolver</code>: keeps mutually concurrent versions, deduplicated with <strong>dotted version
+vectors</strong> so a replayed write is not mistaken for a second writer (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM4</a>). Opt-in only (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-8">P8</a>).</li>
+<li><code>CrdtResolver&lt;C&gt;</code>: wraps a type from blueprint #55; merge is that type&#39;s own merge (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-9">P9</a>).</li>
+<li><code>with_custom_resolver</code>: wraps an application closure; the contract is documented, not
+compiler-checked (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-18-2">§18.2</a>).</li>
+</ul>
+<p>The contract every resolver must meet is <strong>CAI</strong>: commutative, associative, idempotent (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM8</a>).
+A custom resolver without it will eventually produce a permanently diverging sibling set under
+the right write pattern (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM8</a>). All replicas serving one range must also run the same resolver; a
+policy-hash mismatch makes a write be refused (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-9">I9</a>).</p>
+<h3 id="ex-iblt-ship-a-small-table-instead-of-a-tree-walk-19-i8-p10-mm5">IBLT: ship a small table instead of a tree walk (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-19">§19</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-10">P10</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM5</a>)</h3>
+<p>An <strong>Invertible Bloom Lookup Table</strong> (IBLT) is a fixed-size table of cells that can be subtracted
+from another replica&#39;s table, leaving a table that holds only the difference between the two sets
+(<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-2">§19.2</a>). Each element is hashed into 3 cells, which XOR-accumulate an id and a check hash and bump a
+count (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-2">§19.2</a>).</p>
+<ol>
+<li>Both sides build a table sized from <code>d_expected</code>, the expected number of differing elements:
+<code>cell_count = (d_expected × 1.5).next_power_of_two()</code>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-14">ADR-14</a>&#39;s <code>c ≈ 1.5</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-2">§19.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-14">ADR-14</a>).</li>
+<li>One table is subtracted from the other (<code>Iblt::sub</code>), giving a table for the symmetric
+difference (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-2">§19.2</a>).</li>
+<li><strong>Peel-back decoding</strong> repeatedly finds a &quot;pure&quot; cell (<code>count.abs() == 1</code> and the check hash
+confirms a single element), records it, and subtracts it from all three of its cells (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-2">§19.2</a>).</li>
+<li>If cells remain non-zero with no pure cell, the decode returns <code>Err(Exhausted)</code>, never a
+partial answer (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-8">I8</a>), and the coordinator falls back to the Merkle walk (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-2">§19.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-15">ADR-15</a>).</li>
+</ol>
+<p>The blueprint&#39;s bandwidth figures, as written: <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 6 gives <code>cell_count = 1500</code> at
+<code>d_expected = 1000</code>, <code>c = 1.5</code>, and <code>1500 × 24 B = 36,000 B ≈ 36 KB</code>, &quot;versus #5&#39;s ~125 KB
+Merkle cost at a comparable divergence count&quot;, quantifying <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-10">P10</a>&#39;s CPU-for-bandwidth trade; item 5
+is <code>2 × 100 × 16 × 40 B = 128,000 B ≈ 125 KB</code> for <code>d = 100</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> items 5 and 6). <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-4">§19.4</a> gives
+~36 KB (1500 cells × 24 bytes) for <code>d_expected = 1000</code> and an actual diff of 500, &quot;versus ~115 KB
+for the equivalent Merkle exchange&quot; (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-4">§19.4</a>). <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-6">§19.6</a> warns that the power-of-two rounding in <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-2">§19.2</a>
+can nearly double the provisioned cell count. A mis-sized <code>d_expected</code> costs performance, not
+correctness (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-9">§19.9</a>).</p>
+<h2 id="ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</h2>
+<h3 id="ex-hint-queue-cap-adr-09">Hint queue cap (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-9">ADR-09</a>)</h3>
+<p><strong>Chosen:</strong> 4 GiB total default (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>), enforced by bytes with oldest-first eviction (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-2">§15.2</a>).
+<strong>Rejected:</strong> 512 MiB, or unbounded (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). <strong>When the rejected choice is right:</strong> 512 MiB wins on
+memory-constrained edge deployments where active anti-entropy is cheap to lean on more heavily (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). The unbounded option
+is what <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 3 warns against: about 86.4 GB for one bad day on one target.</p>
+<h3 id="ex-read-repair-sampling-rate-adr-11">Read-repair sampling rate (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-11">ADR-11</a>)</h3>
+<p><strong>Chosen:</strong> 10% asynchronous, matching Cassandra&#39;s default (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-6">P6</a>). <strong>Rejected:</strong> 1% and 100%
+(<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). <strong>When the rejected choice is right:</strong> 100% wins only as a short-lived, operator-triggered
+manual repair window; the standing production default stays 10% (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-17-6">§17.6</a>). A 100% rate is
+synchronous-blocking in disguise once the background queue saturates (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-17-6">§17.6</a>).</p>
+<h3 id="ex-timestamp-source-for-last-writer-wins-adr-12">Timestamp source for last-writer-wins (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-12">ADR-12</a>)</h3>
+<p><strong>Chosen:</strong> a hybrid logical clock from blueprint #95 (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). <strong>Rejected:</strong> plain wall-clock, or pure
+vector clocks (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). <strong>When the rejected choice is right:</strong> pure vector clocks win when the
+application wants explicit sibling exposure instead of a forced total order (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). Plain wall-clock
+LWW lets clock skew pick the winner instead of causality (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-7">P7</a>).</p>
+<h3 id="ex-sibling-exposure-adr-13">Sibling exposure (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-13">ADR-13</a>)</h3>
+<p><strong>Chosen:</strong> opt-in per keyspace via <code>SiblingsResolver</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-8">P8</a>). <strong>Rejected:</strong> always-on, Riak-style
+global <code>allow_mult</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). <strong>When the rejected choice is right:</strong> a store whose whole API contract is
+&quot;you always resolve conflicts yourself&quot;, the pure Riak deployment model (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>).</p>
+<h3 id="ex-iblt-sizing-adr-14">IBLT sizing (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-14">ADR-14</a>)</h3>
+<p><strong>Chosen:</strong> <code>c × d_expected</code> cells with <code>c ≈ 1.5</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). <strong>Rejected:</strong> <code>c = 1.0</code> and <code>c = 3.0</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>).
+<strong>When the rejected choice is right:</strong> <code>c = 3.0</code> wins when decode-failure probability must be near
+zero and bandwidth is not the binding constraint (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>).</p>
+<h3 id="ex-iblt-failure-handling-adr-15">IBLT failure handling (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-15">ADR-15</a>)</h3>
+<p><strong>Chosen:</strong> fall back to Merkle on <code>Exhausted</code>, accepting <code>O(d log N)</code> cost (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). <strong>Rejected:</strong> no
+fallback, a hard failure (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). <strong>When the rejected choice is right:</strong> only where <code>d_expected</code> is
+provably an upper bound, for example a bounded write rate plus a bounded outage window (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>). <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM5</a>
+predicts that an IBLT deployment without a correctness-preserving fallback will eventually fail
+silently at high divergence (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM5</a>).</p>
+<h3 id="ex-roads-not-taken">Roads not taken</h3>
+<p><em>Pure-CRDT convergence</em> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-35-1">§35.1</a>): replicas merge CRDT state and nothing else. It wins when the whole
+data model is CRDT-expressible and full-state gossip is cheap relative to divergence rate. It is
+rejected because most KV workloads (arbitrary blobs) do not fit a CRDT shape, which is why CRDTs are
+opt-in (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-9">P9</a>).</p>
+<p><em>Consensus replication</em> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-35-2">§35.2</a>): a Raft leader makes divergence impossible by construction. It wins
+under strict consistency with moderate write throughput. It is rejected because it sacrifices the
+availability under partition that eventual consistency exists to provide (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-35-2">§35.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-1">P1</a>).</p>
+<p><em>Differential-dataflow streaming</em> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-35-3">§35.3</a>): event-driven incremental diffing instead of polled
+gossip. It wins at very large <code>N</code>, where polling overhead is itself the dominant cost (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-30">§30</a>). It is
+rejected as operationally heavy for an embedded library, deferred as <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-21">ADR-21</a> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-35-3">§35.3</a>).</p>
+<p><em>Chain replication</em> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-35-4">§35.4</a>): writes pass head to tail, so there is no divergence to repair. It wins
+for workloads that tolerate primary-side write serialization. It is rejected because a mid-chain
+failure blocks writes until reconfiguration, trading away availability under partition (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-35-4">§35.4</a>).</p>
+<h2 id="ex-what-must-never-be-false">What must never be false</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-1">I1</a></strong>: Merkle roots over the same <code>(key, ts, value_hash)</code> multiset are bit-identical in any order.
+Noticed by <code>conformance/merkle.build_determinism</code>; metric <code>ae_merkle_root_compute_seconds</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-2">I2</a></strong>: recursive comparison finds every divergent leaf and no other. Noticed by
+<code>conformance/merkle.diff_localisation</code>; metric <code>ae_repair_bytes_exchanged_total</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-3">I3</a></strong>: HLC comparison is <code>(physical, logical, node_id)</code> lexicographic, always. Noticed by a
+permutation-invariance property test; metric <code>ae_conflict_resolution_outcomes</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-4">I4</a></strong>: hint-queue bytes per target never exceed the cap. Noticed by
+<code>conformance/hint.cap_enforcement</code>; metrics <code>ae_hint_queue_bytes</code> and <code>ae_hint_drops_total</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-5">I5</a></strong>: expired hints are never replayed. Noticed by <code>conformance/hint.ttl_drop</code>; metric
+<code>ae_hint_drops_total{reason=&quot;ttl&quot;}</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-6">I6</a></strong>: <code>Resolver::resolve</code> is commutative, associative and idempotent. Not compiler-checked;
+noticed by <code>conformance/resolver.lww</code>, <code>.siblings</code>, <code>.crdt</code> before merge (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-7">I7</a></strong>: HLC state is persisted before every <code>tick()</code> and replayed at startup. Noticed by a startup
+replay assertion; telemetry is delegated to blueprint #95 (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-8">I8</a></strong>: IBLT decode returns the exact difference or <code>Err(Exhausted)</code>, never a partial answer.
+Noticed by <code>conformance/iblt.decode_correctness</code>; metric <code>ae_iblt_decode_outcomes</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-9">I9</a></strong>: the active <code>Resolver</code> is uniform across replicas serving a range. Noticed by comparing
+policy hashes over gossip; metric <code>ae_repair_ranges_total{outcome=&quot;policy_mismatch&quot;}</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-10">I10</a></strong>: token-bucket spend never exceeds the cap by more than 5% over any 60 s window. Noticed by
+<code>conformance/gossip.token_bucket</code>; metric <code>ae_repair_bytes_exchanged_total</code> rate (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-11">I11</a></strong>: every reconciliation event emits exactly one telemetry event. Noticed by
+<code>conformance/metrics.exposition</code>; a missing emission is a code-review defect (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-12">I12</a></strong>: repair priority (<code>Background &lt; Normal &lt; High</code>) is respected by queue ordering. Noticed by a
+priority-inversion property test; metric <code>ae_repair_duration_seconds{mode}</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-13">I13</a></strong>: repair concurrency never exceeds <code>repair_concurrency_limit</code> (4 by default). Noticed by a
+concurrency-limiter unit test and soak assertion; metric <code>ae_repair_ranges_total</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-7">§7</a>).</li>
+</ul>
+<h2 id="ex-what-breaks-in-production">What breaks in production</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#fm-1">FM-1</a>: cold ranges drift.</strong> Symptom: ranges nobody reads or hints about diverge indefinitely.
+Root cause: active anti-entropy disabled or misconfigured, leaning on read repair alone (violates
+<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-2">P2</a>). Detection: <code>ae_repair_ranges_total{mode=&quot;active&quot;}</code> flatlines while divergence rises
+elsewhere. Recovery: none automatic, it is a configuration defect; re-enable the scheduler and
+check <code>ae repair status</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-24">§24</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#fm-2">FM-2</a>: hint queue at its cap.</strong> Symptom: queue bytes near cap, drop counter rising. Root cause:
+the target has been down longer than the cap absorbs, or the cap is too low for the write rate.
+Detection: <code>ae_hint_queue_bytes</code> trend and <code>ae_hint_drops_total{reason=&quot;cap&quot;}</code>. Recovery:
+oldest-first drop bounds the damage; the <code>hint-queue-overflow</code> runbook says to confirm reachability,
+then <code>ae hints replay</code> or <code>ae hints drop</code> and rely on active anti-entropy (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-24">§24</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-9">§15.9</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#fm-3">FM-3</a>: request-time inconsistency persists despite convergence elsewhere.</strong> Root cause: hinted
+handoff without read repair enabled (violates <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-2">P2</a>). Detection: an elevated denominator-vs-numerator
+mismatch for <code>ae_read_repair_fires_total</code> in monitoring dashboards. Recovery: none automatic;
+enable synchronous or asynchronous read repair per keyspace (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-24">§24</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#fm-5">FM-5</a>: repair makes an incident worse.</strong> Root cause: an unthrottled or under-throttled scheduler
+(violates <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-13">P13</a>); the cited precedent is Datastax&#39;s 2015 postmortem. Detection:
+<code>ae_repair_bytes_exchanged_total</code> rate above the cap. Recovery: the token bucket (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-10">I10</a>) bounds it
+structurally; <code>ae repair stop --range &lt;id&gt;</code> halts a runaway range (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-24">§24</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-9">§14.9</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#fm-6">FM-6</a>: LWW winner looks causally wrong after a restart.</strong> Root cause: the HLC logical counter
+was reset without persistence (violates <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-7">I7</a>). Detection: startup HLC-replay assertion failure.
+Recovery: check that blueprint #95&#39;s persistence path is wired and replay the on-disk HLC (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-24">§24</a>).</li>
+</ul>
+<p>Threats a reader should know (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-23">§23</a>): <strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#t-2">T2</a></strong> unbounded hint accumulation for a permanently-down
+target, answered by byte cap, TTL and FIFO drop (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-5">I5</a>); <strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#t-3">T3</a></strong> resolver-policy mismatch across
+replicas, answered by policy-hash comparison and refusing the write (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-9">I9</a>); <strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#t-5">T5</a></strong> repair traffic
+amplifying an incident, answered by the token bucket and adaptive throttle (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-13">P13</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-10">I10</a>); <strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#t-6">T6</a></strong> a
+silent-wrong IBLT decode from a hash collision, answered by a BLAKE3-keyed check hash with false
+positive rate below 2⁻³⁰ and the Merkle fallback (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#t-6">T6</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-6">§19.6</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-15">ADR-15</a>); <strong><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#t-9">T9</a></strong> a malformed <code>SubtreeQuery</code>
+with an out-of-range <code>node_index</code>, answered by a <code>RangeGenerationMismatch</code> check before any index
+is used (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-8-4">§8.4</a>). Replica equivocation (a lying replica, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#t-1">T1</a>) is out of scope by design (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-22">ADR-22</a>).</p>
+<h2 id="ex-the-numbers">The numbers</h2>
+<p>Rows marked &quot;target&quot; are design targets (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-29">§29</a>); the others are capacity-model arithmetic (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a>)
+or <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a> budgets.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Value</th>
+<th>Formula or source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Merkle tree memory per range, depth 16</td>
+<td>about 4.0 MiB</td>
+<td><code>(2^16 − 1 + 2^16) × 32 B = 131,071 × 32 B = 4,194,272 B</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 1, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Worst-case hint accumulation, 24 h down</td>
+<td>about 86.4 GB</td>
+<td><code>24 × 3600 × 1000 × 1 KB</code>, hence the 4 GiB cap (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 3)</td>
+</tr>
+<tr>
+<td>Merkle comparison, <code>d = 100</code>, depth 16</td>
+<td>128,000 B, about 125 KB</td>
+<td><code>2 × 100 × 16 × 40 B</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 5)</td>
+</tr>
+<tr>
+<td>IBLT exchange, <code>d_expected = 1000</code>, <code>c = 1.5</code></td>
+<td>36,000 B, about 36 KB</td>
+<td><code>1500 × 24 B</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 6)</td>
+</tr>
+<tr>
+<td>Gossip rounds to reach 1000 nodes</td>
+<td>about 10 rounds, about 10 s at 1 Hz</td>
+<td><code>log2(1000)</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 7)</td>
+</tr>
+<tr>
+<td>Async repair invocations at 100,000 reads/s</td>
+<td>10,000 per second</td>
+<td><code>0.10 × 100,000</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 9)</td>
+</tr>
+<tr>
+<td>Merkle root, 1 M keys, 8-core SIMD (target)</td>
+<td>at most 100 ms</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-1">M1</a> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-29">§29</a>)</td>
+</tr>
+<tr>
+<td>Hint enqueue / replay (target)</td>
+<td>at least 100K / 50K hints per second</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-5">M5</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-4">M4</a> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-29">§29</a>)</td>
+</tr>
+<tr>
+<td>Sync read-repair added p99 (target)</td>
+<td>at most 0.5 ms</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-7">M7</a> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-29">§29</a>)</td>
+</tr>
+<tr>
+<td>Async queue throughput before drop (target)</td>
+<td>at least 10K tasks per second</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-8">M8</a> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-29">§29</a>)</td>
+</tr>
+<tr>
+<td>Intra-DC partition-heal convergence (target)</td>
+<td>at most 30 s</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-27">§27</a></td>
+</tr>
+<tr>
+<td>Cross-DC convergence, 1 M keys, 1% divergence, 100 ms RTT (target)</td>
+<td>at most 5 minutes</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-10">M10</a> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-29">§29</a>)</td>
+</tr>
+<tr>
+<td>Repair bandwidth caps</td>
+<td>25 MB/s per <code>(peer, range)</code> intra-DC; 1 MB/s cross-DC</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a></td>
+</tr>
+</tbody></table></div>
+<p>The design assumes at most 10% of keys diverged per reconciliation round (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a>). The IBLT-vs-Merkle
+figures differ between <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-4">§19.4</a> and <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> items 5 and 6 (see the IBLT idea above). The async queue&#39;s
+10K capacity is cited to <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-17-2">§17.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 9), but <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a> has no such row. <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#fm-10">FM-10</a> cites a Merkle
+budget of about 2.5 MiB per range from <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-24">§24</a>), while <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a> and <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 1 say about 4.0 MiB.</p>
+<h2 id="ex-how-it-compares">How it compares</h2>
+<ul>
+<li><strong>Cassandra</strong> made incremental repair and non-blocking read repair its two departures from the
+original Dynamo design, after years of production pain (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/compare/#sec-32">§32</a>). This design adopts both from day one
+(<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/compare/#sec-32">§32</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-4">§16.4</a>), and it adds an IBLT fast path where Cassandra is Merkle-only (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/compare/#sec-32">§32</a>).</li>
+<li><strong>DynamoDB</strong> shipped sloppy quorum, hinted handoff and Merkle anti-entropy together from its first
+paper (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/compare/#sec-32">§32</a>). This design imitates that choice explicitly (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-2">P2</a>), differing in leaving the storage
+engine to the host (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/compare/#sec-32">§32</a>).</li>
+<li><strong>Riak</strong> made siblings (<code>allow_mult</code>) the default, pushing merge complexity onto every
+application (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/compare/#sec-32">§32</a>). This design reverses that, making siblings opt-in (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-8">P8</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-13">ADR-13</a>), which is fine
+for Riak&#39;s niche of apps that always want to resolve conflicts themselves (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-13">ADR-13</a>).</li>
+<li><strong>ScyllaDB</strong> made shard-per-core concurrency (Seastar) its central performance lever (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/compare/#sec-32">§32</a>). This
+design is async Rust on Tokio with a <code>no_std</code> core, and takes from it the discipline of bounding
+the Rayon pool to physical cores (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/compare/#sec-32">§32</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-22-6">§22.6</a>).</li>
+</ul>
+<h2 id="ex-building-it-the-phase-plan">Building it — the phase plan</h2>
+<p>Build card: <code>blueprints/build-cards/Anti-Entropy-Read-Repair.md</code>. Appendix B states about 20 weeks
+for the core phases, plus the 24-hour and 30-day soak windows before the release gate (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-39">§39</a>). <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-1">§1</a>
+gives 5–7 months for the full system.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>What exists afterwards</th>
+<th>The proof (from <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-39">§39</a>)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>repo skeleton, CI, deterministic two-replica smoke test</td>
+<td><code>make test</code> green; <code>two_replica_repair</code> passes 100/100 runs (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-12-4">§12.4</a>)</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>ae-merkle</code> build and recursive diff</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-1">I1</a>/<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-2">I2</a> property suites pass; <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-1">M1</a>/<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-2">M2</a> baselines met (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-13-4">§13.4</a>)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>gossip scheduler with partition-aware scope and token bucket</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-3">M3</a>/<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-9">M9</a> met; <code>gossip.token_bucket</code> and <code>gossip.partition_aware</code> pass (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-4">§14.4</a>)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>persistent, bounded hinted handoff</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-4">M4</a>/<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-5">M5</a> met; <code>hint.durability</code> and <code>hint.cap_enforcement</code> pass (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-15-4">§15.4</a>)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>synchronous-non-blocking read repair</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-7">M7</a> met; <code>read_repair.lww_determinism</code> passes (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-4">§16.4</a>)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>asynchronous probabilistic read repair</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-8">M8</a> met; <code>read_repair.async_sampling</code> passes (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-17-4">§17.4</a>)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>four resolvers behind one trait</td>
+<td><code>resolver.lww</code>, <code>.siblings</code>, <code>.crdt</code> all pass (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-18-4">§18.4</a>)</td>
+</tr>
+<tr>
+<td>7</td>
+<td>IBLT fast path with Merkle fallback</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-6">M6</a> met; <code>iblt.decode_correctness</code> and <code>iblt.fall_back</code> pass (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-4">§19.4</a>)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>multi-DC / WAN anti-entropy</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-10">M10</a> met; <code>wan.convergence_2dc</code> passes (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-20-4">§20.4</a>)</td>
+</tr>
+<tr>
+<td>9</td>
+<td><code>ae</code> CLI, metrics, policy registry, four runbooks</td>
+<td><code>cli.golden_output</code> and <code>metrics.exposition</code> pass; 4 runbooks committed (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-21-4">§21.4</a>)</td>
+</tr>
+<tr>
+<td>10</td>
+<td>SIMD and parallel performance hardening</td>
+<td><a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-1">M1</a>/<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-4">M4</a>/<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#m-6">M6</a> fully met with SIMD; <code>perf.*</code> benchmarks pass (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-22-4">§22.4</a>)</td>
+</tr>
+</tbody></table></div>
+<h2 id="ex-questions-to-test-yourself">Questions to test yourself</h2>
+<ol>
+<li>Why does read repair alone, without active anti-entropy, leave &quot;cold&quot; ranges permanently
+diverged — and what metric would reveal this in production before an operator notices via a
+complaint? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-14">§14</a>, and <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#fm-1">FM-1</a> in <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#sec-24">§24</a>.</em></li>
+<li>Why is the hint queue capped at bytes rather than at hint count, and what regime would make a
+count-based cap wrong instead? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-9">ADR-09</a> in <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a> and <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-33">§33</a> item 3.</em></li>
+<li>Why does synchronous-blocking read repair explode p99 latency, and what does the
+synchronous-non-blocking design trade away to fix it? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-2">§16.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-16-4">§16.4</a> and <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-6">P6</a>.</em></li>
+<li>Why must the token bucket be per-<code>(peer, range)</code> rather than global, and what specific failure
+does a global bucket permit? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-2">§14.2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-6">§14.6</a> and <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-13">P13</a>.</em></li>
+<li>Why is repair concurrency bounded per node (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-8">ADR-08</a>) independently of the token bucket&#39;s
+bandwidth bound, and what happens if only one of the two bounds exists? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-8">ADR-08</a> in <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#sec-9">§9</a>,
+<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-14-2">§14.2</a> and <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/numbers/#sec-4">§4</a>.</em></li>
+</ol>
+<h2 id="ex-if-you-only-remember-three-things">If you only remember three things</h2>
+<p>Three mechanisms are required because each covers a gap the others leave: read repair for keys being
+touched, hinted handoff for a replica that is briefly down, and gossip-driven Merkle comparison for
+everything nobody is reading (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-2">P2</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>). The hint queue and the async-repair queue drop with telemetry
+instead of growing, and a per-pair token bucket caps repair bandwidth, because repair traffic can
+itself worsen the incident it is fixing (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-5">P5</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#p-13">P13</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-31">MM7</a>). Fingerprints go first and payloads second,
+and the IBLT fast path always falls back to Merkle, so a mis-tuned <code>d_expected</code> costs performance
+rather than correctness (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/trade-offs/#adr-15">ADR-15</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/blueprint/#sec-19-9">§19.9</a>).</p>
+<h2 id="ex-words-used-here">Words used here</h2>
+<ul>
+<li><strong>Anti-entropy</strong>: protocols that detect and repair replica divergence after the fact (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>).</li>
+<li><strong>Active anti-entropy</strong>: the background, gossip-scheduled, Merkle-driven repair of ranges nobody
+is reading (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-14">§14</a>).</li>
+<li><strong>Merkle tree</strong>: a tree of hashes that lets two replicas find differing ranges by comparing
+summaries first (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/build/#sec-13">§13</a>).</li>
+<li><strong>Hinted handoff</strong>: buffering a write for an unreachable replica and replaying it later (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>).</li>
+<li><strong>Sloppy quorum</strong>: accepting a write once <code>W</code> replicas acknowledge, hinting the rest (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>).</li>
+<li><strong>Read repair</strong>: detecting and fixing divergence on the keys a client is actually reading (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>).</li>
+<li><strong>HLC (hybrid logical clock)</strong>: a clock mixing physical time with a logical counter, giving a
+total order that respects causality where observable (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>).</li>
+<li><strong>CAI contract</strong>: commutative, associative, idempotent, the property every resolver must satisfy
+(<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-6">I6</a>).</li>
+<li><strong>IBLT</strong>: a table that recovers a small set difference by peeling off single-element cells (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>).</li>
+<li><strong>Token bucket</strong>: a counter that refills at a fixed rate; here it caps repair bandwidth per
+<code>(peer, range)</code> (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>, <a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/reliability/#inv-10">I10</a>).</li>
+<li><strong>Backpressure</strong>: dropping new work with telemetry once a bounded queue is full (<a class="cite" href="/system-design-blueprints/systems/anti-entropy-read-repair/study/#sec-37">§37</a>).</li>
+</ul>
+</div> </div> </div> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

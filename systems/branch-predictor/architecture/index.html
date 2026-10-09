@@ -1,0 +1,358 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Branch Predictor from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Branch Predictor from Scratch, hld: §3 overview + §8 domain model. Build a standalone, userspace, trace-driven branch-prediction research and conformance framework: a deterministic simulator of the CPU frontend's direction predictor, branch-target buffer (BTB), and…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <a href="/system-design-blueprints/systems/branch-predictor/">Branch Predictor from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Branch Predictor from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~19 weeks</li> <li>2,328 lines</li> <li>blueprint #189</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/branch-predictor/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/branch-predictor/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/branch-predictor/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/branch-predictor/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/branch-predictor/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/branch-predictor/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/branch-predictor/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/branch-predictor/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/branch-predictor/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/branch-predictor/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Branch Predictor from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend side: untrusted trace sources, operator tools
+%% legend ingest: trace ingest and replay scheduling
+%% legend rt: simulation core and predictor layer
+%% legend store: speculative state, checkpoints
+%% legend trust: metrics output boundary
+  SRC[&quot;&lt;b&gt;TRACE SOURCES (untrusted)&lt;/b&gt;&lt;br/&gt;perf/Intel-PT captures&lt;br/&gt;synthetic gen | fuzzer&quot;]
+  TR[&quot;&lt;b&gt;bp-trace&lt;/b&gt;&lt;br/&gt;parse -&amp;gt; decompress(zstd)&lt;br/&gt;-&amp;gt; validate -&amp;gt; canonicalize&lt;br/&gt;-&amp;gt; sequence&quot;]
+  RP[&quot;&lt;b&gt;bp-replay&lt;/b&gt;&lt;br/&gt;deterministic scheduler&lt;br/&gt;logical clock&lt;br/&gt;replay-seq assignment&quot;]
+  SIM[&quot;&lt;b&gt;bp-sim&lt;/b&gt;&lt;br/&gt;fetch model -&amp;gt; speculation engine&lt;br/&gt;-&amp;gt; retire model -&amp;gt; rollback&quot;]
+  HI[&quot;&lt;b&gt;bp-history&lt;/b&gt;&lt;br/&gt;GHR/LHR/folded&lt;br/&gt;speculative snap&quot;]
+  BTB[&quot;&lt;b&gt;bp-btb&lt;/b&gt;&lt;br/&gt;set-assoc target&lt;br/&gt;tag match + LRU&quot;]
+  RAS[&quot;&lt;b&gt;bp-ras&lt;/b&gt;&lt;br/&gt;speculative return stack&lt;br/&gt;push/pop + rollback&quot;]
+  PL[&quot;&lt;b&gt;PREDICTOR LAYER&lt;/b&gt;&lt;br/&gt;trait Predictor, stable interface, ADR-23&lt;br/&gt;bp-bimodal | bp-gshare | bp-perceptron&lt;br/&gt;bp-tage | bp-hybrid (chooser)&quot;]
+  MET[&quot;&lt;b&gt;bp-metrics&lt;/b&gt;&lt;br/&gt;MPKI | accuracy | aliasing&lt;br/&gt;rollback-freq | queue occupancy&quot;]
+  CK[&quot;&lt;b&gt;bp-checkpoint&lt;/b&gt;&lt;br/&gt;append-only mmap snapshots&lt;br/&gt;schema-version tag | checksum&quot;]
+  CLI[&quot;&lt;b&gt;bp-cli / bp-bench / dashboards&lt;/b&gt;&lt;br/&gt;operator interfaces | CI gates&lt;br/&gt;flamegraphs&quot;]
+  SRC -- &quot;TRUST BOUNDARY&quot; --&gt; TR
+  TR -- &quot;SCHEMA BOUNDARY&quot; --&gt; RP
+  RP -- &quot;CONCURRENCY BOUNDARY&quot; --&gt; SIM
+  SIM --&gt; HI
+  SIM --&gt; BTB
+  SIM --&gt; RAS
+  HI --&gt; PL
+  BTB --&gt; PL
+  RAS --&gt; PL
+  PL --&gt; MET
+  MET -- &quot;IO BOUNDARY&quot; --&gt; CK
+  CK --&gt; CLI
+  classDef side stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef rt stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  classDef trust stroke-width:1.5px
+  class SRC,CLI side
+  class TR,RP ingest
+  class SIM,PL rt
+  class HI,BTB,RAS,CK store
+  class MET trust</pre><figcaption><ul class="diagram-legend"><li><span class="swatch side"></span>untrusted trace sources, operator tools</li><li><span class="swatch ingest"></span>trace ingest and replay scheduling</li><li><span class="swatch rt"></span>simulation core and predictor layer</li><li><span class="swatch store"></span>speculative state, checkpoints</li><li><span class="swatch trust"></span>metrics output boundary</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>+-------------------------------------------------------------------------------+
+|  TRACE SOURCES (untrusted)  perf/Intel-PT captures | synthetic gen | fuzzer   |
++--------------------------------------+------------------------------[TRUST BOUNDARY]
+                                       v
++-------------------------------------------------------------------------------+
+|  bp-trace   parse -&gt; decompress(zstd) -&gt; validate -&gt; canonicalize -&gt; sequence |
++--------------------------------------+------------------------------[SCHEMA BOUNDARY]
+                                       v
++-------------------------------------------------------------------------------+
+|  bp-replay  deterministic scheduler | logical clock | replay-seq assignment  |
++--------------------------------------+------------------------[CONCURRENCY BOUNDARY]
+                                       v
++-------------------------------------------------------------------------------+
+|  bp-sim     fetch model -&gt; speculation engine -&gt; retire model -&gt; rollback     |
++---------------+----------------------+----------------------+----------------+
+                |                      |                      |
+                v                      v                      v
+      +------------------+   +------------------+   +--------------------------+
+      | bp-history       |   | bp-btb           |   | bp-ras                   |
+      | GHR/LHR/folded    |   | set-assoc target |   | speculative return stack |
+      | speculative snap  |   | tag match + LRU  |   | push/pop + rollback      |
+      +------------------+   +------------------+   +--------------------------+
+                |                      |                      |
+                +----------------------+----------------------+
+                                       v
++-------------------------------------------------------------------------------+
+|  PREDICTOR LAYER (trait Predictor, stable interface, ADR-23)                  |
+|  bp-bimodal | bp-gshare | bp-perceptron | bp-tage | bp-hybrid (chooser)       |
++--------------------------------------+---------------------------------------+
+                                       v
++-------------------------------------------------------------------------------+
+|  bp-metrics  MPKI | accuracy | aliasing | rollback-freq | queue occupancy    |
++--------------------------------------+--------------------------[IO BOUNDARY]
+                                       v
++-------------------------------------------------------------------------------+
+|  bp-checkpoint  append-only mmap snapshots | schema-version tag | checksum   |
++--------------------------------------+---------------------------------------+
+                                       v
++-------------------------------------------------------------------------------+
+|  bp-cli / bp-bench / dashboards  operator interfaces | CI gates | flamegraphs |
++-------------------------------------------------------------------------------+</code></pre></details>
+<p><strong>Trace Sources.</strong> External, untrusted. Intel PT captures, synthetic generators, compiler
+instrumentation, or <code>bp-fuzz</code>-produced pathological streams. This is a hard trust boundary (<a class="cite" href="/system-design-blueprints/systems/branch-predictor/reliability/#t-1">T1</a>):
+malformed traces must not reach the simulation core in any form.</p>
+<p><strong>bp-trace.</strong> Owns parsing, zstd decompression (<a class="cite" href="/system-design-blueprints/systems/branch-predictor/trade-offs/#adr-24">ADR-24</a>), validation, canonicalization, and monotonic
+sequence assignment. Enforces schema compatibility (P15) and rejects malformed input deterministically
+— the schema boundary between untrusted bytes and typed <code>BranchEvent</code>s.</p>
+<p><strong>bp-replay.</strong> Deterministic event scheduler; assigns a globally monotonic replay-sequence ID (<a class="cite" href="/system-design-blueprints/systems/branch-predictor/reliability/#inv-1">I1</a>) to
+every event; isolates simulated timing from wall-clock behavior (P1). This is the concurrency
+boundary: NUMA-partitioned worker threads synchronize only through this layer.</p>
+<p><strong>bp-sim.</strong> Models fetch-stage interaction with the predictor layer: query dispatch, speculative
+update application, retire-time training, and rollback coordination on misprediction. Separates
+architectural correctness from predictor experimentation (P10).</p>
+<p><strong>bp-history / bp-btb / bp-ras.</strong> Three co-equal speculative-state stores queried per fetch: global
+and local history (folded, snapshot-rollback-capable), branch-target cache (set-associative, tagged),
+return-address stack (speculative push/pop). Each independently satisfies rollback correctness (<a class="cite" href="/system-design-blueprints/systems/branch-predictor/reliability/#inv-4">I4</a>).</p>
+<p><strong>Predictor Layer.</strong> Isolated behind the <code>Predictor</code> trait (<a class="cite" href="/system-design-blueprints/systems/branch-predictor/trade-offs/#adr-23">ADR-23</a>): bimodal, gshare, perceptron,
+TAGE, and hybrid/chooser composition. Predictors never own simulator state directly (P10) — they
+receive <code>PredictorContext</code> and return <code>BranchPrediction</code>.</p>
+<p><strong>bp-metrics.</strong> Collects MPKI, accuracy, confidence distribution, aliasing pressure, rollback
+frequency, and queue occupancy; exports Prometheus-format series (<a class="cite" href="/system-design-blueprints/systems/branch-predictor/trade-offs/#adr-13">ADR-13</a>) and OpenTelemetry-shaped
+trace spans (<a class="cite" href="/system-design-blueprints/systems/branch-predictor/trade-offs/#adr-12">ADR-12</a>). This is the observability seam — every anomaly upstream must surface here.</p>
+<p><strong>bp-checkpoint.</strong> Persistence boundary: append-only, mmap-backed, checksum-verified, schema-tagged
+snapshots (P12). The only subsystem permitted durable side effects.</p>
+<p><strong>Operator Interfaces.</strong> <code>bp-cli</code>, <code>bp-bench</code>, Grafana dashboards, CI gates. Every operational artifact
+they produce must be reproducible byte-for-byte given the same trace and config (P1).</p>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Branch Event &amp; Predictor Protocol</h2>
+<p><strong>Branch event record</strong> (as ingested by <code>bp-trace</code>, one per dynamic branch):</p>
+<pre class="diagram"><code>BranchEvent — sequence_id: u64, instruction_pointer: u64, branch_type: BranchType,
+  target_address: u64, taken: bool, privilege_level: u8, thread_id: u32, timestamp: u64</code></pre>
+<p><strong>Branch types.</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+<th>Predictor Path</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Conditional</td>
+<td>direction-dependent, PC + history indexed</td>
+<td>bimodal / gshare / perceptron / TAGE</td>
+</tr>
+<tr>
+<td>Unconditional</td>
+<td>always taken, target-only</td>
+<td>BTB only</td>
+</tr>
+<tr>
+<td>Indirect</td>
+<td>computed target, no static destination</td>
+<td>BTB indirect slot (ITTAGE deferred, <a class="cite" href="/system-design-blueprints/systems/branch-predictor/trade-offs/#sec-35">§35</a>)</td>
+</tr>
+<tr>
+<td>Return</td>
+<td>RAS-predicted target</td>
+<td><code>bp-ras</code> pop</td>
+</tr>
+<tr>
+<td>Call</td>
+<td>pushes return address</td>
+<td><code>bp-ras</code> push</td>
+</tr>
+</tbody></table></div>
+<p><strong>Predictor query lifecycle</strong> (per fetch, driving <code>ReplayEvent</code> state):</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart LR
+%% legend rt: normal fetch-to-train path
+%% legend bad: misprediction and rollback path
+  F[&quot;FETCH&quot;] --&gt; Q[&quot;QUERY&quot;] --&gt; SU[&quot;SPECULATIVE_UPDATE&quot;] --&gt; EX[&quot;EXECUTE&quot;] --&gt; RT[&quot;RETIRE&quot;] --&gt; TRN[&quot;TRAIN&quot;]
+  SU --&gt; MP[&quot;MISPREDICT&quot;] --&gt; RB[&quot;ROLLBACK&quot;] --&gt; RE[&quot;RETRAIN&quot;]
+  classDef rt stroke-width:1.5px
+  classDef bad stroke-width:1.5px
+  class F,Q,SU,EX,RT,TRN rt
+  class MP,RB,RE bad</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>normal fetch-to-train path</li><li><span class="swatch bad"></span>misprediction and rollback path</li></ul><p class="diagram-note">Drawn from the text diagram in §8.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>FETCH -&gt; QUERY -&gt; SPECULATIVE_UPDATE -&gt; EXECUTE -&gt; RETIRE -&gt; TRAIN
+                                    \-&gt; MISPREDICT -&gt; ROLLBACK -&gt; RETRAIN</code></pre></details>
+<p><strong>Saturating counter state machine</strong> (bimodal/gshare direction state, 2-bit):</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">stateDiagram-v2
+  direction LR
+  S00: 00 Strong-NotTaken
+  S01: 01 Weak-NotTaken
+  S10: 10 Weak-Taken
+  S11: 11 Strong-Taken
+  S00 --&gt; S01
+  S01 --&gt; S00
+  S01 --&gt; S10
+  S10 --&gt; S01
+  S10 --&gt; S11
+  S11 --&gt; S10</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>00 Strong-NotTaken &lt;-&gt; 01 Weak-NotTaken &lt;-&gt; 10 Weak-Taken &lt;-&gt; 11 Strong-Taken</code></pre></details>
+<p>Transitions increment toward 11 on <code>taken</code>, decrement toward 00 on <code>not-taken</code>; bounded at both ends
+(<a class="cite" href="/system-design-blueprints/systems/branch-predictor/reliability/#inv-5">I5</a>).</p>
+<p><strong>TAGE tagged-table entry layout</strong> (<code>bp-tage</code>, one per geometric-history table):</p>
+<pre class="diagram"><code>TageEntry — tag: u16, ctr: i8, usefulness: u8, history_length_class: u8</code></pre>
+<p><strong>Replay event sequencing</strong> (canonical per-event pipeline through the whole system):</p>
+<ol>
+<li>trace event ingest (<code>bp-trace</code>)</li>
+<li>normalization (canonical field ordering, timestamp rebasing)</li>
+<li>fetch dispatch (<code>bp-sim</code>)</li>
+<li>predictor lookup (predictor layer)</li>
+<li>speculative update (<code>bp-history</code>/<code>bp-btb</code>/<code>bp-ras</code>)</li>
+<li>retirement (<code>bp-sim</code>)</li>
+<li>training (predictor layer, retire-time)</li>
+<li>metrics flush (<code>bp-metrics</code>)</li>
+</ol>
+<p><strong>Malformed-trace taxonomy</strong> (rejected by <code>bp-trace</code> validator, <a class="cite" href="/system-design-blueprints/systems/branch-predictor/reliability/#inv-11">I11</a>): sequence-ID regression;
+negative/backwards timestamp; invalid branch-type discriminant; misaligned instruction pointer
+(non-multiple-of-instruction-width); truncated record; checksum mismatch.</p>
+<p><strong>Canonical failure path</strong> (BTB miss cascading to rollback):</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend ingest: input event (BTB miss)
+%% legend rt: speculative execution on the fallback path
+%% legend bad: mismatch, rollback and retraining
+  A[&quot;&lt;b&gt;BTB miss&lt;/b&gt;&quot;]
+  B[&quot;&lt;b&gt;fallback target&lt;/b&gt;&lt;br/&gt;sequential / predicted-not-taken&quot;]
+  C[&quot;&lt;b&gt;speculative execution&lt;/b&gt;&quot;]
+  D[&quot;&lt;b&gt;retire-time target mismatch&lt;/b&gt;&quot;]
+  E[&quot;&lt;b&gt;rollback (I4)&lt;/b&gt;&quot;]
+  F[&quot;&lt;b&gt;predictor retraining&lt;/b&gt;&quot;]
+  A --&gt; B --&gt; C --&gt; D --&gt; E --&gt; F
+  classDef ingest stroke-width:1.5px
+  classDef rt stroke-width:1.5px
+  classDef bad stroke-width:1.5px
+  class A ingest
+  class B,C rt
+  class D,E,F bad</pre><figcaption><ul class="diagram-legend"><li><span class="swatch ingest"></span>input event (BTB miss)</li><li><span class="swatch rt"></span>speculative execution on the fallback path</li><li><span class="swatch bad"></span>mismatch, rollback and retraining</li></ul><p class="diagram-note">Drawn from the text diagram in §8.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>BTB miss -&gt; fallback target (sequential/predicted-not-taken) -&gt; speculative execution
+  -&gt; retire-time target mismatch -&gt; rollback (I4) -&gt; predictor retraining</code></pre></details>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

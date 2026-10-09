@@ -1,0 +1,331 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Backup / Snapshot System — Design · Engineering Blueprints</title><meta name="description" content="Backup / Snapshot System, lld: core types, repo tree, file inventory. Build a content-addressed, encrypted, incremental backup and snapshot system in the BorgBackup / restic / Kopia / Tarsnap / duplicity / rdiff-backup lineage, layered on the snapshot lineage of ZFS…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/backup-snapshot/">Backup / Snapshot System</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Backup / Snapshot System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~8 weeks</li> <li>1,833 lines</li> <li>blueprint #111</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/backup-snapshot/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/backup-snapshot/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/backup-snapshot/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/backup-snapshot/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/backup-snapshot/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/backup-snapshot/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/backup-snapshot/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/backup-snapshot/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/backup-snapshot/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/backup-snapshot/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Backup / Snapshot System — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/backup-snapshot/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>/// FINAL_BLUEPRINT §11.1
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct SnapshotId(pub [u8; 32]);     // BLAKE3 of (source-root, timestamp, salt)
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct ManifestId(pub [u8; 32]);     // BLAKE3 of manifest body
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct ChunkRef(pub [u8; 32]);       // BLAKE3 of chunk plaintext
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct TreeNodeId(pub [u8; 32]);     // BLAKE3 of tree-node body
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct KeyVersion(pub u32);          // monotonic; rotates on rekey
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct RepoId(pub [u8; 16]);         // random per-repository identifier
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct BackupId(pub [u8; 16]);       // per-backup run identifier (journal key)</code></pre><pre class="code"><code>/// FINAL_BLUEPRINT §11.2
+pub struct Manifest {
+    pub id:          ManifestId,
+    pub parent:      Option&lt;ManifestId&gt;,
+    pub repo_id:     RepoId,
+    pub source_root: std::path::PathBuf,
+    pub snapshot_id: SnapshotId,
+    pub created_at:  chrono::DateTime&lt;chrono::Utc&gt;,
+    pub key_version: KeyVersion,
+    pub aead:        AeadAlgo,
+    pub root:        TreeNodeId,
+    pub stats:       ManifestStats,
+    pub signature:   Ed25519Signature,
+}
+
+pub enum AeadAlgo { XChaCha20Poly1305, Aes256GcmSiv, None /* Phase 0 only; rejected by Phase-3+ validator */ }
+
+pub struct ManifestStats {
+    pub source_bytes: u64, pub chunk_count: u64, pub unique_chunks: u64,
+    pub stored_bytes: u64, pub file_count: u64, pub directory_count: u64, pub elapsed_ms: u64,
+}
+
+pub struct ChunkEntry { pub chunk: ChunkRef, pub offset: u64, pub length: u32 }
+
+pub enum TreeNode {
+    File      { path: std::path::PathBuf, size: u64, mode: u32, uid: u32, gid: u32,
+                mtime_ns: i64, ctime_ns: i64, xattrs: std::collections::BTreeMap&lt;String, Vec&lt;u8&gt;&gt;,
+                chunks: Vec&lt;ChunkEntry&gt; },
+    Directory { path: std::path::PathBuf, mode: u32, uid: u32, gid: u32, mtime_ns: i64,
+                entries: Vec&lt;TreeNodeId&gt; },
+    Symlink   { path: std::path::PathBuf, target: std::path::PathBuf, mode: u32, uid: u32, gid: u32, mtime_ns: i64 },
+    Other     { path: std::path::PathBuf, kind: SpecialKind, mode: u32, uid: u32, gid: u32, mtime_ns: i64, dev: u64 },
+}
+
+pub enum SpecialKind { CharDevice, BlockDevice, Fifo, Socket }</code></pre><pre class="code"><code>/// FINAL_BLUEPRINT §11.3
+pub enum RetentionPolicy {
+    KeepLast  { n: u32 },
+    KeepGfs   { last: u32, daily: u32, weekly: u32, monthly: u32, yearly: u32 },
+    KeepWithin{ days: u32 },
+    KeepAll,
+    Custom(std::sync::Arc&lt;dyn Fn(&amp;[Manifest]) -&gt; Vec&lt;ManifestId&gt; + Send + Sync&gt;),
+}
+pub const DEFAULT_POLICY: &amp;str = &quot;keep-last=24, daily=7, weekly=4, monthly=12, yearly=2&quot;;</code></pre><pre class="code"><code>/// FINAL_BLUEPRINT §11.4 — master via Argon2id; purpose keys via HKDF-SHA256 (Appendix C)
+pub struct MasterKey([u8; 32]);
+pub struct ChunkKey([u8; 32]);          // HKDF(master, &quot;bks.chunk.key/v1&quot;   || chunk_ref || epoch)
+pub struct ChunkNonce([u8; 24]);        // HKDF(master, &quot;bks.chunk.nonce/v1&quot; || chunk_ref || epoch)
+pub struct ManifestKey([u8; 32]);       // HKDF(master, &quot;bks.manifest.key/v1&quot; || key_version)
+pub struct ManifestSignKey([u8; 32]);   // Ed25519 seed; &quot;bks.manifest.sign/v1&quot; || key_version
+
+pub struct KeyHierarchy { /* master, epoch:u64, version:KeyVersion */ }
+
+impl KeyHierarchy {
+    pub fn chunk_key(&amp;self, chunk: ChunkRef) -&gt; ChunkKey;
+    pub fn chunk_nonce(&amp;self, chunk: ChunkRef) -&gt; ChunkNonce;
+    pub fn manifest_key(&amp;self) -&gt; ManifestKey;
+    pub fn sign_key(&amp;self) -&gt; ManifestSignKey;
+}</code></pre><pre class="code"><code>/// FINAL_BLUEPRINT §11.5
+#[async_trait::async_trait]
+pub trait Repository: Send + Sync {
+    async fn put         (&amp;self, key: &amp;Key, bytes: bytes::Bytes) -&gt; Result&lt;Etag&gt;;
+    async fn put_if_match(&amp;self, key: &amp;Key, bytes: bytes::Bytes, expected: Etag) -&gt; Result&lt;Etag&gt;;
+    async fn get         (&amp;self, key: &amp;Key) -&gt; Result&lt;bytes::Bytes&gt;;
+    async fn head        (&amp;self, key: &amp;Key) -&gt; Result&lt;ObjectHead&gt;;
+    async fn list        (&amp;self, prefix: &amp;str) -&gt; Result&lt;Vec&lt;Key&gt;&gt;;
+    async fn delete      (&amp;self, key: &amp;Key) -&gt; Result&lt;()&gt;;
+    fn repo_id(&amp;self) -&gt; RepoId;
+}
+pub struct Key(pub String);   // &quot;chunks/aa/bbcc...&quot;, &quot;manifests/&lt;id&gt;&quot;, &quot;keys/&lt;version&gt;&quot;
+pub struct Etag(pub [u8; 32]);
+pub struct ObjectHead { pub size: u64, pub etag: Etag, pub last_modified: chrono::DateTime&lt;chrono::Utc&gt; }</code></pre><pre class="code"><code>/// FINAL_BLUEPRINT §11.6
+#[async_trait::async_trait]
+pub trait SnapshotDriver: Send + Sync {
+    async fn snapshot(&amp;self, source_root: &amp;std::path::Path) -&gt; Result&lt;SnapshotHandle&gt;;
+    async fn release (&amp;self, handle: SnapshotHandle) -&gt; Result&lt;()&gt;;
+}
+pub struct SnapshotHandle { pub id: SnapshotId, pub mount: std::path::PathBuf,
+                            pub driver: SnapshotDriverKind, pub created_at: chrono::DateTime&lt;chrono::Utc&gt; }
+pub enum SnapshotDriverKind { Btrfs, Zfs, Lvm, Fsfreeze, LiveWalk }
+
+#[async_trait::async_trait]
+pub trait Backup: Send + Sync {
+    async fn backup(&amp;self, source_root: &amp;std::path::Path,
+                    repo: std::sync::Arc&lt;dyn Repository&gt;, keys: std::sync::Arc&lt;KeyHierarchy&gt;) -&gt; Result&lt;Manifest&gt;;
+}
+#[async_trait::async_trait]
+pub trait Restore: Send + Sync {
+    async fn restore(&amp;self, manifest: &amp;Manifest, repo: std::sync::Arc&lt;dyn Repository&gt;,
+                     keys: std::sync::Arc&lt;KeyHierarchy&gt;, target: &amp;std::path::Path) -&gt; Result&lt;RestoreReport&gt;;
+}
+#[async_trait::async_trait]
+pub trait Verify: Send + Sync {
+    async fn verify(&amp;self, manifest: &amp;Manifest, repo: std::sync::Arc&lt;dyn Repository&gt;,
+                    keys: std::sync::Arc&lt;KeyHierarchy&gt;) -&gt; Result&lt;VerifyReport&gt;;
+}
+#[async_trait::async_trait]
+pub trait Gc: Send + Sync {
+    async fn run(&amp;self, repo: std::sync::Arc&lt;dyn Repository&gt;, retained: &amp;[Manifest]) -&gt; Result&lt;GcReport&gt;;
+}</code></pre><pre class="code"><code>/// FINAL_BLUEPRINT §11.7 — fixed error taxonomy; routed on error.kind in logs
+pub enum BksError {
+    RepoLockHeld, RepoNoSpace, RepoUnavailable, IfMatchFailed,
+    ChunkCorrupt { chunk: ChunkRef, manifest: ManifestId },
+    ChunkHashMismatch { chunk: ChunkRef, manifest: ManifestId },
+    ChunkTruncated { chunk: ChunkRef }, ChunkMissing { chunk: ChunkRef },
+    ManifestInvalid, ManifestIdMismatch, ManifestSignatureInvalid,
+    AeadUnsupported, LayoutTooNew { found: u32, supported: u32 },
+    CrossFsBoundary, SnapshotDriverError,
+    PhaseDeferred(&amp;&#39;static str),   // anchor: PhaseDeferred(&quot;Deferred Features Register&quot;)
+}
+pub type Result&lt;T&gt; = std::result::Result&lt;T, BksError&gt;;</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>Backup-Snapshot/
+|-- README.md                        # operator-facing quickstart
+|-- FINAL_BLUEPRINT.md               # this specification (source of truth)
+|-- CHANGELOG.md                     # Keep-a-Changelog format
+|-- CONTRIBUTING.md                  # contribution + review rules
+|-- CODE_OF_CONDUCT.md
+|-- SECURITY.md                      # disclosure policy + PGP fingerprint
+|-- LICENSES/
+|   |-- Apache-2.0.txt               # runtime license (ADR-23)
+|   `-- ELv2.txt                     # reserved for hosted retention service
+|-- .github/workflows/
+|   |-- ci.yml                       # build + unit + integration
+|   |-- conformance.yml              # conformance buckets + property tests
+|   |-- chaos.yml                    # disk-full, net-drop, clock-skew, concurrent
+|   |-- security.yml                 # cargo audit/deny, SBOM
+|   `-- release.yml                  # reproducible release builds
+|-- Makefile                         # bootstrap/build/test/lint/conformance/bench/fuzz
+|-- Cargo.toml                       # workspace manifest
+|-- Cargo.lock                       # committed for reproducibility
+|-- rust-toolchain.toml              # pinned toolchain
+|-- Dockerfile                       # multi-stage build + runtime
+|-- docker-compose.yml               # bks daemon + local repo + MinIO + Prometheus
+|-- nix/flake.nix                    # pinned dev shell (cargo, protoc, cryptsetup)
+|-- conformance/
+|   |-- runner/                      # Rust+Python harness; emits conformance.report.json
+|   |-- corpora/                     # per-bucket fixtures (core_types, crypto, gc, restore, chaos...)
+|   `-- report_schema.json
+|-- benchmarks/                      # chunker/aead/backup/restore/gc throughput harnesses
+|-- docs/
+|   |-- adr/                         # one file per §9 ADR
+|   |-- architecture/                # overview/snapshot/chunker/crypto/manifest/repo/...
+|   |-- threat-model.md
+|   |-- runbook/                     # backup-failed, restore-corrupt-chunk, gc-concurrent, key-rotation, migration
+|   |-- compliance/                  # soc2 + gdpr mappings
+|   |-- api/                         # OpenAPI for REST repository backend
+|   `-- sdk/                         # user-facing interface reference
+|-- examples/                        # hello-backup, encrypted, s3, retention-7-4-12, database, multi-site
+|-- ops/                             # helm, terraform, k8s, prometheus.yml, grafana dashboard
+`-- papers/whitepaper/whitepaper-v1.0.md</code></pre><pre class="diagram"><code>crates/
+|   |-- bks-core/                    # SnapshotId, ManifestId, ChunkRef, RetentionPolicy, journal
+|   |-- bks-snapshot/                # snapshot driver trait + Btrfs/ZFS/LVM/fsfreeze/LiveWalk
+|   |-- bks-walker/                  # POSIX tree walker + metadata
+|   |-- bks-chunker/                 # delegates to rank-109 FastCDC+BLAKE3; chunk index
+|   |-- bks-crypto/                  # Argon2id + HKDF + XChaCha20-Poly1305 + Ed25519
+|   |-- bks-manifest/                # prost manifest serializer + signer + tree encoding
+|   |-- bks-repo/                    # Repository trait + lock manager + key layout
+|   |-- bks-repo-local/             # local-disk backend (256-way fan-out)
+|   |-- bks-repo-s3/                # S3 backend (rank 107) + pack writer
+|   |-- bks-repo-sftp/             # SFTP backend
+|   |-- bks-retention/             # retention policy engine
+|   |-- bks-gc/                    # mark-sweep garbage collector
+|   |-- bks-restore/              # restore engine
+|   |-- bks-verify/              # verify engine
+|   |-- bks-replicate/         # multi-site replicator (SnapVault-style)
+|   |-- bks-tls/              # TLS for REST repository backends (rank 50)
+|   |-- bks-metrics/         # Prometheus metrics + OTLP traces
+|   |-- bks-bench/          # release-mode benchmarks
+|   |-- bks-fuzz/          # libfuzzer harnesses (nightly)
+|   |-- bks-cli/          # `bks` subcommands: init/backup/restore/list/verify/prune/gc/fsck/doctor
+|   |-- bks-bin/         # the `bks` binary (composes CLI + daemons)
+|   `-- bks-conformance/  # conformance suite runner</code></pre> </section><section aria-labelledby="sec-file-inventory"> <h2 id="sec-file-inventory">File inventory <small class="muted">(Appendix A · 30 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">Path</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>crates/bks-core/</code></td><td>core ids, Manifest/TreeNode/RetentionPolicy/KeyHierarchy types, journal, error taxonomy (<a class="cite" href="/system-design-blueprints/systems/backup-snapshot/design/#sec-11">§11</a>)</td></tr><tr><td><code>crates/bks-snapshot/</code></td><td>SnapshotDriver trait + Btrfs/ZFS/LVM/fsfreeze/LiveWalk drivers (Phase 9)</td></tr><tr><td><code>crates/bks-walker/</code></td><td>POSIX tree walker + metadata (Phase 1)</td></tr><tr><td><code>crates/bks-chunker/</code></td><td><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/" title="Deduplication Engine">rank-109</a> FastCDC bridge + chunk index (Phase 2)</td></tr><tr><td><code>crates/bks-crypto/</code></td><td>Argon2id + HKDF + XChaCha20-Poly1305 + Ed25519 (Phase 3, Appendix-Crypto)</td></tr><tr><td><code>crates/bks-manifest/</code></td><td>prost serializer, signer, tree encoding, <code>manifest.proto</code> (Phase 5)</td></tr><tr><td><code>crates/bks-repo/</code></td><td>Repository trait, lock manager, key layout (<a class="cite" href="/system-design-blueprints/systems/backup-snapshot/blueprint/#sec-11-5">§11.5</a>, Phase 8)</td></tr><tr><td><code>crates/bks-repo-local/</code></td><td>local-disk backend, 256-way fan-out (Phase 0)</td></tr><tr><td><code>crates/bks-repo-s3/</code></td><td>S3 backend (rank 107) + pack writer (Phase 4)</td></tr><tr><td><code>crates/bks-repo-sftp/</code></td><td>SFTP backend</td></tr><tr><td><code>crates/bks-retention/</code></td><td>retention policy engine (Phase 6)</td></tr><tr><td><code>crates/bks-gc/</code></td><td>mark-sweep GC (Phase 6)</td></tr><tr><td><code>crates/bks-restore/</code></td><td>restore engine (Phase 7 read path)</td></tr><tr><td><code>crates/bks-verify/</code></td><td>verify engine (Phase 7)</td></tr><tr><td><code>crates/bks-replicate/</code></td><td>SnapVault-style replicator (Phase 11)</td></tr><tr><td><code>crates/bks-tls/</code></td><td>TLS for REST backends (rank 50)</td></tr><tr><td><code>crates/bks-metrics/</code></td><td>Prometheus + OTLP (Observability)</td></tr><tr><td><code>crates/bks-bench/</code></td><td>release-mode benchmarks (Performance Engineering)</td></tr><tr><td><code>crates/bks-fuzz/</code></td><td>libfuzzer harnesses (Testing)</td></tr><tr><td><code>crates/bks-cli/</code></td><td>init/backup/restore/list/verify/prune/gc/fsck/doctor/rekey</td></tr><tr><td><code>crates/bks-bin/</code></td><td>the <code>bks</code> binary</td></tr><tr><td><code>crates/bks-conformance/</code></td><td>conformance runner</td></tr><tr><td><code>conformance/</code></td><td>corpora + runner + report schema (Testing)</td></tr><tr><td><code>benchmarks/</code></td><td>throughput harnesses</td></tr><tr><td><code>docs/adr/</code></td><td>one file per <a class="cite" href="/system-design-blueprints/systems/backup-snapshot/trade-offs/#sec-9">§9</a> ADR</td></tr><tr><td><code>docs/runbook/</code></td><td>operator runbooks (Operational Readiness)</td></tr><tr><td><code>docs/threat-model.md</code></td><td>long-form Threat Model</td></tr><tr><td><code>ops/</code></td><td>helm/terraform/k8s/prometheus/grafana</td></tr><tr><td><code>nix/flake.nix</code></td><td>pinned dev shell (Build &amp; Release)</td></tr><tr><td><code>papers/whitepaper/whitepaper-v1.0.md</code></td><td>bibliography + long-form references</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

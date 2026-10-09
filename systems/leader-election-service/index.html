@@ -1,0 +1,328 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Leader Election Service from Scratch · Engineering Blueprints</title><meta name="description" content="Leader Election Service from Scratch, plain words. Build a self-contained distributed leader election service — daemon electiond plus CLI electionctl — that grants at most one leader per named election group, backed by a from-scratch Raft replicated…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <span aria-current="page">Leader Election Service from Scratch</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Leader Election Service from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~31 weeks</li> <li>1,806 lines</li> <li>blueprint #198</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/leader-election-service/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/leader-election-service/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/leader-election-service/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/leader-election-service/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/leader-election-service/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/leader-election-service/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/leader-election-service/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/leader-election-service/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/leader-election-service/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/leader-election-service/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Leader Election Service from Scratch">  <p class="note warn">
+The <strong>plain-words page for this system has not been written yet</strong>. Below is the architecture overview taken
+        straight from the blueprint; the other tabs are generated from the blueprint too.
+</p> <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                          CLIENT APPS (schedulers, failover controllers, SDKs)
+                                   |  gRPC (client wire)         |  watch streams
+   == TRUST BOUNDARY (mTLS ingress, authz) ==============================================
+                                   v                             v
+        +----------------------------------------------------------------------+
+        |  api  (crate: api)  request admission | validation | authz | routing |
+        |  bounded ingress mpsc  -&gt;  BackpressureExceeded on overflow (P5)      |
+        +----------------------------------+-----------------------------------+
+                                           | proposals / reads
+        +----------------------------------v-----------------------------------+
+        |  election-core   Ownership FSM | Lease Manager | Fencing Allocator    |
+        |                  Session Registry | Watch Broker                      |
+        +----------------------------------+-----------------------------------+
+                                           | Raft proposals (linearizable)
+   == CONCURRENCY BOUNDARY (single Raft apply loop; state-machine thread) ================
+        +----------------------------------v-----------------------------------+
+        |  raft-engine   Term/Vote | AppendEntries | CommitIndex | Membership   |
+        |                &lt;- failure-detector (phi-accrual suspicion)            |
+        +----------+------------------------------+---------------------------+-+
+                   | append (durable)             | install/capture           | apply
+   == PERSISTENCE BOUNDARY (fdatasync group commit) ====================================
+        +----------v-----------+       +----------v-----------+   +-----------v---------+
+        |  wal  segmented log  |       |  snapshot  chunk     |   | applied state (RAM) |
+        |  CRC | group-commit  |       |  store + manifest    |   | ElectionRecord map  |
+        +----------------------+       +----------------------+   +---------------------+
+                   ^  peer replication / vote / heartbeat (protobuf, length-prefixed)
+   == PROTOCOL / NETWORK BOUNDARY (TLS, bounded inflight) ===============================
+        +----------+-----------------------------------------------------------+
+        |  transport   TLS peer links | conn pools | flow-control windows       |
+        |              retry+backoff  | peer-health -&gt; failure-detector          |
+        +----------------------------------+-----------------------------------+
+                                           |  scrape / OTLP / stdout
+        +----------------------------------v-----------------------------------+
+        |  telemetry   Prometheus metrics | OTel spans | structured JSON logs   |
+        +----------------------------------------------------------------------+</code></pre>
+<ul>
+<li><strong>api</strong> — authenticated admission, protobuf validation, per-request authz, transport-independent routing to the core; enforces the ingress backpressure invariant (P5, I-bounded) before any request reaches consensus.</li>
+<li><strong>election-core</strong> — the ownership state machine: lease lifecycle (<code>Pending→Active→Expiring→Revoked/Expired</code>), fencing-token allocation from the committed <code>(term,index)</code> (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-2">I2</a>), session liveness, and the watch broker that fans ownership changes to subscribers.</li>
+<li><strong>raft-engine</strong> — replicated log and election: term tracking, <code>RequestVote</code> with randomized timeouts (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/study/#sec-30">MM3</a>), <code>AppendEntries</code> heartbeats, commit-index advancement, single-server membership change (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/trade-offs/#adr-21">ADR-21</a>); consumes suspicion from the failure detector.</li>
+<li><strong>failure-detector</strong> — phi-accrual estimator over heartbeat inter-arrival times; emits a continuous suspicion level, not a boolean, damping false positives from scheduler pauses (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/study/#sec-30">MM6</a>, <a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#fm-13">FM-13</a>).</li>
+<li><strong>wal</strong> — append-only segmented log with per-entry CRC32C, group-commit <code>fdatasync</code>, torn-write detection, and ordered crash replay (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-3">I3</a>/<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-15">I15</a>).</li>
+<li><strong>snapshot</strong> — captures applied state to a chunked artifact with a checksummed manifest, installs atomically (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-12">I12</a>), and truncates the WAL prefix.</li>
+<li><strong>transport</strong> — TLS-authenticated peer links, length-prefixed protobuf frames, bounded inflight windows, retry/backoff, and peer-health signals feeding the detector.</li>
+<li><strong>telemetry</strong> — one metrics registry, span exporter, and JSON logger; every state transition in every box emits a signal (P6).</li>
+</ul>
+<p><strong>End-to-end acquire data flow (one trace across the boundaries above).</strong> (1) client → <strong>api</strong>: <code>ACQUIRE(group,session,ttl)</code> over mTLS; admission validates + authorizes, admits into the bounded ingress queue or sheds (P5). (2) <strong>api</strong> → <strong>election-core</strong>: routed to the leader (or <code>NotLeader</code> redirect). (3) <strong>election-core</strong> → <strong>raft-engine</strong>: proposes a replicated command. (4) <strong>raft-engine</strong> → <strong>wal</strong> + peers: appends locally, ships <code>AppendEntries</code>; each of a quorum fdatasyncs (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-10">I10</a>, P8). (5) <strong>raft-engine</strong> commit-index advances; the <strong>apply loop</strong> applies in index order (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-3">I3</a>). (6) <strong>election-core</strong> grants the lease, allocates <code>fence_token = commit_index</code> (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-2">I2</a>), and hands the result back. (7) <strong>election-core</strong> → <strong>watch</strong> broker: emits ownership-changed to subscribers (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/build/#sec-19">§19</a>). (8) <strong>api</strong> → client: <code>{fence_token, expiry}</code>. Every hop emits a span under one trace id; the whole acquire is one flame.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<p><strong>Core entities.</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ElectionGroup</code></td>
+<td>Independent coordination domain; keyed by <code>group_id</code>; owns one ownership FSM</td>
+</tr>
+<tr>
+<td><code>Lease</code></td>
+<td>Time-bounded ownership grant <code>(owner, fence_token, expiry_monotonic)</code></td>
+</tr>
+<tr>
+<td><code>Session</code></td>
+<td>Client liveness context; renews leases; expires on missed heartbeats</td>
+</tr>
+<tr>
+<td><code>FenceToken</code></td>
+<td>Monotonic <code>u64</code> ownership epoch derived from committed <code>(term,index)</code> (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-2">I2</a>)</td>
+</tr>
+<tr>
+<td><code>LogEntry</code></td>
+<td>Replicated command <code>(term, index, payload, crc)</code></td>
+</tr>
+<tr>
+<td><code>CommitIndex</code></td>
+<td>Highest quorum-durable index (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-10">I10</a>)</td>
+</tr>
+<tr>
+<td><code>WatchCursor</code></td>
+<td>Per-subscriber stream position <code>(group, from_revision)</code></td>
+</tr>
+<tr>
+<td><code>SnapshotManifest</code></td>
+<td><code>(snapshot_id, last_index, last_term, chunk_count, checksum)</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Replicated command grammar (EBNF).</strong></p>
+<pre class="diagram"><code>command      = acquire | renew | release | reconfig ;
+acquire      = &quot;ACQUIRE&quot; group session ttl_ms ;
+renew        = &quot;RENEW&quot;   group fence_token ttl_ms ;
+release      = &quot;RELEASE&quot; group fence_token ;
+reconfig     = &quot;ADD_NODE&quot; node_id | &quot;REMOVE_NODE&quot; node_id ;   (* single-server, ADR-21 *)
+group        = uint64 ;  session = uuid ;  fence_token = uint64 ;
+ttl_ms       = uint32 ;  (* 1..=600000; else rejected *)
+node_id      = uint64 ;</code></pre>
+<p><strong>Wire messages (peer plane, protobuf field order fixed, add-only per P12).</strong></p>
+<pre class="diagram"><code>RequestVote      { term:u64, candidate_id:u64, last_log_index:u64, last_log_term:u64 }
+RequestVoteResp  { term:u64, vote_granted:bool }
+AppendEntries    { term:u64, leader_id:u64, prev_log_index:u64, prev_log_term:u64,
+                   entries:[LogEntry], leader_commit:u64 }
+AppendEntriesResp{ term:u64, success:bool, conflict_index:u64, conflict_term:u64 }
+InstallSnapshot  { term:u64, leader_id:u64, last_index:u64, last_term:u64,
+                   offset:u64, data:bytes, done:bool }</code></pre>
+<p><strong>Lease state machine (state-transition table).</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>Guard</th>
+<th>To</th>
+<th>Side effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>—</td>
+<td>ACQUIRE committed</td>
+<td>quorum durable (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-10">I10</a>)</td>
+<td>Pending→Active</td>
+<td>issue fence_token = commit index (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-2">I2</a>)</td>
+</tr>
+<tr>
+<td>Active</td>
+<td>RENEW committed before expiry</td>
+<td>fence matches</td>
+<td>Active</td>
+<td>extend expiry (monotone, <a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-9">I9</a>)</td>
+</tr>
+<tr>
+<td>Active</td>
+<td>expiry - renew_window reached</td>
+<td>—</td>
+<td>Expiring</td>
+<td>emit <code>lease_expiring</code> watch event</td>
+</tr>
+<tr>
+<td>Expiring</td>
+<td>RENEW committed</td>
+<td>fence matches</td>
+<td>Active</td>
+<td>extend expiry</td>
+</tr>
+<tr>
+<td>Expiring</td>
+<td>expiry reached</td>
+<td>no renew</td>
+<td>Expired</td>
+<td>revoke; emit ownership-changed</td>
+</tr>
+<tr>
+<td>Active/Expiring</td>
+<td>RELEASE committed</td>
+<td>fence matches</td>
+<td>Revoked</td>
+<td>free group; emit ownership-changed</td>
+</tr>
+<tr>
+<td>Active</td>
+<td>leader step-down (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-13">I13</a>)</td>
+<td>quorum lost</td>
+<td>Revoked</td>
+<td>force local revoke (P9)</td>
+</tr>
+</tbody></table></div>
+<p><strong>Worked example (acquire, happy path).</strong> Client → leader <code>ACQUIRE(group=A, session=S, ttl=5000)</code>; leader appends entry at <code>(term=7,index=42)</code>, replicates to a quorum, each fdatasyncs (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-10">I10</a>); commit index advances to 42; apply loop grants <code>Lease{owner=S, fence_token=42, expiry=now_mono+5000ms}</code> and emits ownership-changed to watchers; leader returns <code>{fence_token:42, expiry}</code>. The client stamps every downstream mutation with <code>42</code>.</p>
+<p><strong>Failure-path example (fenced zombie).</strong> Leader L1 (fence 42) is partitioned; its lease expires; a quorum in the majority elects L2 (term 8), grants <code>ACQUIRE</code> at index 57 → fence 57. L1 reconnects still believing it holds the lock and issues a mutation stamped 42 to a downstream store; the store rejects it because 42 &lt; 57 (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-2">I2</a>, P7). No corruption. Telemetry: <code>fence_regression_total{group=A}</code> increments on the store side.</p>
+<p><strong>Read consistency model.</strong> Three read levels: (a) <em>linearizable</em> — routed through the leader with a read-index barrier (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/blueprint/#sec-15-2">§15.2</a>), sees all committed state; (b) <em>serializable</em> — served by any node from its applied state, may lag; (c) <em>bounded-stale</em> — a follower read tagged with its <code>commit_index</code> so the client can reject reads older than a bound. Ownership/leadership queries default to linearizable (safety), watch bootstraps to serializable (throughput).</p>
+<p><strong>Idempotency &amp; dedup.</strong> Every mutating request carries <code>(session_id, request_id)</code>; the leader keeps a bounded per-session dedup cache keyed by <code>request_id</code>, so a client retry after an ambiguous timeout (network drop between commit and ack) returns the original result rather than re-acquiring. The cache is itself part of the replicated state (survives failover), bounded per session (P4).</p>
+<p><strong>Revision semantics.</strong> Each group carries a monotonic <code>revision</code> bumped on every committed change; watch cursors and bounded-stale reads use it. <code>revision</code> is per-group (not global) so groups scale independently (P15); it is distinct from the cluster-wide <code>commit_index</code> (which sources fence tokens, <a class="cite" href="/system-design-blueprints/systems/leader-election-service/trade-offs/#adr-10">ADR-10</a>).</p>
+<p><strong>Worked example (renewal across leader change).</strong> Owner S holds <code>fence=42</code> on group A with <code>expiry=T+5s</code>. At <code>T+3s</code> leader L1 fails; L2 wins term 8. S&#39;s SDK retries <code>RENEW(group=A, fence=42)</code> at L2; L2 checks the committed <code>ElectionRecord</code> for A, sees owner S still valid (not yet expired per the <em>committed</em> expiry, evaluated on L2&#39;s monotonic clock offset from the record, P11), and commits a renew extending expiry — <strong>keeping the same fence 42</strong> because ownership did not change hands (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-2">I2</a> is monotone, not strictly-increasing-per-renew). Had S&#39;s lease expired first, L2 would have granted a fresh acquire to a competitor with <code>fence ≥ 57</code>.</p>
+<p><strong>Malformed / adversarial inputs (all rejected, telemetry emitted).</strong> Negative or &gt; 600 s TTL; fence-token rollback (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-2">I2</a>); <code>RENEW</code> with a fence not matching the active lease; duplicate request-id (idempotency dedupe); <code>AppendEntries</code> with <code>prev_log_term</code> mismatch (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#inv-6">I6</a> → <code>AppendEntriesResp.success=false</code> with conflict hints); log entry payload &gt; C20 (1 MiB); protobuf with unknown required semantics or nesting depth &gt; 32 (<a class="cite" href="/system-design-blueprints/systems/leader-election-service/reliability/#t-7">T7</a>).</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

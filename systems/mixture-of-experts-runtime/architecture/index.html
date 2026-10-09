@@ -1,0 +1,994 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Mixture-of-Experts (MoE) Runtime — Architecture · Engineering Blueprints</title><meta name="description" content="Mixture-of-Experts (MoE) Runtime, hld: §3 overview + §8 domain model. Implement, from scratch in Rust, a Mixture-of-Experts (MoE) runtime that executes > MoE transformer layers: a top-k gating/router (softmax-over-topk, noisy and expert-choice > variants, auxiliary…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/mixture-of-experts-runtime/">Mixture-of-Experts (MoE) Runtime</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>Mixture-of-Experts (MoE) Runtime</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>14 phases</li> <li>~21 weeks</li> <li>4,594 lines</li> <li>blueprint #325</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/mixture-of-experts-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Mixture-of-Experts (MoE) Runtime — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Architecture Diagram</h3>
+<pre class="diagram"><code>    input tokens [n_tokens, d_model]
+            |
+      [moe-gate] router W_g.x -&gt; logits -&gt; top-k -&gt; softmax weights; noisy/expert-choice; aux + z-loss
+            |  RoutingDecision (expert ids + weights)
+      [moe-dispatch] capacity check/drop -&gt; build permutation -&gt; scatter tokens into per-expert contiguous buffers
+            |  per-expert token batches
+      [moe-comm] all-to-all across EP ranks   &lt;-&gt;   [moe-sched] overlap a2a with expert GEMM (streams, double-buffer)
+            |
+      [moe-expert] each expert = FFN: GEMM(w_in) -&gt; activation -&gt; GEMM(w_out); batched/grouped; weights sharded per rank
+            |  expert outputs
+      [moe-comm] all-to-all back
+            |
+      [moe-dispatch] combine: un-permute -&gt; gate-weighted sum; dropped tokens take residual passthrough
+            |  output tokens [n_tokens, d_model]
+      [moe-runtime] orchestrates the whole layer; [moe-telemetry] taps every stage</code></pre>
+<h3 id="sec-3-2">3.2 Data Flow Summary</h3>
+<p>Every stage is a pure function over typed buffers. No shared mutable global state between stages. Each arrow is a typed Rust struct crossing a crate boundary.</p>
+<pre class="diagram"><code>GateLogits -&gt; RoutingDecision -&gt; DispatchPlan -&gt; [per-expert Tensor batches]
+-&gt; [a2a out-buffer] -&gt; [expert output Tensors] -&gt; [a2a in-buffer]
+-&gt; CombineBuffer -&gt; output Tensor</code></pre>
+<h3 id="sec-3-3">3.3 moe-gate — Gating / Router</h3>
+<ul>
+<li><strong>Responsibility</strong>: compute per-token expert scores; select top-k; produce <code>RoutingDecision</code></li>
+<li><strong>Inputs</strong>: <code>input: Tensor[n_tokens, d_model]</code>, <code>W_g: Tensor[d_model, num_experts]</code></li>
+<li><strong>Outputs</strong>: <code>GateLogits[n_tokens, num_experts]</code> (pre-softmax); <code>RoutingDecision[n_tokens]</code></li>
+<li><strong>Operations</strong>: linear projection → optional Gaussian noise injection (noisy top-k) → top-k selection → softmax over selected → expert-choice variant (transpose: expert selects tokens) → aux importance loss + z-loss accumulation into <code>AuxLossState</code></li>
+<li><strong>Concurrency boundary</strong>: CPU-side pure compute; embarrassingly parallel over token dimension; no shared state</li>
+<li><strong>Failure modes</strong>: NaN in logits → MoeError::NanInLogits; all experts over capacity → all tokens dropped (catastrophic — monitored)</li>
+<li><strong>Invariant</strong>: sum of gate weights over kept experts = 1.0 per token (softmax renormalization after drop)</li>
+<li><strong>Rejected alternative</strong>: argmax routing (top-1) — supported as k=1 special case; not a separate code path</li>
+</ul>
+<h3 id="sec-3-4">3.4 moe-dispatch — Token Dispatch + Combine</h3>
+<ul>
+<li><strong>Responsibility</strong>: enforce capacity invariant; build <code>DispatchPlan</code>; scatter tokens into per-expert contiguous buffers; on return path, un-permute and gate-weight-sum</li>
+<li><strong>Inputs</strong>: <code>RoutingDecision</code>, <code>input: Tensor[n_tokens, d_model]</code>, <code>capacity: Capacity</code></li>
+<li><strong>Outputs (dispatch)</strong>: <code>DispatchPlan</code> (permutation + per_expert_counts + dropped bitset); per-expert <code>Tensor</code> views</li>
+<li><strong>Outputs (combine)</strong>: <code>output: Tensor[n_tokens, d_model]</code></li>
+<li><strong>Capacity math</strong>: <code>Capacity = ceil(capacity_factor * n_tokens * k / num_experts)</code>; tokens exceeding per-expert buffer dropped deterministically (lowest gate weight first, tie-break by TokenIdx)</li>
+<li><strong>Scatter</strong>: <code>perm[i]</code> = position of token i in the permuted buffer; contiguous per-expert sub-slices</li>
+<li><strong>Dropped token handling</strong>: residual passthrough — output[dropped_token] = input[dropped_token]; no zero-fill</li>
+<li><strong>Concurrency boundary</strong>: permutation build is sequential (O(n_tokens * k)); scatter/gather parallelizable via Rayon</li>
+<li><strong>Failure modes</strong>: <code>perm</code> length mismatch → panic in debug, MoeError in release; capacity=0 → all dropped</li>
+</ul>
+<h3 id="sec-3-5">3.5 moe-comm — Collective Communication</h3>
+<ul>
+<li><strong>Responsibility</strong>: all-to-all token exchange across EP ranks (pre-expert and post-expert); all-reduce for aux losses</li>
+<li><strong>Transport variants</strong>:<ul>
+<li><code>InProc</code>: <code>Arc&lt;Mutex&lt;Vec&lt;u8&gt;&gt;&gt;</code> ring per rank pair (single-process EP emulation)</li>
+<li><code>SharedMem</code>: posix shm segments (multi-process, same node, Phase 3)</li>
+<li><code>Ucx</code> stub: <code>PhaseDeferred(&quot;Phase 7&quot;)</code></li>
+</ul>
+</li>
+<li><strong>all-to-all semantics</strong>: each rank sends <code>send_counts[r]</code> tokens to rank r; receives <code>recv_counts[r]</code> tokens from rank r; counts must be symmetric (EP consistency invariant)</li>
+<li><strong>Buffer layout</strong>: <code>[rank_0_tokens | rank_1_tokens | ... | rank_{W-1}_tokens]</code> contiguous; offsets from <code>per_expert_counts</code></li>
+<li><strong>EpGroup</strong>: <code>{ rank: u32, world_size: u32, transport: Transport }</code>; initialized once at <code>MoeLayer</code> construction</li>
+<li><strong>Failure modes</strong>: asymmetric counts → <code>MoeError::A2aCountMismatch</code>; transport timeout → <code>MoeError::CommTimeout</code>; deadlock on barrier if any rank crashes — detected via watchdog (Phase 5)</li>
+<li><strong>Protocol boundary</strong>: transport trait object; <code>send</code> / <code>recv</code> / <code>barrier</code> as async methods</li>
+</ul>
+<h3 id="sec-3-6">3.6 moe-sched — Execution Scheduler</h3>
+<ul>
+<li><strong>Responsibility</strong>: schedule comm/compute overlap via streams; double-buffer micro-batches; track inter-stage dependencies</li>
+<li><strong>Core abstraction</strong>: <code>Stream</code> (CUDA stream or CPU thread pool queue); <code>WorkItem</code> enum (CommOp, GemmOp, CombineOp)</li>
+<li><strong>Overlap strategy</strong>: while all-to-all for micro-batch N is in-flight, execute GEMM for micro-batch N-1 on separate stream; requires double-buffer (two <code>CombineBuffer</code> slots)</li>
+<li><strong>Dependency tracking</strong>: DAG of <code>WorkItem</code> nodes; edges enforce: a2a-complete before GEMM-start; GEMM-complete before combine-start</li>
+<li><strong>Double-buffer invariant</strong>: buffer slot alternates per micro-batch index; never read and write same slot concurrently</li>
+<li><strong>Micro-batch pipelining</strong>: split <code>n_tokens</code> into <code>P</code> micro-batches; pipeline depth = 2 (can extend to 3, <code>PhaseDeferred(&quot;Phase 8&quot;)</code>)</li>
+<li><strong>Failure modes</strong>: stream sync timeout → <code>MoeError::StreamTimeout</code>; DAG cycle (bug) → detected at construction, not runtime</li>
+<li><strong>Concurrency boundary</strong>: scheduler thread owns stream handles; worker threads execute ops; channels for completion signals</li>
+</ul>
+<h3 id="sec-3-7">3.7 moe-expert — Expert FFN Module</h3>
+<ul>
+<li><strong>Responsibility</strong>: execute per-expert FFN for a batch of tokens assigned to that expert; manage expert weight shards</li>
+<li><strong>FFN structure</strong>: <code>GEMM(w_in: [d_model, d_ff]) -&gt; activation -&gt; GEMM(w_out: [d_ff, d_model])</code></li>
+<li><strong>Weight storage</strong>: <code>ExpertWeights { w_in: Tensor, w_out: Tensor }</code>; sharded across EP ranks: expert <code>e</code> lives on rank <code>e % world_size</code>; each rank stores only its shard</li>
+<li><strong>GEMM dispatch</strong>: CPU path → OpenBLAS <code>sgemm</code> via FFI; GPU path → cuBLASLt grouped GEMM via FFI (Phase 2+)</li>
+<li><strong>Batched/grouped GEMM</strong>: variable token counts per expert → padding to power-of-2 or Megablocks block-sparse strategy (<code>PhaseDeferred(&quot;Phase 5&quot;)</code>; see Alternative Architectures Alt-1)</li>
+<li><strong>Activation</strong>: SwiGLU (default), GELU, ReLU — selected at <code>MoeLayer</code> config; applied element-wise between GEMMs</li>
+<li><strong>Concurrency boundary</strong>: each expert is independent; experts on same rank can execute in parallel (thread pool)</li>
+<li><strong>Failure modes</strong>: zero tokens assigned → skip GEMM, return empty Tensor; weight shape mismatch → <code>MoeError::ShapeMismatch</code></li>
+</ul>
+<h3 id="sec-3-8">3.8 moe-runtime — Layer Orchestrator</h3>
+<ul>
+<li><strong>Responsibility</strong>: single public API <code>MoeLayer::forward(input, aux_state) -&gt; Result&lt;Tensor, MoeError&gt;</code>; owns all sub-components; orchestrates gate→dispatch→a2a→expert→a2a→combine sequence</li>
+<li><strong>Owns</strong>: <code>Gate</code>, <code>Dispatcher</code>, <code>EpGroup</code>, <code>Scheduler</code>, <code>ExpertShards</code>, <code>Telemetry</code></li>
+<li><strong>Construction</strong>: <code>MoeLayer::new(config: MoeConfig, weights: ExpertWeights, ep_group: EpGroup) -&gt; Self</code></li>
+<li><strong>Forward pass contract</strong>: stateless w.r.t. token data; <code>AuxLossState</code> accumulates across forward calls; reset explicitly</li>
+<li><strong>Error propagation</strong>: <code>?</code> operator; any sub-error surfaces as <code>MoeError</code> variant; no panics in release build</li>
+<li><strong>Trust boundary</strong>: caller supplies <code>input: Tensor</code>; runtime validates shape, dtype, device before any computation</li>
+<li><strong>Concurrency model</strong>: <code>MoeLayer</code> is <code>Send + Sync</code>; multiple threads may call <code>forward</code> on different micro-batches; internal scheduler serializes stream ops</li>
+</ul>
+<h3 id="sec-3-9">3.9 moe-telemetry — Observability</h3>
+<ul>
+<li><strong>Responsibility</strong>: capture per-forward-pass metrics; expose Prometheus-compatible counters + histograms; emit <code>tracing</code> spans</li>
+<li><strong>Metrics</strong>: expert utilization (tokens/expert / capacity), drop rate (dropped/total), routing entropy (Shannon entropy over gate weights), a2a latency (µs), GEMM latency (µs/expert), combine latency (µs)</li>
+<li><strong>Tracing spans</strong>: one root span per <code>forward</code> call; child spans per stage (gate, dispatch, a2a-out, expert, a2a-in, combine)</li>
+<li><strong>Tap points</strong>: telemetry receives typed events via channel from each crate; zero-copy (pass references, not clones)</li>
+<li><strong>Failure modes</strong>: telemetry channel full → drop metric (non-blocking); never block forward pass for metrics</li>
+</ul>
+<h3 id="sec-3-10">3.10 moe-core — Shared Types</h3>
+<ul>
+<li><strong>Responsibility</strong>: define all cross-crate types; no logic except constructors + invariant assertions</li>
+<li><strong>Arena</strong>: bump allocator for <code>Tensor</code> storage; owned by <code>MoeLayer</code>; freed at layer teardown</li>
+<li><strong><code>MoeError</code></strong>: typed enum covering all failure variants; implements <code>std::error::Error</code>; no string-only errors</li>
+<li><strong><code>Layout</code></strong>: <code>{ strides: SmallVec&lt;[usize; 6]&gt;, offset: usize }</code>; supports non-contiguous tensors for combine views</li>
+</ul>
+<h3 id="sec-3-11">3.11 Concurrency + Persistence + Protocol Boundaries Summary</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Boundary</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>gate → dispatch</td>
+<td>In-process typed struct</td>
+<td><code>RoutingDecision</code> stack-allocated for small k</td>
+</tr>
+<tr>
+<td>dispatch → comm</td>
+<td>In-process buffer</td>
+<td><code>DispatchPlan</code> + permuted Tensor views</td>
+</tr>
+<tr>
+<td>comm → expert</td>
+<td>Transport (trait object)</td>
+<td>a2a buffer; async send/recv</td>
+</tr>
+<tr>
+<td>expert → comm</td>
+<td>In-process buffer</td>
+<td>expert output Tensors</td>
+</tr>
+<tr>
+<td>sched → workers</td>
+<td>MPSC channel</td>
+<td><code>WorkItem</code> enqueue</td>
+</tr>
+<tr>
+<td>telemetry taps</td>
+<td>MPSC channel</td>
+<td>Non-blocking send</td>
+</tr>
+<tr>
+<td>Persistence</td>
+<td>None (Phase 0–4)</td>
+<td>Weight shards mmap in Phase 6</td>
+</tr>
+<tr>
+<td>External interface</td>
+<td><code>MoeLayer::forward</code></td>
+<td>Only public API; all else crate-internal</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — MoE Layer Execution</h2>
+<h3 id="sec-8-1">8.1 Entity Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Owner crate</th>
+<th>Cardinality</th>
+<th>Lifetime</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ExpertId(u32)</code></td>
+<td>moe-core</td>
+<td>1..num_experts</td>
+<td>static (model config)</td>
+</tr>
+<tr>
+<td><code>TokenIdx(u32)</code></td>
+<td>moe-core</td>
+<td>0..n_tokens</td>
+<td>per forward pass</td>
+</tr>
+<tr>
+<td><code>CapacityFactor(f32)</code></td>
+<td>moe-core</td>
+<td>1 per MoE layer</td>
+<td>static</td>
+</tr>
+<tr>
+<td><code>Capacity(usize)</code></td>
+<td>moe-core</td>
+<td>1 per expert per pass</td>
+<td>per forward pass</td>
+</tr>
+<tr>
+<td><code>GateLogits</code></td>
+<td>moe-gate</td>
+<td>1 per forward pass</td>
+<td>gate stage → dropped</td>
+</tr>
+<tr>
+<td><code>RoutingDecision</code></td>
+<td>moe-gate</td>
+<td>1 per token</td>
+<td>gate stage → dispatch</td>
+</tr>
+<tr>
+<td><code>DispatchPlan</code></td>
+<td>moe-dispatch</td>
+<td>1 per forward pass</td>
+<td>dispatch → combine</td>
+</tr>
+<tr>
+<td><code>ExpertWeights</code></td>
+<td>moe-expert</td>
+<td>1 per expert shard</td>
+<td>persistent (loaded once)</td>
+</tr>
+<tr>
+<td><code>CombineBuffer</code></td>
+<td>moe-dispatch</td>
+<td>1 per forward pass</td>
+<td>dispatch → combine</td>
+</tr>
+<tr>
+<td><code>AuxLossState</code></td>
+<td>moe-gate</td>
+<td>1 per forward pass</td>
+<td>gate stage → returned</td>
+</tr>
+<tr>
+<td><code>EpGroup</code></td>
+<td>moe-comm</td>
+<td>1 per EP group</td>
+<td>session</td>
+</tr>
+<tr>
+<td><code>MoeError</code></td>
+<td>moe-core</td>
+<td>—</td>
+<td>transient</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Token Lifecycle State Machine</h3>
+<p>States a single token passes through in one MoE layer forward pass:</p>
+<pre class="diagram"><code>  [INPUT]
+     |
+     v
+  PENDING_GATE ─── gate logits computed ───────────────────────────────┐
+     |                                                                   |
+     v                                                                   |
+  ROUTED (top-k expert ids + weights assigned)                          |
+     |                                                                   |
+     v                                                                   |
+  CAPACITY_CHECK ── per-expert slot available? ─── YES → DISPATCHED    |
+                                                 └─ NO  → DROPPED ──────┤
+     |                                                                   |
+  DISPATCHED                                                            |
+     |                                                                   |
+     v                                                                   |
+  IN_TRANSIT_A2A (moe-comm all-to-all to owning EP rank)               |
+     |                                                                   |
+     v                                                                   |
+  AT_EXPERT_RANK                                                         |
+     |                                                                   |
+     v                                                                   |
+  EXPERT_COMPUTING (grouped GEMM in moe-expert)                         |
+     |                                                                   |
+     v                                                                   |
+  RESULT_IN_TRANSIT (all-to-all back to origin EP rank)                 |
+     |                                                                   |
+     v                                                                   |
+  COMBINING (gate-weighted sum in moe-dispatch::combine)  ◄─────────────┘
+     |                                                     (dropped tokens:
+     v                                                      residual passthrough)
+  OUTPUT</code></pre>
+<p>State-transition table:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>To</th>
+<th>Trigger</th>
+<th>Invariant checked</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>PENDING_GATE</td>
+<td>ROUTED</td>
+<td>gate forward completes</td>
+<td>logits finite, no NaN</td>
+</tr>
+<tr>
+<td>ROUTED</td>
+<td>DISPATCHED</td>
+<td>capacity slot allocated</td>
+<td>slot_idx &lt; Capacity</td>
+</tr>
+<tr>
+<td>ROUTED</td>
+<td>DROPPED</td>
+<td>all slots full</td>
+<td>drop_count tracked in DispatchPlan.dropped</td>
+</tr>
+<tr>
+<td>DISPATCHED</td>
+<td>IN_TRANSIT_A2A</td>
+<td>a2a fence submitted</td>
+<td>per_expert_counts symmetric</td>
+</tr>
+<tr>
+<td>IN_TRANSIT_A2A</td>
+<td>AT_EXPERT_RANK</td>
+<td>a2a completes</td>
+<td>recv buffer = send counts</td>
+</tr>
+<tr>
+<td>AT_EXPERT_RANK</td>
+<td>EXPERT_COMPUTING</td>
+<td>grouped GEMM scheduled</td>
+<td>weight shard local to rank</td>
+</tr>
+<tr>
+<td>EXPERT_COMPUTING</td>
+<td>RESULT_IN_TRANSIT</td>
+<td>GEMM output buffer ready</td>
+<td>output shape = [tokens_at_rank, d_model]</td>
+</tr>
+<tr>
+<td>RESULT_IN_TRANSIT</td>
+<td>COMBINING</td>
+<td>reverse a2a completes</td>
+<td>token count matches original dispatch</td>
+</tr>
+<tr>
+<td>COMBINING</td>
+<td>OUTPUT</td>
+<td>combine finishes</td>
+<td>sum of gate weights over kept experts = 1</td>
+</tr>
+<tr>
+<td>DROPPED</td>
+<td>OUTPUT</td>
+<td>residual passthrough</td>
+<td>no GEMM; output = input</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 GateLogits Format and RoutingDecision</h3>
+<pre class="diagram"><code>GateLogits layout: row-major f32, shape [n_tokens, num_experts]
+  token_0: [l_0, l_1, ..., l_{E-1}]
+  token_1: [l_0, l_1, ..., l_{E-1}]
+  ...
+
+RoutingDecision per token (after top-k + softmax-over-topk):
+  topk: [(ExpertId(e0), w0), (ExpertId(e1), w1), ..., (ExpertId(e_{k-1}), w_{k-1})]
+  invariant: w0 + w1 + ... + w_{k-1} = 1.0 (renormalized over kept experts)
+  invariant: e0 &lt; e1 &lt; ... &lt; e_{k-1}  (sorted ascending for determinism)</code></pre>
+<p>Gate variants and their mutation of GateLogits:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Mutation before top-k</th>
+<th>AuxLoss fields used</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Dense top-k</td>
+<td>none</td>
+<td>importance, load</td>
+</tr>
+<tr>
+<td>Noisy top-k</td>
+<td>add N(0, softplus(W_noise·x)) per expert</td>
+<td>importance, load</td>
+</tr>
+<tr>
+<td>Expert-choice</td>
+<td>transpose; each expert picks top-c tokens</td>
+<td>token_counts only</td>
+</tr>
+<tr>
+<td>Softmax-all (dense MoE reference)</td>
+<td>none; k = num_experts</td>
+<td>none</td>
+</tr>
+</tbody></table></div>
+<p>AuxLossState layout:</p>
+<ul>
+<li><code>importance: Vec&lt;f32&gt;</code> — per-expert sum of gate weights over all tokens; len = num_experts.</li>
+<li><code>load: Vec&lt;f32&gt;</code> — per-expert fraction of tokens routed; len = num_experts.</li>
+<li><code>z_loss: f32</code> — log(sum(exp(logits)))^2 term (ST-MoE); promotes logit smallness.</li>
+<li><code>aux_loss: f32</code> — dot(importance_norm, load_norm) * alpha (Switch / GShard balance loss).</li>
+</ul>
+<h3 id="sec-8-4">8.4 Capacity and Drop Semantics</h3>
+<pre class="diagram"><code>Capacity = ceil(capacity_factor * n_tokens * K / num_experts)
+
+Example: n_tokens=1024, K=2, num_experts=8, capacity_factor=1.25
+  Capacity = ceil(1.25 * 1024 * 2 / 8) = ceil(320) = 320 slots per expert</code></pre>
+<p>Drop policy (moe-dispatch):</p>
+<ul>
+<li>Tokens sorted by gate weight descending within each expert queue.</li>
+<li>First <code>Capacity</code> tokens admitted; remainder marked in <code>DispatchPlan.dropped</code> (BitSet over TokenIdx).</li>
+<li>Tie-break: if gate_weight equal, lower <code>TokenIdx</code> wins → routing determinism.</li>
+<li>Dropped tokens: output = input (residual passthrough); combine weight = 0.</li>
+<li><code>capacity_factor=inf</code> → no dropping; buffer pre-allocated to <code>n_tokens</code> (unsafe memory use; only for correctness testing).</li>
+</ul>
+<p>Edge cases:</p>
+<ul>
+<li>All tokens route to same expert → (num_experts-1) experts get 0 tokens; valid but inefficient.</li>
+<li>K=1, capacity_factor=1.0 → exactly balanced expected load; any imbalance causes drops.</li>
+<li>capacity_factor &lt; 1.0 → always some dropping even in perfectly balanced routing; use only for memory pressure experiments.</li>
+</ul>
+<h3 id="sec-8-5">8.5 DispatchPlan Layout</h3>
+<pre class="diagram"><code>DispatchPlan {
+  perm:              Vec&lt;u32&gt;,        // length = sum(per_expert_counts); scatter permutation index into input token buffer
+  per_expert_counts: Vec&lt;u32&gt;,        // length = num_experts; tokens assigned to each expert after drop
+  dropped:           BitSet,          // length = n_tokens; bit set = token dropped
+  capacity:          Capacity,        // Capacity value used for this plan
+}</code></pre>
+<p>Permutation semantics:</p>
+<ul>
+<li><code>perm[out_pos] = token_idx</code> where <code>out_pos</code> is position in contiguous per-expert buffer.</li>
+<li>Per-expert buffer starts at <code>offset[e] = sum(per_expert_counts[0..e])</code>.</li>
+<li>Invariant: <code>perm</code> contains no duplicates; <code>perm.len() = sum(per_expert_counts)</code>.</li>
+<li>Combine reverse: <code>output[perm[i]] += weight * expert_out[i]</code> (accumulate K contributions per token).</li>
+</ul>
+<p>Worked example (n_tokens=4, K=2, num_experts=2, capacity=3):</p>
+<pre class="diagram"><code>Token 0 → experts [0, 1], weights [0.7, 0.3]
+Token 1 → experts [1, 0], weights [0.6, 0.4]
+Token 2 → experts [0, 1], weights [0.5, 0.5]
+Token 3 → experts [0, 1], weights [0.9, 0.1]
+
+Expert 0 queue (by weight desc): tok3(0.9), tok0(0.7), tok1(0.4), tok2(0.5)
+  → sorted: tok3, tok0, tok2, tok1 (0.9, 0.7, 0.5, 0.4); capacity=3
+  → admitted: tok3, tok0, tok2; drop tok1 from expert-0 slot
+
+Expert 1 queue: tok1(0.6), tok0(0.3), tok2(0.5), tok3(0.1)
+  → sorted: tok1, tok2, tok0, tok3; capacity=3
+  → admitted: tok1, tok2, tok0; drop tok3 from expert-1 slot
+
+per_expert_counts = [3, 3]
+perm = [3, 0, 2, 1, 2, 0]   // expert-0 block: toks 3,0,2; expert-1 block: toks 1,2,0
+dropped = { tok1 ∩ expert-0, tok3 ∩ expert-1 } — token-level drop only if ALL k slots dropped
+  tok1: expert-0 dropped, expert-1 admitted → tok1 still processed (partial drop)
+  tok3: expert-0 admitted, expert-1 dropped → tok3 still processed (partial drop)
+  → combine: tok1 output = w_{1,1}*exp1_out + residual*(1 - w_{1,1})? NO.
+  → SPEC: weights renormalized over admitted experts only; dropped expert contributes 0.
+  tok1 admitted only to expert-1 with w=0.6; renormalized weight = 1.0 (only kept expert).
+  tok3 admitted only to expert-0 with w=0.9; renormalized weight = 1.0.</code></pre>
+<h3 id="sec-8-6">8.6 All-to-All Protocol (moe-comm)</h3>
+<p>EP group topology:</p>
+<ul>
+<li><code>EpGroup { rank: u32, world_size: u32, transport: Transport }</code>.</li>
+<li>Expert <code>e</code> lives on rank <code>e % world_size</code>.</li>
+<li>Each rank holds <code>ceil(num_experts / world_size)</code> experts&#39; weights.</li>
+</ul>
+<p>A2A sequence diagram (4 ranks, 8 experts, 2 experts/rank):</p>
+<pre class="diagram"><code>Rank 0 (exp 0,4) | Rank 1 (exp 1,5) | Rank 2 (exp 2,6) | Rank 3 (exp 3,7)
+     send_buf           send_buf           send_buf           send_buf
+     [for e0,e1,..]     [for e0,e1,..]     [for e0,e1,..]     [for e0,e1,..]
+         |                   |                   |                   |
+         └────────── all-to-all (MPI_Alltoallv / nccl AlltoAll) ────┘
+         |                   |                   |                   |
+     recv_buf           recv_buf           recv_buf           recv_buf
+     [tokens for         [tokens for         [tokens for         [tokens for
+      exp 0,4]            exp 1,5]            exp 2,6]            exp 3,7]
+         |                   |                   |                   |
+      GEMM exp0           GEMM exp1           GEMM exp2           GEMM exp3
+      GEMM exp4           GEMM exp5           GEMM exp6           GEMM exp7
+         |                   |                   |                   |
+     send_buf2          send_buf2          send_buf2          send_buf2
+         |                   |                   |                   |
+         └────────── reverse all-to-all ─────────────────────────────┘
+         |                   |                   |                   |
+     recv_buf2          recv_buf2          recv_buf2          recv_buf2
+     (expert outputs back at origin ranks)</code></pre>
+<p>A2A message format per rank pair (r_src → r_dst):</p>
+<ul>
+<li>Header: <code>[token_count: u32, d_model: u32, dtype: u8]</code> (8 bytes).</li>
+<li>Payload: token_count × d_model floats (f32 or bf16 depending on dtype).</li>
+<li>Symmetry invariant: tokens Rank A sends to Rank B = tokens Rank B expects from Rank A (enforced by DispatchPlan exchange before a2a).</li>
+</ul>
+<p>A2A count-exchange protocol (before data a2a):</p>
+<ol>
+<li>Each rank broadcasts <code>per_expert_counts[e]</code> for all remote experts → <code>all_gather</code> counts.</li>
+<li>Validate symmetry: rank r_src&#39;s send count to r_dst = r_dst&#39;s expected recv count from r_src.</li>
+<li>Failure: asymmetric counts → <code>MoeError::A2ACountMismatch { src, dst, sent, expected }</code>.</li>
+</ol>
+<p>Transport options (moe-comm):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Transport</th>
+<th>Use case</th>
+<th>Latency</th>
+<th>Bandwidth</th>
+<th>Failure mode</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>InProc (shared-memory channels)</td>
+<td>single-node multi-thread EP</td>
+<td>~100 ns</td>
+<td>memory BW</td>
+<td>thread panic isolation</td>
+</tr>
+<tr>
+<td>MPI_Alltoallv</td>
+<td>multi-node CPU EP</td>
+<td>~10–100 µs</td>
+<td>interconnect</td>
+<td>rank failure = abort</td>
+</tr>
+<tr>
+<td>NCCL AlltoAll</td>
+<td>multi-node GPU EP</td>
+<td>~1–10 µs</td>
+<td>NVLink/IB</td>
+<td>NCCL error → reset</td>
+</tr>
+<tr>
+<td>Mock (in-process loopback)</td>
+<td>tests, single-expert</td>
+<td>0</td>
+<td>—</td>
+<td>always succeeds</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 Comm/Compute Overlap (moe-sched)</h3>
+<p>Double-buffer pipeline per micro-batch:</p>
+<pre class="diagram"><code>Micro-batch 0                    Micro-batch 1
+─────────────────────────────────────────────────────────────────────
+Stream A (comm):  [a2a_fwd_0]─────────────[a2a_bwd_0]
+Stream B (compute):            [gemm_0]──────────────────[gemm_0_bwd]
+Stream A (comm):                         [a2a_fwd_1]─────────────────
+Stream B (compute):                                 [gemm_1]──────────
+                   time ─────────────────────────────────────────────►</code></pre>
+<p>Overlap invariant: GEMM on micro-batch N starts only after a2a for micro-batch N completes; a2a for micro-batch N+1 can start while GEMM for N runs.</p>
+<p>Scheduler state machine:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entry condition</th>
+<th>Actions</th>
+<th>Exit →</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>IDLE</td>
+<td>no pending micro-batches</td>
+<td>wait on channel</td>
+<td>GATE_DISPATCH</td>
+</tr>
+<tr>
+<td>GATE_DISPATCH</td>
+<td>input tokens available</td>
+<td>run gate + dispatch; build DispatchPlan</td>
+<td>A2A_FWD</td>
+</tr>
+<tr>
+<td>A2A_FWD</td>
+<td>DispatchPlan ready</td>
+<td>submit a2a send on comm stream; advance buffer slot</td>
+<td>GEMM_WAIT</td>
+</tr>
+<tr>
+<td>GEMM_WAIT</td>
+<td>a2a event signalled</td>
+<td>enqueue grouped GEMM on compute stream</td>
+<td>GEMM_EXEC</td>
+</tr>
+<tr>
+<td>GEMM_EXEC</td>
+<td>GEMM running</td>
+<td>(optionally submit next micro-batch a2a in parallel)</td>
+<td>A2A_BWD</td>
+</tr>
+<tr>
+<td>A2A_BWD</td>
+<td>GEMM event signalled</td>
+<td>submit reverse a2a</td>
+<td>COMBINE_WAIT</td>
+</tr>
+<tr>
+<td>COMBINE_WAIT</td>
+<td>reverse a2a done</td>
+<td>enqueue combine kernel</td>
+<td>OUTPUT</td>
+</tr>
+<tr>
+<td>OUTPUT</td>
+<td>combine done</td>
+<td>emit output tensor; reset buffer slot</td>
+<td>IDLE</td>
+</tr>
+</tbody></table></div>
+<p>Double-buffer slot allocation:</p>
+<ul>
+<li><code>BufferSlot { id: u8, dispatch_buf: Tensor, result_buf: Tensor }</code>.</li>
+<li>Two slots per pipeline; slot 0 in GEMM while slot 1 in A2A_FWD.</li>
+<li><code>BufferSlotGuard</code> RAII; slot returned to pool on drop.</li>
+<li>Failure: both slots occupied → scheduler blocks (back-pressure); surfaced as <code>MoeError::SchedulerStall</code>.</li>
+</ul>
+<h3 id="sec-8-8">8.8 Expert FFN Execution Model</h3>
+<p>Per-expert computation (single expert, single EP rank):</p>
+<pre class="diagram"><code>input_e: [tokens_e, d_model]
+  └─ GEMM_1: [tokens_e, d_model] × [d_model, d_ff] → [tokens_e, d_ff]   (w_in)
+  └─ activation: SiLU / GeLU / ReLU element-wise → [tokens_e, d_ff]
+  └─ GEMM_2: [tokens_e, d_ff] × [d_ff, d_model] → [tokens_e, d_model]   (w_out)
+output_e: [tokens_e, d_model]</code></pre>
+<p>Grouped/batched GEMM semantics:</p>
+<ul>
+<li>All experts on rank r are batched into a single grouped GEMM call: <code>[(tokens_e0, tokens_e1, ...), d_model] × expert_weight_stacked</code>.</li>
+<li><code>tokens_e = per_expert_counts[e]</code> after a2a; may be 0 (empty expert → skip or zero-pad).</li>
+<li>Expert weights <code>w_in: [num_experts_per_rank, d_model, d_ff]</code>, <code>w_out: [num_experts_per_rank, d_ff, d_model]</code>.</li>
+<li>Sharding: each rank holds only its local experts&#39; weights; no cross-rank weight broadcast.</li>
+</ul>
+<p>Zero-token expert handling:</p>
+<ul>
+<li>If <code>per_expert_counts[e] = 0</code> for local expert e → skip GEMM for that expert; output slice = empty.</li>
+<li>Grouped GEMM backend must handle variable-length batches (Megablocks-style block-sparse or padded).</li>
+<li>Padding to uniform length allowed only for GEMM alignment; padding rows zeroed before combine.</li>
+</ul>
+<p>Activation options (configured per model):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Activation</th>
+<th>Gating variant</th>
+<th>Memory</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>SiLU (swish)</td>
+<td>SwiGLU: d_ff×2 w_gate</td>
+<td>2× d_ff intermediate</td>
+<td>Mixtral, LLaMA-MoE</td>
+</tr>
+<tr>
+<td>GeLU</td>
+<td>standard</td>
+<td>1× d_ff</td>
+<td>Switch, GShard</td>
+</tr>
+<tr>
+<td>ReLU</td>
+<td>standard</td>
+<td>1× d_ff</td>
+<td>Original Shazeer MoE</td>
+</tr>
+</tbody></table></div>
+<p>SwiGLU variant: <code>w_in</code> has shape <code>[d_model, 2*d_ff]</code>; split into gate and value halves; output = SiLU(gate) ⊙ value.</p>
+<h3 id="sec-8-9">8.9 Combine Stage Semantics</h3>
+<p>Combine accumulation (after reverse a2a):</p>
+<pre class="diagram"><code>output: Tensor[n_tokens, d_model], initialized to zero.
+Per permuted position i in [0, perm.len()), with tok = perm[i]:
+  weight_i    = routing_decision[tok].weight_for_expert_at_position(i)
+  output[tok] accumulates weight_i · expert_results[i]      (sum over admitted experts for tok)
+dropped token (all K experts rejected) → output[tok] = 1.0 · input[tok]   (residual passthrough)</code></pre>
+<p>Weight renormalization after partial drop:</p>
+<pre class="diagram"><code>kept_weight_sum(t) = sum of original_weight[t][e] over admitted experts e for token t
+kept_weight_sum(t) == 0.0  → output[t] = input[t]                                  (all k experts dropped t)
+kept_weight_sum(t) &gt;  0.0  → effective_weight[t][e] = original_weight[t][e] / kept_weight_sum(t)
+                             output[t] = Σ (effective_weight[t][e] · expert_result[t][e]) over admitted e</code></pre>
+<p>Numerical invariant: <code>sum(effective_weights) = 1.0</code> ± 1 ULP for all non-fully-dropped tokens.</p>
+<p>Edge cases:</p>
+<ul>
+<li><code>k=1, token dropped</code> → full residual passthrough; effective weight vacuously 1.0 (but output = input).</li>
+<li><code>k=2, one expert drops</code> → single expert gets weight 1.0 after renorm.</li>
+<li><code>capacity_factor=inf</code> → no drops; combine = dense weighted sum; reference implementation path.</li>
+<li>All tokens dropped (capacity=0 or all experts overloaded) → output = input; warning emitted to telemetry.</li>
+</ul>
+<h3 id="sec-8-10">8.10 Shared Expert Variant</h3>
+<p>Shared expert bypass (optional; e.g., DeepSeek-V2 architecture):</p>
+<ul>
+<li><code>num_shared_experts: usize</code> experts always receive ALL tokens (no capacity/drop).</li>
+<li>Shared experts run in parallel to routed experts on the same rank.</li>
+<li>Shared expert output added to routed combine output: <code>out = shared_out + routed_combine_out</code>.</li>
+<li>DispatchPlan has <code>shared_expert_ids: Vec&lt;ExpertId&gt;</code> field; non-empty iff shared experts configured.</li>
+<li>Invariant: shared experts never in <code>dropped</code> BitSet.</li>
+</ul>
+<h3 id="sec-8-11">8.11 Expert Parallelism Consistency Model</h3>
+<p>EP rank assignment: expert <code>e</code> → rank <code>e % world_size</code>.</p>
+<ul>
+<li>Requires <code>num_experts % world_size == 0</code> OR last rank holds fewer experts (ragged ok; must be handled).</li>
+<li>Invariant: every EP rank independently validates its local expert IDs match global assignment.</li>
+</ul>
+<p>Failure modes:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Detection</th>
+<th>Recovery</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>A2A count mismatch</td>
+<td>pre-a2a count allreduce</td>
+<td>abort batch; <code>MoeError::A2ACountMismatch</code></td>
+</tr>
+<tr>
+<td>Rank timeout</td>
+<td>transport deadline (configurable)</td>
+<td>kill batch; escalate to caller</td>
+</tr>
+<tr>
+<td>Expert weight shard missing</td>
+<td>startup validation</td>
+<td><code>MoeError::MissingExpertShard(ExpertId)</code></td>
+</tr>
+<tr>
+<td>NaN in GEMM output</td>
+<td>optional nan-check kernel post-GEMM</td>
+<td><code>MoeError::ExpertNaN(ExpertId)</code></td>
+</tr>
+<tr>
+<td>OOM in dispatch buffer</td>
+<td>pre-allocation check</td>
+<td><code>MoeError::CapacityOom { expert, required, available }</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-12">8.12 MoeError Taxonomy</h3>
+<pre class="diagram"><code>MoeError enum variants (normative list):
+  RoutingError(String)              — gate/router internal failure
+  CapacityOom { expert: ExpertId, required: usize, available: usize }
+  A2ACountMismatch { src: u32, dst: u32, sent: u32, expected: u32 }
+  ExpertNaN(ExpertId)              — NaN detected in expert output
+  MissingExpertShard(ExpertId)     — weight shard not loaded for expert
+  SchedulerStall                   — double-buffer slots exhausted
+  TransportError(String)           — underlying comm failure
+  ShapeError { expected: Shape, got: Shape }
+  DtypeMismatch { expected: DType, got: DType }
+  ConfigError(String)              — invalid MoE layer config
+  BackendError(String)             — GEMM FFI error</code></pre>
+<p>Error propagation: all public API returns <code>Result&lt;T, MoeError&gt;</code>; no panics in hot path; panics allowed only during initialization (weight loading, config parsing).</p>
+<h3 id="sec-8-13">8.13 Routing Determinism Protocol</h3>
+<p>Requirements for bit-reproducible routing:</p>
+<ol>
+<li>Gate logits computed with same floating-point order (no parallel reduction reordering).</li>
+<li>Top-k selection: stable sort by logit descending; ties broken by <code>ExpertId</code> ascending.</li>
+<li>Noisy top-k: noise generated from <code>XorShift64(seed=layer_idx * 1337 + token_idx)</code>; seed passed in <code>MoeLayerConfig</code>.</li>
+<li>Capacity assignment: tokens sorted by gate weight descending per expert; tie-break by <code>TokenIdx</code> ascending.</li>
+<li><code>DispatchPlan.perm</code> built in expert-ascending, then token order within expert.</li>
+</ol>
+<p>Non-determinism sources (must be suppressed in deterministic mode):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Suppression</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GPU atomic reductions</td>
+<td>use deterministic kernels (cuDNN det flag or software reduction)</td>
+</tr>
+<tr>
+<td>Parallel top-k sort</td>
+<td>use single-threaded stable sort in deterministic mode</td>
+</tr>
+<tr>
+<td>NCCL non-det all-reduce</td>
+<td>use NCCL_DETERMINISTIC=1 env + ring algorithm</td>
+</tr>
+<tr>
+<td>FP reassociation</td>
+<td>fixed reduction order; no auto-vectorizer reordering</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-14">8.14 Telemetry Data Model (moe-telemetry)</h3>
+<p>Per-layer, per-forward-pass metrics:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Type</th>
+<th>Semantics</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>expert_utilization[e]</code></td>
+<td>f32</td>
+<td>tokens_dispatched_to_e / Capacity; 1.0 = full</td>
+</tr>
+<tr>
+<td><code>drop_rate</code></td>
+<td>f32</td>
+<td>dropped_tokens / (n_tokens * K)</td>
+</tr>
+<tr>
+<td><code>routing_entropy</code></td>
+<td>f32</td>
+<td>-sum(p_e * log(p_e)) over expert load distribution</td>
+</tr>
+<tr>
+<td><code>aux_loss</code></td>
+<td>f32</td>
+<td>load-balance auxiliary loss value</td>
+</tr>
+<tr>
+<td><code>z_loss</code></td>
+<td>f32</td>
+<td>router z-loss value</td>
+</tr>
+<tr>
+<td><code>a2a_latency_us</code></td>
+<td>u64</td>
+<td>microseconds for all-to-all (fwd + bwd)</td>
+</tr>
+<tr>
+<td><code>gemm_latency_us</code></td>
+<td>u64</td>
+<td>microseconds for expert GEMM</td>
+</tr>
+<tr>
+<td><code>combine_latency_us</code></td>
+<td>u64</td>
+<td>microseconds for combine stage</td>
+</tr>
+<tr>
+<td><code>overlap_efficiency</code></td>
+<td>f32</td>
+<td>(gemm_us) / (gemm_us + exposed_a2a_us); 1.0 = full overlap</td>
+</tr>
+<tr>
+<td><code>tokens_per_expert[e]</code></td>
+<td>u32</td>
+<td>actual token count dispatched to expert e</td>
+</tr>
+<tr>
+<td><code>shared_expert_tokens</code></td>
+<td>u32</td>
+<td>tokens sent to shared experts (0 if no shared experts)</td>
+</tr>
+</tbody></table></div>
+<p>Tracing spans (opentelemetry-compatible):</p>
+<ul>
+<li><code>moe.gate</code> → <code>moe.dispatch</code> → <code>moe.a2a_fwd</code> → <code>moe.gemm</code> → <code>moe.a2a_bwd</code> → <code>moe.combine</code>.</li>
+<li>Each span carries: layer_idx, micro_batch_idx, n_tokens, EP rank.</li>
+<li>Critical path annotation: a2a_fwd duration attributed to comm; gemm duration to compute; overlap = max(comm, compute) vs sequential sum.</li>
+</ul>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

@@ -1,0 +1,478 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Dependent Type Checker — Architecture · Engineering Blueprints</title><meta name="description" content="Dependent Type Checker, hld: §3 overview + §8 domain model. Dependent Type Checker (project 239) builds, from scratch in Rust, a dependently-typed language front end and a small trusted kernel implementing a Martin-Löf-style dependent type theory extended…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/dependent-type-checker/">Dependent Type Checker</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Dependent Type Checker</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~33 weeks</li> <li>2,530 lines</li> <li>blueprint #239</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/dependent-type-checker/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/dependent-type-checker/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/dependent-type-checker/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/dependent-type-checker/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/dependent-type-checker/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/dependent-type-checker/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/dependent-type-checker/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/dependent-type-checker/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/dependent-type-checker/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/dependent-type-checker/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Dependent Type Checker — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>+------------------------------------------------------------+
+|                 Surface Syntax Parser                      |
+|        (lexer, recursive-descent, CST -&gt; surface AST)      |
++------------------------------|-------------------------------+
+                               v
++------------------------------------------------------------+
+|              Elaborator  (UNTRUSTED, dtc-elab)              |
+|  implicit-arg insertion | metavariables | HO unification    |
+|  pattern-match elaboration -&gt; case tree | inductive decls    |
++------------------------------|-------------------------------+
+                               v   fully-elaborated core term
+================================================================  &lt;- de Bruijn criterion
+                               v      (trust boundary)
++------------------------------------------------------------+
+|                Trusted Kernel  (TRUSTED, dtc-kernel)         |
+|  bidirectional checker (infer/check) | conversion checker    |
+|  universe checker | inductive/eliminator well-formedness     |
++---------------+----------------------------+------------------+
+                v                            v
++----------------------+        +--------------------------+
+|   NbE Evaluator        |        |  Global Env / Signature |
+|  eval: Term -&gt; Value    |&lt;------&gt;|  decls, inductives,      |
+|  quote: Value -&gt; Normal|        |  eliminators, universes  |
++----------------------+        +--------------------------+
+                ^
+                | strict-positivity + eliminator generation
++------------------------------------------------------------+
+|            Inductive-Definition Processor (dtc-inductive)    |
++------------------------------------------------------------+</code></pre>
+<p>Surface Syntax Parser. Converts UTF-8 source text into a surface AST; performs no
+semantic resolution, so a syntactically valid but meaningless program still parses
+(name resolution and elaboration happen downstream).</p>
+<p>Elaborator. The untrusted heart of the system: inserts implicit arguments, allocates
+metavariables, generates and solves higher-order pattern-unification constraints
+(Miller 1991), and elaborates surface pattern matches into eliminator applications. Its
+output is a fully-elaborated core term with zero unsolved metavariables (<a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/reliability/#inv-8">I8</a>).</p>
+<p>Trusted Kernel. The trust boundary. Only the kernel may declare a term well-typed. It
+independently re-derives the type of every elaborator-produced term via the
+bidirectional infer/check judgements (<a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/architecture/#sec-8">§8</a>), invoking the conversion checker whenever the
+typing rules require a definitional-equality check, and invoking the universe checker
+whenever a universe-formation rule applies.</p>
+<p>NbE Evaluator. Computes definitional equality by evaluating core terms into a semantic
+domain of values with closures (<code>eval</code>) and reading values back into canonical
+beta-normal, eta-long syntax (<code>quote</code>). This is the engine both the kernel&#39;s conversion
+checker and the REPL&#39;s <code>#eval</code> command invoke.</p>
+<p>Inductive-Definition Processor. Validates strict positivity of a proposed inductive
+declaration before it is registered in the global signature, and mechanically generates
+its eliminator/recursor and computation (iota) rules.</p>
+<p>Global Env / Signature. The append-only registry of accepted declarations, inductive
+definitions, and generated eliminators that both the kernel and the NbE evaluator
+consult to resolve global references.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Core Syntax Grammar</h3>
+<pre class="diagram"><code>Term  ::= Var(Ix)
+        | Global(Name)
+        | Lam(Name, Term)
+        | App(Term, Term)
+        | Pi(Name, Term, Term)
+        | Sigma(Name, Term, Term)
+        | Pair(Term, Term)
+        | Proj1(Term) | Proj2(Term)
+        | U(Lvl)
+        | Ind(Name)              // inductive type former
+        | Ctor(Name, [Term])     // constructor application
+        | Elim(Name, Term, Motive, [Method], Term)  // eliminator application
+        | Meta(MetaVar)          // elaborator-only, never in kernel input
+        | Let(Name, Term, Term, Term)</code></pre>
+<p><code>Ix</code> is a de Bruijn index (counts binders inward, term-local). <code>Lvl</code> is a universe
+level. <code>Meta</code> never occurs in a term handed to the kernel (<a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/reliability/#inv-8">I8</a>).</p>
+<h3 id="sec-8-2">8.2 Typing Judgements</h3>
+<p><code>Γ ⊢ t ⇒ A</code> (infer: <code>t</code> synthesizes type <code>A</code>), <code>Γ ⊢ t ⇐ A</code> (check: <code>t</code> is checked against
+<code>A</code>), <code>Γ ⊢ A ≡ B</code> (definitional equality / conversion), <code>Γ ⊢</code> (context well-formedness).</p>
+<h3 id="sec-8-3">8.3 Typing Rules (selected, inference-rule form)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Rule</th>
+<th>Premises</th>
+<th>Conclusion</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Var</td>
+<td><code>(x : A) ∈ Γ</code></td>
+<td><code>Γ ⊢ x ⇒ A</code></td>
+</tr>
+<tr>
+<td>U-Formation</td>
+<td><code>Γ ⊢</code></td>
+<td><code>Γ ⊢ Uᵢ ⇒ U_(i+1)</code></td>
+</tr>
+<tr>
+<td>Pi-Formation</td>
+<td><code>Γ ⊢ A ⇐ Uᵢ</code> and <code>Γ, x:A ⊢ B ⇐ Uⱼ</code></td>
+<td><code>Γ ⊢ Π(x:A).B ⇒ U_(max i j)</code></td>
+</tr>
+<tr>
+<td>Pi-Intro (Lam)</td>
+<td><code>Γ, x:A ⊢ t ⇐ B</code></td>
+<td><code>Γ ⊢ λx.t ⇐ Π(x:A).B</code></td>
+</tr>
+<tr>
+<td>Pi-Elim (App)</td>
+<td><code>Γ ⊢ f ⇒ Π(x:A).B</code> and <code>Γ ⊢ a ⇐ A</code></td>
+<td><code>Γ ⊢ f a ⇒ B[a/x]</code></td>
+</tr>
+<tr>
+<td>Sigma-Formation</td>
+<td><code>Γ ⊢ A ⇐ Uᵢ</code> and <code>Γ, x:A ⊢ B ⇐ Uⱼ</code></td>
+<td><code>Γ ⊢ Σ(x:A).B ⇒ U_(max i j)</code></td>
+</tr>
+<tr>
+<td>Sigma-Intro (Pair)</td>
+<td><code>Γ ⊢ a ⇐ A</code> and <code>Γ ⊢ b ⇐ B[a/x]</code></td>
+<td><code>Γ ⊢ (a,b) ⇐ Σ(x:A).B</code></td>
+</tr>
+<tr>
+<td>Sigma-Elim (Proj)</td>
+<td><code>Γ ⊢ p ⇒ Σ(x:A).B</code></td>
+<td><code>Γ ⊢ p.1 ⇒ A</code>; <code>Γ ⊢ p.2 ⇒ B[p.1/x]</code></td>
+</tr>
+<tr>
+<td>Conversion</td>
+<td><code>Γ ⊢ t ⇒ A</code>, <code>Γ ⊢ A ≡ B</code>, <code>Γ ⊢ B ⇐ Uᵢ</code></td>
+<td><code>Γ ⊢ t ⇐ B</code></td>
+</tr>
+<tr>
+<td>Cumulativity</td>
+<td><code>Γ ⊢ A ⇐ Uᵢ</code> and <code>i ≤ j</code></td>
+<td><code>Γ ⊢ A ⇐ Uⱼ</code></td>
+</tr>
+</tbody></table></div>
+<p>The Conversion rule is the one that ties typing to definitional equality: it is the
+reason a dependent checker must <em>evaluate</em>, not just parse, to decide typing.</p>
+<h3 id="sec-8-4">8.4 Normalization by Evaluation — Named Steps</h3>
+<ol>
+<li><code>eval(Term, Env) -&gt; Value</code>: recursively evaluate a term under an environment of
+values, building <code>VLam</code>/<code>VPi</code>/<code>VSigma</code>/<code>VPair</code>/<code>VU</code>/<code>VNeutral</code> values; a <code>Lam</code> becomes
+a <code>VLam</code> closing over its <code>Env</code> (a <code>Closure</code>), never substituting under the binder.</li>
+<li><code>apply(Value, Value) -&gt; Value</code>: eliminates a <code>VLam</code> by evaluating its body in the
+closure&#39;s environment extended with the argument (beta), or builds a <code>VNeutral</code>
+<code>NApp</code> if the head is neutral (stuck).</li>
+<li><code>quote(Value, Lvl) -&gt; Term</code> (readback): turns a value back into normal-form syntax at
+a given binder depth, eta-expanding <code>VLam</code>/<code>VPair</code>/<code>VPi</code>-typed neutrals so the result
+is eta-long as well as beta-normal.</li>
+</ol>
+<p>Worked example: normalize <code>(λx. x) y</code>. <code>eval</code> produces <code>apply(VLam(cl), VNeutral(NVar y))</code>; applying the closure evaluates the body <code>x</code> in an environment where <code>x ↦ VNeutral(NVar y)</code>, yielding <code>VNeutral(NVar y)</code>. <code>quote</code> at depth 0 reads this back as the
+term <code>y</code>. Two syntactically different terms, <code>(λx.x) y</code> and <code>y</code>, both quote to <code>y</code>: they
+are definitionally equal.</p>
+<h3 id="sec-8-5">8.5 Definitional Equality / Conversion Checking — Named Steps</h3>
+<ol>
+<li><code>eval</code> both sides in the current environment.</li>
+<li><code>quote</code> both resulting values back to normal form (or, more efficiently, compare
+values structurally without a full quote — <code>conv(Value, Value, Lvl) -&gt; bool</code>, which
+eta-expands functions/pairs on the fly rather than materializing the normal form; this
+is the algorithm actually implemented, <a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/build/#sec-13">§13</a>/<a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/build/#sec-15">§15</a>).</li>
+<li>Compare up to alpha (de Bruijn indices already make alpha-equivalence syntactic
+equality) and eta (function/pair eta handled by expansion during comparison, not as a
+separate rule).</li>
+</ol>
+<p>Worked equal example: <code>Γ ⊢ (λx. x) y ≡ y : A</code>. Both sides evaluate to <code>VNeutral(NVar y)</code>; <code>conv</code> returns true.</p>
+<p>Worked rejection example: <code>Γ ⊢ Π(x:Nat).Nat ≡ Σ(x:Nat).Nat</code>. Both sides are already
+values in normal form; <code>conv</code> compares head constructors first (<code>VPi</code> vs <code>VSigma</code>) and
+rejects immediately — different head constructors can never be definitionally equal.</p>
+<h3 id="sec-8-6">8.6 Universe Hierarchy and Consistency</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Predicative Cumulative (chosen)</th>
+<th>Impredicative (<code>Prop</code>, deferred)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Formation</td>
+<td><code>Uᵢ : U_(i+1)</code>, strictly increasing</td>
+<td>a single <code>Prop : Type_0</code>, no level increase</td>
+</tr>
+<tr>
+<td>Cumulativity</td>
+<td><code>A : Uᵢ ⟹ A : Uⱼ</code> for <code>j ≥ i</code></td>
+<td>proof-irrelevant, not level-indexed</td>
+</tr>
+<tr>
+<td>Paradox risk</td>
+<td>none, by strict increase (<a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/reliability/#inv-3">I3</a>)</td>
+<td>none if separated from <code>Type</code>; risky if merged (Girard)</td>
+</tr>
+<tr>
+<td>Status here</td>
+<td>Phase 4, <a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/build/#sec-16">§16</a></td>
+<td><code>PhaseDeferred(&quot;Phase 12 — impredicative Prop / proof-irrelevant universe&quot;)</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 Bidirectional Typing — Infer vs. Check</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Syntactic form</th>
+<th>Judgement</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Var</code>, <code>Global</code></td>
+<td>infer</td>
+<td>type is looked up, never guessed</td>
+</tr>
+<tr>
+<td><code>App</code></td>
+<td>infer</td>
+<td>function&#39;s type is inferred, then argument is checked against its domain</td>
+</tr>
+<tr>
+<td><code>Proj1</code>/<code>Proj2</code></td>
+<td>infer</td>
+<td>pair&#39;s type is inferred, projection type follows structurally</td>
+</tr>
+<tr>
+<td><code>U(Lvl)</code></td>
+<td>infer</td>
+<td>its type is mechanically <code>U(Lvl+1)</code></td>
+</tr>
+<tr>
+<td><code>Lam</code></td>
+<td>check</td>
+<td>the domain type is not otherwise recoverable from a bare lambda</td>
+</tr>
+<tr>
+<td><code>Pair</code></td>
+<td>check</td>
+<td>which <code>Sigma</code> it inhabits is not otherwise recoverable</td>
+</tr>
+<tr>
+<td><code>Meta</code>/hole</td>
+<td>check (elaborator-only)</td>
+<td>expected type seeds the metavariable&#39;s type</td>
+</tr>
+<tr>
+<td><code>Let</code></td>
+<td>infer (bound term inferred, body checked/inferred in extended context)</td>
+<td>mixes both modes</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-8">8.8 Metavariables and Higher-Order Pattern Unification — Named Steps</h3>
+<ol>
+<li>Meta creation: elaborating an implicit argument or a hole allocates a fresh
+<code>MetaVar</code> with a recorded expected type and the ambient context (spine of bound
+variables it may depend on).</li>
+<li>Constraint generation: each unification obligation <code>Γ ⊢ t ≟ u</code> becomes a
+<code>Constraint::Equality</code> entry; rigid-rigid constraints decompose structurally
+(matching head constructors and recursing on subterms).</li>
+<li>Flex-rigid: a constraint <code>?m spine ≟ t</code> where the spine is a list of distinct bound
+variables (a Miller pattern, Miller 1991) solves by abstracting <code>t</code> over the spine and
+assigning <code>?m := λspine. t</code>, after an occurs-check that <code>?m</code> does not appear in <code>t</code>.</li>
+<li>Flex-flex / non-pattern spines: postponed to a deferred-constraint queue, retried as
+other metas resolve.</li>
+<li>Spine pruning: eliminates dependencies a meta&#39;s solution provably cannot use,
+shrinking future pattern-unification obligations.</li>
+</ol>
+<p>Worked example: elaborating <code>id x</code> where <code>id : (A:Type) -&gt; A -&gt; A</code> and <code>x : Nat</code>. The
+elaborator inserts an implicit metavariable for <code>A</code>, producing <code>id ?m x</code>; checking <code>x</code>
+against <code>?m</code> under the applied function&#39;s domain generates the constraint <code>?m ≟ Nat</code>
+(a trivial pattern, empty spine), which solves immediately: <code>?m := Nat</code>.</p>
+<h3 id="sec-8-9">8.9 Inductive Families — Named Steps</h3>
+<ol>
+<li>Declare: <code>name</code>, parameters, indices, a list of constructors each with argument
+types possibly recursively mentioning <code>name</code>.</li>
+<li>Strict-positivity scan: for every constructor argument type, <code>name</code> may occur only
+in strictly-positive position (never to the left of a function arrow an odd number
+of times, i.e. never in a position that would make <code>name</code> an argument to itself
+negatively) — see the negative-occurrence rejection example below.</li>
+<li>Eliminator generation: mechanically build a motive parameter (a family over the
+inductive), one method parameter per constructor (typed using the motive applied to
+that constructor&#39;s recursive subterms), and the resulting eliminator&#39;s type.</li>
+<li>Computation (iota) rule generation: for eliminator applied to a constructor
+application, the computation rule reduces it to the corresponding method applied to
+the constructor&#39;s arguments (and their recursive eliminations).</li>
+</ol>
+<h3 id="sec-8-10">8.10 Dependent Pattern-Match Elaboration</h3>
+<ol>
+<li>Build a case tree from surface match clauses, splitting on the first scrutinee whose
+constructors are not yet distinguished.</li>
+<li>Coverage check: at each split, confirm every constructor of the scrutinee&#39;s inductive
+type has a clause (or is provably impossible by unification of indices).</li>
+<li>Termination check: confirm each recursive call is on a structurally smaller argument
+(or defer via <code>PhaseDeferred</code> to size-change termination, <a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/build/#sec-22">§22</a>).</li>
+<li>Elaborate the checked case tree into nested eliminator applications against the
+generated recursor (<a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/architecture/#sec-8-9">§8.9</a>).</li>
+</ol>
+<h3 id="sec-8-11">8.11 End-to-End Worked Example — Length-Indexed Vector <code>append</code></h3>
+<pre class="diagram"><code>Vec : (A : Type) -&gt; Nat -&gt; Type
+  nil  : Vec A zero
+  cons : (n:Nat) -&gt; A -&gt; Vec A n -&gt; Vec A (succ n)
+
+append : (A:Type) -&gt; (n m : Nat) -&gt; Vec A n -&gt; Vec A m -&gt; Vec A (plus n m)
+append A n m nil         ys = ys
+append A n m (cons k x xs) ys = cons (plus k m) x (append A k m xs ys)</code></pre>
+<p>Elaboration: <code>append</code>&#39;s surface match splits on the fourth explicit argument
+(<code>Vec A n</code>); coverage requires both <code>nil</code> and <code>cons</code> clauses (present); the recursive
+call <code>append A k m xs ys</code> is structurally smaller in the fourth argument (<code>xs</code> vs.
+<code>cons k x xs</code>), satisfying termination. The elaborated core term is a single
+<code>Elim(Vec, ..., motive=λn._.Vec A (plus n m), methods=[ys; λk x xs ih. cons (plus k m) x ih], scrutinee)</code>. The kernel independently infers this eliminator&#39;s type and checks it
+convertible to the declared return type <code>Vec A (plus n m)</code> — this is where the <code>plus n m</code> vs. <code>plus (succ k) m</code> index computation is settled by NbE, not by syntax.</p>
+<h3 id="sec-8-12">8.12 Malformed / Hard Examples</h3>
+<ul>
+<li>Universe-inconsistent: <code>Type_i : Type_i</code> — rejected by <a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/reliability/#inv-3">I3</a> (Girard&#39;s paradox).</li>
+<li>Non-positive inductive: <code>Bad : Type</code> with <code>mk : ((Bad -&gt; Nat) -&gt; Bad) -&gt; Bad</code> — <code>Bad</code>
+occurs negatively (to the left of one function arrow, an odd number of times, inside
+the outer argument type) — rejected by <a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/reliability/#inv-4">I4</a>.</li>
+<li>Non-covering match: a <code>Vec</code> match with only a <code>nil</code> clause — rejected by <a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/reliability/#inv-5">I5</a> (coverage).</li>
+<li>Non-terminating recursion: <code>loop : Nat -&gt; Nat; loop n = loop n</code> with no decreasing
+argument — rejected by <a class="cite" href="/system-design-blueprints/systems/dependent-type-checker/reliability/#inv-5">I5</a> (termination).</li>
+<li>Unification failure: <code>?m ≟ f x</code> where <code>f x</code> is not a Miller pattern (a non-variable
+spine) and no rigid structure lets the constraint decompose — postponed, then reported
+as <code>UnificationFailure</code> if never solved by end of elaboration.</li>
+<li>Ill-typed kernel input: <code>App(Lam(...), ...)</code> where the argument&#39;s inferred type does
+not convert to the lambda&#39;s expected domain — rejected by the Pi-Elim rule&#39;s premise
+failing, independent of whatever the elaborator believed.</li>
+</ul>
+<h3 id="sec-8-13">8.13 Failure-Path Example</h3>
+<p>Given <code>f : Nat -&gt; Nat := λx. x true</code> (applying a <code>Nat</code> to a <code>Bool</code> literal): inference of
+<code>x</code> yields <code>Nat</code>; <code>Nat</code> is not a <code>Pi</code> type, so Pi-Elim&#39;s premise <code>Γ ⊢ f ⇒ Π(x:A).B</code> fails
+at the head — the kernel rejects with a structured <code>NotAFunctionType</code> diagnostic
+carrying the inferred head type and the source span, before any conversion check is
+attempted.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

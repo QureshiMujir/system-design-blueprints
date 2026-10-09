@@ -1,0 +1,542 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>SAT Solver from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="SAT Solver from Scratch, hld: §3 overview + §8 domain model. A from-scratch, single-process CDCL SAT decision procedure that reads DIMACS CNF and answers SAT + total model or UNSAT + machine-checkable DRAT/LRAT proof, shipped as an embeddable Rust library, the…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/formal-methods-solvers/">Formal Methods &amp; Solvers</a> </li><li> <a href="/system-design-blueprints/systems/sat-solver/">SAT Solver from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:183"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/formal-methods-solvers/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Formal Methods &amp; Solvers</span></a> </p> <h1>SAT Solver from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~20 weeks</li> <li>3,040 lines</li> <li>blueprint #277</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/sat-solver/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/sat-solver/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/sat-solver/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/sat-solver/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/sat-solver/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/sat-solver/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/sat-solver/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/sat-solver/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/sat-solver/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/sat-solver/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:SAT Solver from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 System Diagram</h3>
+<pre class="diagram"><code>        DIMACS .cnf file (untrusted bytes)        IPASIR host (incremental: add_clause, solve_under)
+                  |                                          |
+                  |  ===== TRUST BOUNDARY: untrusted DIMACS bytes + clause sizes (DoS) =====
+                  v                                          v
+        +-------------------------------------------------------------------------+
+        |  sat-cli  &quot;minisolve&quot;   :  solve · check · dimacs · bench · incremental  |
+        +-------------------------------------------------------------------------+
+            |  parse                                              |  proof out
+            v                                                     v
+        +---------------------------+                   +-----------------------------------+
+        | sat-cnf                   |                   | sat-proof                         |
+        |  DimacsParser -&gt; Cnf      |                   |  ProofTracer (DRAT emit)          |
+        |  normalize/validate       |                   |  DratChecker · LratChecker        |
+        +---------------------------+                   |  ProofStep Add/Delete             |
+            |  Cnf (arena + ClauseRef[])                +-----------------------------------+
+            v                                              ^  add/delete steps (RUP/RAT)
+        +---------------------------------------------------|---------------------------+
+        | sat-solver : Solver                               |                           |
+        |   propagate() two-watched BCP ── analyze() 1-UIP ── backjump (non-chrono)    |
+        |   Trail · Vsids · PhaseSaving · RestartPolicy · ClauseDb(LBD)                 |
+        +---------------------------------------------------------------------------+--+
+            |  occurrence lists / clause set                       | learnt clauses |
+            v                                                                       |
+        +---------------------------------------------------------------------------+
+        | sat-preproc : BoundedVarElim · Subsumption · SelfSubsumingResolution ·     |
+        |               Vivification · OccurrenceList                                |
+        |               EliminatedClauseStack ──► model reconstruction (on SAT)      |
+        +---------------------------------------------------------------------------+
+
+        ===== CONCURRENCY BOUNDARY: single-threaded core; shared-clause portfolio DEFERRED =====
+        ===== PERSISTENCE BOUNDARY: none at runtime except append-only DRAT/LRAT proof stream =====</code></pre>
+<p>Data flow: bytes → <code>sat-cnf</code> → <code>Cnf</code> (arena + refs) → <code>sat-solver</code> search loop → <code>SolveResult::Sat(Model)</code> reconstructed through <code>sat-preproc</code>&#39;s <code>EliminatedClauseStack</code>, <strong>or</strong> <code>Unsat</code> + a <code>sat-proof</code> DRAT/LRAT stream re-checkable by <code>DratChecker</code>/<code>LratChecker</code>. All inter-crate handoffs use <code>ClauseRef</code> indices into a shared <code>ClauseArena</code>, never pointers — relocation-safe across compaction.</p>
+<h3 id="sec-3-2">3.2 Component Responsibilities (one per box)</h3>
+<p><strong>sat-types — value/layout foundation.</strong> Cache-critical memory model, zero policy. <code>Lit = var&lt;&lt;1|sign</code> (<code>!lit</code>=^1, <code>var()</code>=&gt;&gt;1); <code>LBool</code> packed u8. <code>Clause</code> DST = <code>ClauseHeader{size,lbd,learnt,deleted,used}</code> + inline <code>[Lit]</code>, co-located in one cache line for short clauses. <code>ClauseArena</code> = bump <code>u32</code>-word vec; <code>ClauseRef(u32)</code> is an offset not a pointer ⇒ compaction rewrites only the ref table. <code>VarMap&lt;T&gt;</code>(len nvars), <code>LitMap&lt;T&gt;</code>(len 2·nvars) dense. <strong>In:</strong> nothing (leaf). <strong>Out:</strong> types for all. <strong>Inv:</strong> every <code>ClauseRef</code> &lt; arena watermark at a valid header; <code>Lit</code> &lt; 2·nvars. <strong>Phases:</strong> Phase 0 builds; Phase 12 compaction+layout tuning.</p>
+<p><strong>sat-cnf — DIMACS ingestion at the trust boundary.</strong> Only crate facing adversarial input. <code>parse_dimacs&lt;R:Read&gt;(r,out)</code> streams; normalizes tautologies (drop) + dup literals (dedup); validates <code>p cnf V C</code>. Errors <code>DimacsError::{BadHeader,VarOutOfRange,MissingZeroTerminator,IoError,NonNumeric}</code>. <strong>In:</strong> reader + target <code>Cnf</code>. <strong>Out:</strong> populated arena+refs, or typed error. <strong>Inv:</strong> on <code>Ok</code> every clause non-taut, dedup&#39;d, lits in <code>[1,nvars]</code>, none over size cap (DoS guard). <strong>Phases:</strong> Phase 1 implements; Phase 13 fuzzes; <code>dimacs</code> subcommand re-exports.</p>
+<p><strong>sat-solver / propagate() — BCP hot loop.</strong> Two-watched BCP: each clause has two <code>Watcher{cref,blocker}</code> in <code>watches:LitMap&lt;Vec&lt;Watcher&gt;&gt;</code>; clause inspected only when a watched lit goes false. Visit: blocker true⇒skip; else find new non-false lit (swap), else unit⇒<code>enqueue</code>, else conflict⇒return <code>cref</code>. Driven off <code>qhead</code>. <strong>In:</strong> trail tail. <strong>Out:</strong> <code>Option&lt;ClauseRef&gt;</code>. <strong>Inv:</strong> watches need <strong>no</strong> update on backtrack; every non-sat clause has ≥2 non-false watches while no conflict pending. <strong>Target:</strong> ≥10⁷ propagations/sec. <strong>Phases:</strong> Phase 2 builds; Phase 12 cache/blocker tuning.</p>
+<p><strong>sat-solver / analyze() — 1-UIP learning.</strong> Resolve the conflict clause against the <code>Reason::Clause</code> of the most-recent current-level literal (trail backward) until exactly <strong>one</strong> current-level literal remains (First UIP). Returns <code>(learnt, backjump)</code>; asserting lit first; backjump = 2nd-highest learnt level (0 if unit). Bumps VSIDS of seen literals. <strong>In:</strong> conflicting <code>cref</code>, <code>Trail</code>, <code>reason</code>/<code>level</code>. <strong>Out:</strong> asserting clause + backjump. <strong>Inv:</strong> exactly one current-level literal; empty iff UNSAT. <strong>Phases:</strong> Phase 4 builds; Phase 10 hooks DRAT <code>add</code>; Phase 9 vivifies learnts.</p>
+<p><strong>sat-solver / Trail — assignment stack + levels.</strong> <code>Trail{lits:Vec&lt;Lit&gt;, lim:Vec&lt;usize&gt;}</code>; <code>lim[d]</code> = trail index where level <code>d</code> began. <code>enqueue</code> assigns+pushes; <code>backjump(level)</code> truncates to <code>lim[level]</code>, clears popped <code>assigns</code>/<code>level</code>/<code>reason</code>, saves phase. <strong>In:</strong> decision/propagation assignments. <strong>Out:</strong> implication-graph spine. <strong>Inv:</strong> <code>lits[0..lim[d]]</code> = level-<code>d</code> prefix; <code>qhead ≤ lits.len()</code>. <strong>Phases:</strong> Phase 2 introduces; Phase 5 wires non-chrono <code>backjump</code>.</p>
+<p><strong>sat-solver / Vsids — branching.</strong> <code>Vsids{activity:VarMap&lt;f64&gt;, inc, decay, heap:BinaryHeap}</code>. Bump conflict-side by <code>inc</code>; per conflict <code>inc *= 1/decay</code> (lazy; rescale all+inc on f64 overflow). <code>pick_branch</code> pops max-activity <strong>unassigned</strong> var. <strong>In:</strong> analyze-seen vars. <strong>Out:</strong> next decision var. <strong>Inv:</strong> heap may hold stale assigned vars (lazy deletion); popped result is always unassigned or <code>None</code>. <strong>Phases:</strong> Phase 6 builds; Phase 12 tunes decay/rescale.</p>
+<p><strong>sat-solver / PhaseSaving — polarity memory.</strong> <code>PhaseSaving{saved:VarMap&lt;bool&gt;}</code>; <code>backjump</code> records each unassigned var&#39;s last value; <code>pick_branch</code> takes sign from <code>saved</code>. <strong>In:</strong> popped-var phases. <strong>Out:</strong> decision polarity. <strong>Inv:</strong> every assigned-then-unassigned var has a saved phase. <strong>Phases:</strong> Phase 6 builds; restarts (Phase 7) reuse it to re-find partial models.</p>
+<p><strong>sat-solver / RestartPolicy — restart control.</strong> Luby unit (fallback) + Glucose dynamic (fire when fast-LBD EMA &gt; K·slow EMA) + blocking (suppress when trail unusually long). <strong>In:</strong> per-conflict LBD + trail length. <strong>Out:</strong> restart-now to <code>search()</code>. <strong>Inv:</strong> restart always backjumps to 0; never discards learnts. <strong>Phases:</strong> Phase 5 hook; Phase 7 implements Luby+Glucose+blocking; Phase 12 tunes K/EMA.</p>
+<p><strong>sat-solver / ClauseDb(LBD) — learnt lifecycle.</strong> <code>ClauseDb{learnts:Vec&lt;ClauseRef&gt;, reduce_limit:u64}</code>. LBD(glue)=distinct decision levels; LBD-2 kept forever. <code>reduceDB</code> deletes high-LBD/low-activity/non-reason learnts (~half), marks <code>deleted</code> for next compaction. <strong>In:</strong> analyze learnts. <strong>Out:</strong> bounded high-quality set. <strong>Inv:</strong> a current <code>Reason</code> clause is never deleted; glue survives. <strong>Phases:</strong> Phase 7 builds; Phase 12 ties to GC.</p>
+<p><strong>sat-preproc — simplification + reconstruction.</strong> <code>OccurrenceList</code> (var→clauses) backs <code>BoundedVarElim</code> (resolve pos×neg when result bounded), <code>Subsumption</code> (drop subsumed), <code>SelfSubsumingResolution</code> (strengthen), <code>Vivification</code> (probe-strengthen). Each elimination pushes <code>EliminatedClauseStack</code>. <strong>In:</strong> <code>Cnf</code>/live set. <strong>Out:</strong> simplified set + reconstruction stack. <strong>Inv:</strong> preserves satisfiability; on SAT, reverse-replay extends <code>Model</code> to eliminated vars. <strong>Phases:</strong> Phase 8 preproc; Phase 9 inprocessing schedule.</p>
+<p><strong>sat-proof — proof emit + check.</strong> <code>ProofTracer</code> emits <code>ProofStep::{Add,Delete}</code> (learnt=Add, deletion=Delete). <code>check_drat</code> runs the backward checker (RUP=reverse-unit-prop conflict; RAT=resolution asymmetric tautology on pivot); <code>check_lrat</code> verifies clause-id-hinted LRAT. UNSAT proven at empty clause. <strong>In:</strong> add/delete stream or file. <strong>Out:</strong> <code>Result&lt;(),ProofError&gt;</code>. <strong>Inv:</strong> every <code>Add</code> RUP/RAT-redundant w.r.t. current DB; stream append-only. <strong>Phases:</strong> Phase 10 emit+check+trim; Phase 13 differential vs drat-trim.</p>
+<p><strong>sat-cli &quot;minisolve&quot; — orchestration + I/O.</strong> <code>solve</code>/<code>check</code>/<code>dimacs</code>/<code>bench</code>/<code>incremental</code>. Wires sat-cnf→sat-solver→sat-proof, enforces size/DoS caps, owns exit codes (10 SAT / 20 UNSAT, SAT-Competition convention). <strong>In:</strong> args+files/stdin. <strong>Out:</strong> model/proof/diagnostics. <strong>Inv:</strong> UNSAT with proof logging always yields a checkable stream. <strong>Phases:</strong> Phase 0 skeleton; Phase 13 drives buckets+differential through <code>bench</code>.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — CNF, DIMACS, and the CDCL State Machine</h2>
+<h3 id="sec-8-1">8.1 Propositional CNF semantics</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Definition</th>
+<th>Encoding in <code>sat-types</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Variable</td>
+<td>propositional atom, 0-based index <code>0..nvars</code></td>
+<td><code>Var(u32)</code></td>
+</tr>
+<tr>
+<td>Literal</td>
+<td>a variable or its negation</td>
+<td><code>Lit(u32)</code>, sign-encoded</td>
+</tr>
+<tr>
+<td>Clause</td>
+<td>disjunction <code>(l1 ∨ l2 ∨ … ∨ lk)</code></td>
+<td><code>Clause { header, lits: [Lit] }</code> (DST)</td>
+</tr>
+<tr>
+<td>Formula</td>
+<td>conjunction of clauses <code>C1 ∧ C2 ∧ … ∧ Cm</code></td>
+<td><code>Cnf { nvars, clauses, arena }</code></td>
+</tr>
+<tr>
+<td>Assignment</td>
+<td>partial/total map <code>Var → {True,False,Undef}</code></td>
+<td><code>assigns: VarMap&lt;LBool&gt;</code></td>
+</tr>
+<tr>
+<td>Model</td>
+<td>total assignment satisfying every clause</td>
+<td><code>Model(VarMap&lt;bool&gt;)</code></td>
+</tr>
+</tbody></table></div>
+<p>Satisfaction (under <code>A</code>): literal <strong>satisfied</strong> iff <code>A(l.var())==l.polarity</code> (else <strong>falsified</strong> / <strong>unassigned</strong> if <code>Undef</code>); clause <strong>satisfied</strong> iff ≥1 lit satisfied, <strong>conflicting</strong> iff all falsified, <strong>unit</strong> iff exactly 1 unassigned + rest falsified, else <strong>unresolved</strong>; formula SAT iff ∃ total <code>A</code> satisfying all clauses.</p>
+<p>Distinguished objects: <strong>empty clause</strong> <code>()</code> ≡ false ⇒ immediate UNSAT (the derivation target of any proof); <strong>unit</strong> <code>(l)</code> ⇒ <code>l</code> forced at level 0 (<code>Reason::Unit</code>); <strong>tautology</strong> (<code>x ∧ ¬x</code>) ⇒ dropped at parse; <strong>pure literal</strong> (one polarity) ⇒ set freely by BVE; <strong>empty formula</strong> ⇒ trivially SAT.</p>
+<h3 id="sec-8-2">8.2 DIMACS CNF grammar (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>dimacs      = { comment } , header , { clause } , { comment } ;
+comment     = &quot;c&quot; , { any-char-except-newline } , newline ;
+header      = &quot;p&quot; , ws , &quot;cnf&quot; , ws , nvars , ws , nclauses , newline ;
+clause      = { ws } , literal , { ws , literal } , ws , &quot;0&quot; , [ ws ] , newline ;
+literal     = [ &quot;-&quot; ] , pos-int ;            (* 1..nvars ; &quot;-&quot; = negative literal *)
+nvars       = nat ;                          (* u32 *)
+nclauses    = nat ;
+pos-int     = nonzero-digit , { digit } ;
+nat         = digit , { digit } ;
+ws          = ( &quot; &quot; | &quot;\t&quot; ) , { &quot; &quot; | &quot;\t&quot; } ;</code></pre>
+<p>Rules (enforced by <code>DimacsParser</code>): DIMACS vars 1-based signed (<code>v</code>→<code>Var(v-1)</code>, <code>-v</code>→negation, <code>0</code>=terminator only); header precedes clauses (interleaved comments accepted leniently); <code>nclauses</code> advisory (pre-reserve only, mismatch = warning unless strict); whitespace = spaces/tabs, clauses may span newlines, <code>0</code> delimits not the newline.</p>
+<h3 id="sec-8-3">8.3 Lit / Var bit encoding (worked)</h3>
+<pre class="diagram"><code>Lit = (var &lt;&lt; 1) | sign        sign: 0 = positive, 1 = negative
+lit.var()  = Lit &gt;&gt; 1          lit.sign() = Lit &amp; 1
+!lit       = Lit ^ 1           (flip low bit)
+LitMap size = 2 * nvars        index by raw Lit value</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>DIMACS</th>
+<th>Var</th>
+<th>sign</th>
+<th>Lit (raw)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>1</code></td>
+<td><code>Var(0)</code></td>
+<td>0</td>
+<td><code>0</code></td>
+</tr>
+<tr>
+<td><code>-1</code></td>
+<td><code>Var(0)</code></td>
+<td>1</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>2</code></td>
+<td><code>Var(1)</code></td>
+<td>0</td>
+<td><code>2</code></td>
+</tr>
+<tr>
+<td><code>-2</code></td>
+<td><code>Var(1)</code></td>
+<td>1</td>
+<td><code>3</code></td>
+</tr>
+<tr>
+<td><code>5</code></td>
+<td><code>Var(4)</code></td>
+<td>0</td>
+<td><code>8</code></td>
+</tr>
+<tr>
+<td><code>-5</code></td>
+<td><code>Var(4)</code></td>
+<td>1</td>
+<td><code>9</code></td>
+</tr>
+</tbody></table></div>
+<p><code>!Lit(8)=9</code> (≡ <code>-5</code>). Watch lists indexed by the <em>falsified</em> literal: when <code>Lit l</code> goes false, <code>watches[l]</code> clauses are inspected.</p>
+<h3 id="sec-8-4">8.4 CDCL state machine</h3>
+<p>States: <code>Propagate</code>, <code>Decide</code>, <code>AnalyzeConflict</code>, <code>Backjump</code>, <code>Restart</code>, <code>Sat</code>, <code>Unsat</code>. Start in <code>Propagate</code> (level 0, after enqueuing input units).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Trigger</th>
+<th>Action</th>
+<th>To</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Propagate</td>
+<td><code>propagate()</code> → <code>None</code>, all vars assigned</td>
+<td>—</td>
+<td>Sat</td>
+</tr>
+<tr>
+<td>Propagate</td>
+<td><code>propagate()</code> → <code>None</code>, vars remain, restart not due</td>
+<td><code>pick_branch()</code>; new level</td>
+<td>Decide</td>
+</tr>
+<tr>
+<td>Propagate</td>
+<td><code>propagate()</code> → <code>None</code>, restart due</td>
+<td>—</td>
+<td>Restart</td>
+</tr>
+<tr>
+<td>Propagate</td>
+<td><code>propagate()</code> → <code>Some(cref)</code>, level == 0</td>
+<td>conflict at root</td>
+<td>Unsat</td>
+</tr>
+<tr>
+<td>Propagate</td>
+<td><code>propagate()</code> → <code>Some(cref)</code>, level &gt; 0</td>
+<td>—</td>
+<td>AnalyzeConflict</td>
+</tr>
+<tr>
+<td>Decide</td>
+<td><code>pick_branch()</code> → <code>Some(l)</code></td>
+<td><code>enqueue(l, Decision)</code></td>
+<td>Propagate</td>
+</tr>
+<tr>
+<td>Decide</td>
+<td><code>pick_branch()</code> → <code>None</code> (none unassigned)</td>
+<td>build <code>Model</code></td>
+<td>Sat</td>
+</tr>
+<tr>
+<td>AnalyzeConflict</td>
+<td>always</td>
+<td><code>analyze(cref)</code> → <code>(learnt, bjlvl)</code>; bump VSIDS; add learnt to <code>ClauseDb</code>; emit DRAT add</td>
+<td>Backjump</td>
+</tr>
+<tr>
+<td>Backjump</td>
+<td><code>bjlvl</code> computed</td>
+<td><code>backjump(bjlvl)</code>; <code>enqueue(asserting_lit, Clause(learnt))</code></td>
+<td>Propagate</td>
+</tr>
+<tr>
+<td>Restart</td>
+<td>always</td>
+<td><code>backjump(0)</code>; keep learnts; reset Luby/Glucose counters</td>
+<td>Propagate</td>
+</tr>
+<tr>
+<td>Sat / Unsat</td>
+<td>terminal</td>
+<td>return <code>SolveResult</code></td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<p>Budget/interrupt at any state → <code>Unknown</code>. Under assumptions (<code>solve_under</code>): assumption literals are enqueued as pseudo-decisions before free <code>Decide</code>; a conflict whose analysis reaches an assumption ⇒ <strong>failed-assumption</strong> UNSAT (final conflict over assumption literals), not global UNSAT.</p>
+<h3 id="sec-8-5">8.5 Implication graph</h3>
+<p>DAG on assigned literals: <strong>node</strong> = assigned <code>l</code> tagged <code>level</code>+<code>Reason</code>; <strong>decision</strong> = no incoming edges (<code>Reason::Decision</code>), opens a level; <strong>implied</strong> <code>l</code> with <code>Reason::Clause(c)</code> = incoming edges from <code>¬p</code> for each other <code>p∈c</code> (antecedents that made <code>c</code> unit); <strong>conflict</strong> <code>⊥</code> = a falsified clause&#39;s negated lits point in. A <strong>cut</strong> separating decisions from <code>⊥</code> yields a learnt clause (negation of the reason side); <strong>1-UIP</strong> = the unique current-level node dominating <code>⊥</code>.</p>
+<h3 id="sec-8-6">8.6 Worked SAT/conflict example (6 vars, 8 clauses)</h3>
+<p>Variables <code>x1..x6</code> → <code>Var(0..5)</code>. Clauses (DIMACS):</p>
+<pre class="diagram"><code>p cnf 6 8
+ 1  2  0          c1: (x1 ∨ x2)
+-2  3  0          c2: (¬x2 ∨ x3)
+-3  4  0          c3: (¬x3 ∨ x4)
+-1 -4  5  0       c4: (¬x1 ∨ ¬x4 ∨ x5)
+-5  6  0          c5: (¬x5 ∨ x6)
+-5 -6  0          c6: (¬x5 ∨ ¬x6)
+ 1 -3  0          c7
+ 2  4  0          c8</code></pre>
+<p>Search (decision polarity = false via phase saving default):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Action</th>
+<th>Trail (lit@level, reason)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>d1</td>
+<td>Decide <code>x1=true</code> (c1 sat, no unit)</td>
+<td><code>x1@1 (Decision)</code></td>
+</tr>
+<tr>
+<td>d2</td>
+<td>Decide <code>x2=true</code></td>
+<td><code>x2@2 (Decision)</code></td>
+</tr>
+<tr>
+<td>p</td>
+<td>c2⇒<code>x3</code> (c2), c3⇒<code>x4</code> (c3), c4⇒<code>x5</code> (c4), c5⇒<code>x6</code> (c5)</td>
+<td><code>x3,x4,x5,x6 @2</code></td>
+</tr>
+<tr>
+<td>p</td>
+<td>c6 <code>(¬x5 ∨ ¬x6)</code>: both false ⇒ <strong>CONFLICT</strong></td>
+<td>conflict = c6</td>
+</tr>
+</tbody></table></div>
+<p>Implication graph (current level 2; <code>x1@1</code> is the only level-1 node feeding in via c4):</p>
+<pre class="diagram"><code>            x2@2 ──c2──► x3@2 ──c3──► x4@2 ─┐
+                                            ├─c4─► x5@2 ──c5──► x6@2 ─┐
+   x1@1 ───────────────────────────────────┘                        ├─► ⊥ (c6)
+                                            x5@2 ──────────c6─────────┘</code></pre>
+<p><strong>1-UIP analysis</strong> (<code>analyze(c6)</code>): walk trail backward at level 2, resolve conflict clause against the reason of the most-recent level-2 literal until one level-2 literal remains.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Resolution</th>
+<th>Level-2 lits remaining</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>seed</td>
+<td><code>c6 = (¬x5 ∨ ¬x6)</code></td>
+<td><code>{x5, x6}</code></td>
+</tr>
+<tr>
+<td>resolve on <code>x6</code> (reason <code>c5=(¬x5 ∨ x6)</code>)</td>
+<td><code>(¬x5 ∨ ¬x6) ⊗_x6 (¬x5 ∨ x6) = (¬x5)</code></td>
+<td><code>{x5}</code> ← exactly one ⇒ STOP</td>
+</tr>
+<tr>
+<td>result</td>
+<td><code>learnt = (¬x5)</code></td>
+<td>unit learnt clause</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>Asserting lit <code>¬x5</code>; backjump = 2nd-highest learnt level = none ⇒ <code>0</code> (unit). <code>backjump(0)</code>; <code>enqueue(¬x5, Clause(learnt))</code>; VSIDS bump <code>{x5,x6}</code>; DRAT <code>add (¬x5)</code>. Propagating at level 0 makes <code>x5</code> permanently false — the learnt unit prunes the whole conflict subtree non-chronologically (skipped re-deciding <code>x1,x2</code>).</li>
+</ul>
+<h3 id="sec-8-7">8.7 Worked UNSAT example + DRAT proof</h3>
+<p>Classic unsatisfiable core (every assignment falsifies one clause):</p>
+<pre class="diagram"><code>p cnf 2 4
+ 1  2  0     c1
+ 1 -2  0     c2
+-1  2  0     c3
+-1 -2  0     c4</code></pre>
+<p>CDCL trace: decide <code>x1=true</code> → c2,c4 conflict on <code>x2</code> ⇒ learnt <code>(¬x1)</code>; assert <code>x1=false</code> → c1,c3 conflict ⇒ learnt <code>()</code>. DRAT stream (each <code>Add</code> RUP-redundant, <code>0</code>-terminated):</p>
+<pre class="diagram"><code>-1 0          c DRAT: add (¬x1)   — RUP redundant
+0             c DRAT: add ()      — empty clause ⇒ UNSAT established</code></pre>
+<p><strong>RUP check</strong> (<code>check_drat</code>, backward): to validate <code>Add(L)</code>, assume <code>¬L</code> for every lit of <code>L</code>, unit-propagate over the current DB; a derived conflict ⇒ <code>L</code> is <strong>RUP-redundant</strong> ⇒ accept.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step being verified</th>
+<th>Unit-propagation trace</th>
+<th>Verdict</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>add (¬1)</code></td>
+<td>assume <code>x1=true</code> → <code>c2</code> unit <code>x2=false</code> → <code>c3=(-1,2)</code> both false</td>
+<td>CONFLICT ✓ (RUP-redundant)</td>
+</tr>
+<tr>
+<td><code>add ()</code></td>
+<td><code>(¬1)</code> now in DB ⇒ <code>x1=false</code> → <code>c1</code> ⇒ <code>x2=true</code> → <code>c2</code> both false</td>
+<td>CONFLICT ✓ ⇒ ⊥ derived ⇒ valid</td>
+</tr>
+</tbody></table></div>
+<p>If a step is not RUP-redundant the checker retries as <strong>RAT</strong> on the pivot (first literal): <code>Add(L)</code> is RAT iff for every clause <code>D</code> containing <code>¬pivot</code>, the resolvent <code>(L \ {pivot}) ∪ (D \ {¬pivot})</code> is RUP-redundant. Empty clause derivation ⇒ <code>Ok(())</code>; otherwise <code>ProofError</code>.</p>
+<h3 id="sec-8-8">8.8 Malformed / edge DIMACS → <code>DimacsError</code></h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input fragment</th>
+<th>Condition</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>p cnf 3</code> / <code>p sat 3 2</code> / <code>q cnf 3 2</code></td>
+<td>missing count / wrong token / non-<code>p</code></td>
+<td><code>DimacsError::BadHeader</code></td>
+</tr>
+<tr>
+<td><code>1 4 0</code> with <code>nvars=3</code></td>
+<td>`</td>
+<td>literal</td>
+</tr>
+<tr>
+<td><code>1 2 3</code> (EOF, no <code>0</code>)</td>
+<td>clause not terminated</td>
+<td><code>DimacsError::MissingZeroTerminator</code></td>
+</tr>
+<tr>
+<td><code>1 x 0</code></td>
+<td>non-integer token</td>
+<td><code>DimacsError::NonNumeric</code></td>
+</tr>
+<tr>
+<td>read failure mid-stream</td>
+<td>underlying I/O</td>
+<td><code>DimacsError::IoError</code></td>
+</tr>
+<tr>
+<td><code>0</code> alone</td>
+<td>empty clause in input</td>
+<td>parse OK → empty clause ⇒ <strong>trivially UNSAT</strong> (no error)</td>
+</tr>
+<tr>
+<td><code>1 -1 2 0</code> / <code>1 1 2 0</code></td>
+<td>tautology / duplicate</td>
+<td>parse OK → dropped / deduped to <code>(1 2)</code></td>
+</tr>
+<tr>
+<td><code>nclauses</code> mismatch</td>
+<td>declared ≠ actual</td>
+<td>accepted (warn); strict → <code>BadHeader</code></td>
+</tr>
+</tbody></table></div>
+<p>Post-parse invariants (<a class="cite" href="/system-design-blueprints/systems/sat-solver/reliability/#inv-7">I7</a>): every lit <code>var() &lt; nvars</code>; no tautology; no dup lit; <code>arena</code> words match each <code>size</code>; an empty input clause is preserved verbatim (so UNSAT stays detectable), never normalized away.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

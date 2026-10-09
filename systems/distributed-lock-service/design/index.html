@@ -1,0 +1,432 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Lock Service — Design · Engineering Blueprints</title><meta name="description" content="Distributed Lock Service, lld: core types, repo tree, file inventory. coord is a Chubby/ZooKeeper/etcd-lock-class distributed coordination service: a hierarchical namespace of znodes (persistent, ephemeral, sequential) with one-shot watches, session-leased liveness…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/distributed-lock-service/">Distributed Lock Service</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Distributed Lock Service</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~17 weeks</li> <li>1,827 lines</li> <li>blueprint #96</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-lock-service/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-lock-service/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-lock-service/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-lock-service/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-lock-service/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-lock-service/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-lock-service/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-lock-service/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-lock-service/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-lock-service/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Lock Service — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/distributed-lock-service/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>pub struct Zxid(pub u64);                     // (epoch &lt;&lt; 32) | counter; monotonic cluster-wide
+impl Zxid {
+    pub const ZERO: Self;
+    pub fn epoch(self) -&gt; u32;
+    pub fn counter(self) -&gt; u32;
+    pub fn next(self) -&gt; Self;                // panics on overflow (&gt;100 yr headroom at 1e9 ops/s)
+}
+
+pub struct SessionId(pub u64);                // high 32 bits: per-leader nonce (P2, §14.7)</code></pre><pre class="code"><code>pub struct Path(String);                      // canonical: leading &#39;/&#39;, no trailing &#39;/&#39;, no &#39;..&#39;, no &#39;//&#39;
+impl Path {
+    pub fn parse(raw: &amp;str) -&gt; Result&lt;Self, Error&gt;;   // rejects malformed at construction (§8.7)
+    pub fn as_str(&amp;self) -&gt; &amp;str;
+    pub fn parent(&amp;self) -&gt; Option&lt;Path&gt;;
+    pub fn last_component(&amp;self) -&gt; &amp;str;
+}</code></pre><pre class="code"><code>pub struct Stat {
+    pub czxid: Zxid, pub mzxid: Zxid, pub pzxid: Zxid,
+    pub ctime: i64, pub mtime: i64,             // advisory only, not load-bearing (§8.1)
+    pub version: u32, pub cversion: u32, pub aversion: u32,
+    pub ephemeral_owner: Option&lt;SessionId&gt;,     // None =&gt; persistent znode
+    pub data_length: u32, pub num_children: u32,
+}
+
+pub struct Znode {
+    pub path: String,
+    pub data: Vec&lt;u8&gt;,                          // ≤ MAX_ZNODE_BYTES (I11)
+    pub stat: Stat,
+    pub acl: Vec&lt;AclEntry&gt;,
+    pub children: alloc::collections::BTreeMap&lt;String, ()&gt;,   // index only; children live in Namespace
+}</code></pre><pre class="code"><code>pub struct Namespace {
+    nodes: alloc::collections::BTreeMap&lt;String, Znode&gt;,   // keyed by canonical path
+    next_zxid: Zxid,
+}
+impl Namespace {
+    pub fn new() -&gt; Self;
+    pub fn create(&amp;mut self, path: &amp;Path, data: &amp;[u8], acl: &amp;[AclEntry],
+                   ephemeral_owner: Option&lt;SessionId&gt;, sequential: bool) -&gt; Result&lt;Zxid, Error&gt;;
+    pub fn delete(&amp;mut self, path: &amp;Path, expected_version: Option&lt;u32&gt;) -&gt; Result&lt;Zxid, Error&gt;;
+    pub fn set_data(&amp;mut self, path: &amp;Path, data: &amp;[u8], expected_version: Option&lt;u32&gt;) -&gt; Result&lt;Zxid, Error&gt;;
+    pub fn get_data(&amp;self, path: &amp;Path) -&gt; Result&lt;(&amp;[u8], &amp;Stat), Error&gt;;
+    pub fn get_children(&amp;self, path: &amp;Path) -&gt; Result&lt;Vec&lt;String&gt;, Error&gt;;
+    pub fn exists(&amp;self, path: &amp;Path) -&gt; bool;
+}</code></pre><pre class="code"><code>pub enum SessionState { Connecting, Connected, Jeopardy, Expired }   // §8.2
+
+pub struct Session {
+    pub id: SessionId, pub timeout: core::time::Duration, pub state: SessionState,
+    pub last_seen_zxid: Zxid, pub owner_replica: u32,
+    pub ephemeral_znodes: alloc::collections::BTreeSet&lt;Path&gt;,
+}
+
+pub enum WatchKind { NodeCreated, NodeDeleted, NodeDataChanged, NodeChildrenChanged }
+
+pub struct Watch {
+    pub session: SessionId, pub kind: WatchKind, pub path: String,
+    pub registered_at: Zxid,                    // last-seen zxid at registration; drives reconnect replay
+}</code></pre><pre class="code"><code>pub struct Perms(pub u32);
+impl Perms { pub const READ: Self; pub const WRITE: Self; pub const CREATE: Self;
+             pub const DELETE: Self; pub const ADMIN: Self; pub const ALL: Self; }
+
+pub struct AclEntry { pub scheme: String, pub id: String, pub perms: Perms }  // §21.1
+
+pub enum Mutation {
+    Create   { path: String, data: Vec&lt;u8&gt;, acl: Vec&lt;AclEntry&gt;,
+               ephemeral_owner: Option&lt;SessionId&gt;, sequential: bool },
+    Delete   { path: String, expected_version: Option&lt;u32&gt; },
+    SetData  { path: String, data: Vec&lt;u8&gt;, expected_version: Option&lt;u32&gt; },
+    SetAcl   { path: String, acl: Vec&lt;AclEntry&gt;, expected_aversion: Option&lt;u32&gt; },
+    NewSession       { id: SessionId, timeout_ms: u32 },
+    HeartbeatSession { id: SessionId },
+    ExpireSession    { id: SessionId },          // atomically deletes owned ephemerals (I2)
+    Sync     { id: SessionId },                  // no-op; reaches the commit boundary (I14)
+}</code></pre><pre class="code"><code>pub enum Error {
+    NoNode, NodeExists, BadVersion, NotEmpty, NoAuth, SessionExpired,
+    ZnodeTooLarge, NotLeader { hint: u32 }, LimitExceeded, InvalidPath,
+    FrameError(FrameErrorKind),
+}</code></pre><pre class="code"><code>pub trait StateMachine: Send + &#39;static {
+    fn apply(&amp;mut self, index: u64, entry: &amp;[u8]) -&gt; Vec&lt;u8&gt;;
+    fn snapshot(&amp;self) -&gt; Vec&lt;u8&gt;;
+    fn restore(&amp;mut self, snapshot: &amp;[u8]);
+}
+
+pub enum Role { Follower, Candidate, Leader }
+
+pub struct RaftNode&lt;S: StateMachine&gt; {
+    state_machine: S, log: Log, role: Role, current_term: u64,
+    voted_for: Option&lt;u32&gt;, commit_index: u64, last_applied: u64,
+    next_index: alloc::collections::BTreeMap&lt;u32, u64&gt;,      // leader-only
+    match_index: alloc::collections::BTreeMap&lt;u32, u64&gt;,     // leader-only
+}</code></pre><pre class="code"><code>pub struct Wal { /* file handle, last_offset, last_index */ }
+impl Wal {
+    pub fn append(&amp;mut self, entry: &amp;LogEntry) -&gt; Result&lt;u64, Error&gt;;     // fsync after write
+    pub fn read_from(&amp;self, index: u64) -&gt; Result&lt;Vec&lt;LogEntry&gt;, Error&gt;;
+    pub fn truncate_after(&amp;mut self, index: u64) -&gt; Result&lt;(), Error&gt;;
+}
+
+pub struct LogEntry { pub term: u64, pub index: u64, pub mutation: Mutation }
+
+pub struct SnapshotWriter { /* chunked writer, per-chunk CRC32C */ }
+pub struct SnapshotReader { /* chunked reader, verifies CRC32C per chunk + file-level */ }</code></pre><pre class="code"><code>pub struct ClientOptions { pub session_timeout: core::time::Duration, pub tls: TlsConfig }
+
+pub struct Client { /* cluster addr list, session, connection, watch dispatcher */ }
+impl Client {
+    pub async fn connect(cluster: &amp;[std::net::SocketAddr], opts: ClientOptions) -&gt; Result&lt;Self, Error&gt;;
+    pub async fn create(&amp;self, path: &amp;str, data: &amp;[u8], mode: CreateMode) -&gt; Result&lt;String, Error&gt;;
+    pub async fn delete(&amp;self, path: &amp;str, version: Option&lt;i32&gt;) -&gt; Result&lt;(), Error&gt;;
+    pub async fn get_data(&amp;self, path: &amp;str, watch: bool) -&gt; Result&lt;(Vec&lt;u8&gt;, Stat), Error&gt;;
+    pub async fn set_data(&amp;self, path: &amp;str, data: &amp;[u8], version: Option&lt;i32&gt;) -&gt; Result&lt;Stat, Error&gt;;
+    pub async fn get_children(&amp;self, path: &amp;str, watch: bool) -&gt; Result&lt;Vec&lt;String&gt;, Error&gt;;
+    pub async fn exists(&amp;self, path: &amp;str, watch: bool) -&gt; Result&lt;Option&lt;Stat&gt;, Error&gt;;
+    pub async fn sync(&amp;self, path: &amp;str) -&gt; Result&lt;(), Error&gt;;
+}
+
+pub struct FencingToken(pub u64);
+pub struct Lock { /* client handle, resource name, held child path, token */ }
+impl Lock {
+    pub async fn acquire(&amp;mut self) -&gt; Result&lt;FencingToken, Error&gt;;
+    pub async fn release(&amp;mut self) -&gt; Result&lt;(), Error&gt;;
+    pub fn is_definitely_held(&amp;self) -&gt; bool;      // false unless session Connected (§19.5)
+}</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>Distributed-Lock-Service/
+├── README.md                       # project overview, quick start
+├── FINAL_BLUEPRINT.md              # this document
+├── BUILD_PLAN.md                   # phase schedule, current status
+├── CHANGELOG.md                    # Keep-a-Changelog format
+├── BLUEPRINT_LOG.md                # blueprint revision history
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+├── SECURITY.md                     # 90-day coordinated disclosure policy
+├── LICENSE-APACHE
+├── LICENSE-MIT
+├── Makefile                        # bootstrap/build/test/lint/conformance/...
+├── Cargo.toml                      # workspace manifest
+├── Dockerfile                      # multi-stage: rust:1.78 builder, distroless runtime
+├── docker-compose.yml              # 3-node and 5-node profiles
+├── rust-toolchain.toml             # pins 1.78
+├── deny.toml                       # licence allowlist + advisory deny-list
+├── .dockerignore
+├── .gitignore
+└── .github/
+    └── workflows/
+        ├── ci.yml                  # build + unit/integration tests
+        ├── conformance.yml         # §27 conformance suite
+        ├── jepsen.yml              # nightly Jepsen-class run
+        ├── soak.yml                # 30-day soak canary
+        ├── security.yml            # cargo-audit, cargo-deny, MSRV check
+        ├── fuzz.yml                # cargo-fuzz nightly
+        ├── tla.yml                 # TLA+ model-check
+        └── release.yml             # signed release artifacts</code></pre><pre class="diagram"><code>crates/
+├── coord-core/                     # no_std + alloc state machine
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── error.rs                # Error enum (§11.7)
+│       ├── path.rs                 # Path: canonical znode path (§11.2)
+│       ├── stat.rs                 # Stat struct (§11.3)
+│       ├── znode.rs                # Znode struct (§11.3)
+│       ├── namespace.rs            # radix-trie-backed tree (§11.4)
+│       ├── session.rs              # Session + SessionState (§11.1)
+│       ├── watch.rs                # Watch registry (§11.5)
+│       ├── acl.rs                  # AclEntry + Perms (§11.6)
+│       ├── zxid.rs                 # Zxid(epoch&lt;&lt;32|counter) (§11.1)
+│       └── apply.rs                # Mutation enum + apply() (§11.6)
+└── coord-raft/                     # Raft replication
+    ├── Cargo.toml
+    └── src/
+        ├── lib.rs                  # StateMachine trait, RaftNode (§11.8)
+        ├── log.rs                  # in-memory log + persistence trait
+        ├── leader.rs               # AppendEntries + heartbeat (leader side)
+        ├── follower.rs             # follower-side log handling
+        ├── election.rs             # RequestVote + pre-vote
+        ├── snapshot.rs             # InstallSnapshot RPC
+        ├── membership.rs           # joint-consensus reconfiguration
+        └── state_machine.rs        # the trait coord-core implements</code></pre><pre class="diagram"><code>crates/
+├── coord-storage/                  # WAL + snapshot files
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── wal.rs                  # append-only log, CRC32C/record (§11.9)
+│       ├── snapshot.rs             # chunked snapshot format (§11.9)
+│       ├── recovery.rs             # WAL+snapshot replay on start
+│       └── compaction.rs           # snapshot trigger + WAL truncation
+└── coord-net/                      # bespoke wire protocol
+    ├── Cargo.toml
+    └── src/
+        ├── lib.rs
+        ├── frame.rs                # length-prefixed framing (§8.5)
+        ├── codec.rs                # request/response codec
+        ├── server.rs               # tokio-based connection handler
+        └── tls.rs                  # mTLS integration (rustls)</code></pre><pre class="diagram"><code>crates/
+├── coord-sdk/                      # client library
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── client.rs               # Client + ClientOptions (§11.10)
+│       ├── session.rs              # client-side session mirror
+│       ├── retry.rs                # idempotent retry + request-id
+│       ├── watcher.rs              # client-side watch dispatcher
+│       └── recipes/
+│           ├── mod.rs
+│           ├── lock.rs             # sequential-ephemeral lock (§19)
+│           ├── leader.rs           # leader-election recipe (§20.1)
+│           ├── membership.rs       # group-membership recipe (§20.2)
+│           └── barrier.rs          # distributed-barrier recipe (§20.3)
+└── coord-cli/                      # coordctl binary
+    ├── Cargo.toml
+    └── src/main.rs                 # create/get/delete/lock/leader subcommands</code></pre><pre class="diagram"><code>crates/
+├── coord-fuzz/
+│   ├── Cargo.toml
+│   └── fuzz_targets/
+│       ├── wire_decode.rs          # §8.7 malformed-input target
+│       ├── path_parse.rs
+│       ├── namespace_ops.rs
+│       ├── raft_log_replay.rs
+│       └── wal_recovery.rs
+└── coord-jepsen/                   # Jepsen-class linearizability harness
+    ├── Cargo.toml
+    └── src/
+        ├── main.rs                 # workload runner + nemesis
+        ├── checker.rs              # Knossos-style linearizability checker
+        └── nemesis.rs              # partition/kill/clock-skew faults
+conformance/
+├── README.md
+├── runner/{Cargo.toml, src/main.rs}   # emits conformance.report.json (§27.1)
+├── corpora/
+│   ├── zk_protocol/                # wire-protocol parity vectors
+│   ├── recipe_lock/                # lock-correctness vectors
+│   ├── watch_delivery/             # watch-ordering vectors
+│   ├── session_expiry/             # session-state-machine vectors
+│   └── raft_replay/                # Raft log-replay vectors
+└── report_schema.json
+tla/
+├── Session.tla                     # session state machine (§8.2)
+├── Watch.tla                       # one-shot watch semantics (§8.3)
+├── Lock.tla                        # sequential-ephemeral lock recipe (§19)
+├── Raft.tla                        # vendored Ongaro Raft TLA+
+└── README.md
+benchmarks/
+├── runner/{Cargo.toml, src/main.rs}   # workload generator
+└── results/</code></pre><pre class="diagram"><code>docs/
+├── adr/                            # one file per §9 ADR row
+├── architecture/
+│   ├── session-state-machine.md
+│   ├── watch-subsystem.md
+│   ├── fencing-tokens.md
+│   ├── sync-and-read-modes.md
+│   └── raft-integration.md
+├── runbooks/
+│   ├── leader-failover.md
+│   ├── jepsen-failure-triage.md
+│   ├── split-brain-postmortem.md
+│   └── snapshot-corruption.md
+├── threat-model/
+│   └── index.md                    # long-form of §23
+├── performance/
+│   └── index.md                    # long-form of §29
+├── failure-analysis/
+│   └── index.md                    # long-form of §24
+└── glossary.md                     # generated from §37, not a duplicate home (H11)
+examples/
+├── lock_with_fencing.rs            # the canonical Kleppmann-safe lock
+├── leader_election.rs
+├── group_membership.rs
+├── distributed_barrier.rs
+└── config_watcher.rs
+templates/
+├── adr.md
+├── postmortem.md
+└── rfc.md
+scripts/
+├── bootstrap.sh
+├── run-conformance.sh
+└── run-soak.sh
+tools/
+└── snapshot-inspect/{Cargo.toml, src/main.rs}   # offline snapshot dump tool
+notes/
+└── derivations/                    # §33 back-of-envelope worksheets
+papers/
+└── whitepaper/whitepaper-v1.0.md
+legal/
+└── trademark-policy.md
+brand/
+└── voice.md
+ops/
+└── k8s/{statefulset.yaml, service.yaml}
+nix/
+└── flake.nix</code></pre> </section><section aria-labelledby="sec-38"> <h2 id="sec-38">File inventory <small class="muted">(Appendix A · 26 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>README.md</code></td><td>Project overview and quick start</td></tr><tr><td><code>FINAL_BLUEPRINT.md</code></td><td>This document</td></tr><tr><td><code>BUILD_PLAN.md</code></td><td>Phase schedule and current status</td></tr><tr><td><code>CHANGELOG.md</code></td><td>Keep-a-Changelog-format release history</td></tr><tr><td><code>BLUEPRINT_LOG.md</code></td><td>Blueprint revision history</td></tr><tr><td><code>CONTRIBUTING.md</code></td><td>Contribution workflow</td></tr><tr><td><code>CODE_OF_CONDUCT.md</code></td><td>Community conduct policy</td></tr><tr><td><code>SECURITY.md</code></td><td>90-day coordinated disclosure policy</td></tr><tr><td><code>LICENSE-APACHE</code></td><td>Apache-2.0 licence text (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/trade-offs/#adr-18">ADR-18</a>)</td></tr><tr><td><code>LICENSE-MIT</code></td><td>MIT licence text (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/trade-offs/#adr-18">ADR-18</a>)</td></tr><tr><td><code>Makefile</code></td><td>bootstrap/build/test/lint/conformance/jepsen/tla/fuzz/soak targets</td></tr><tr><td><code>Cargo.toml</code></td><td>Workspace manifest, all eight crates</td></tr><tr><td><code>Dockerfile</code></td><td>Multi-stage build, distroless runtime</td></tr><tr><td><code>docker-compose.yml</code></td><td>3-node and 5-node local profiles</td></tr><tr><td><code>rust-toolchain.toml</code></td><td>Pins Rust 1.78 (<a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/trade-offs/#adr-1">ADR-01</a>)</td></tr><tr><td><code>deny.toml</code></td><td>Licence allowlist + advisory deny-list</td></tr><tr><td><code>.dockerignore</code></td><td>Docker build-context exclusions</td></tr><tr><td><code>.gitignore</code></td><td>VCS exclusions</td></tr><tr><td><code>.github/workflows/ci.yml</code></td><td>Build + unit/integration tests</td></tr><tr><td><code>.github/workflows/conformance.yml</code></td><td>Runs the <a class="cite" href="/system-design-blueprints/systems/distributed-lock-service/blueprint/#sec-27">§27</a> conformance suite</td></tr><tr><td><code>.github/workflows/jepsen.yml</code></td><td>Nightly Jepsen-class run</td></tr><tr><td><code>.github/workflows/soak.yml</code></td><td>30-day soak canary</td></tr><tr><td><code>.github/workflows/security.yml</code></td><td>cargo-audit, cargo-deny, MSRV check</td></tr><tr><td><code>.github/workflows/fuzz.yml</code></td><td>Nightly cargo-fuzz canary</td></tr><tr><td><code>.github/workflows/tla.yml</code></td><td>TLA+ model-check CI</td></tr><tr><td><code>.github/workflows/release.yml</code></td><td>Signed release artifact pipeline</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

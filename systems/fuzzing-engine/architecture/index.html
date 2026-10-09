@@ -1,0 +1,416 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Fuzzing Engine (AFL/libFuzzer-like) — Architecture · Engineering Blueprints</title><meta name="description" content="Fuzzing Engine (AFL/libFuzzer-like), hld: §3 overview + §8 domain model. Project 229 builds a from-scratch coverage-guided greybox fuzzing engine in Rust, in the tradition of AFL/AFL++ and libFuzzer. The engine's job is narrow and load-bearing: drive repeated execution of…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/security-cryptography/">Security &amp; Cryptography</a> </li><li> <a href="/system-design-blueprints/systems/fuzzing-engine/">Fuzzing Engine (AFL/libFuzzer-like)</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:118"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/security-cryptography/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Security &amp; Cryptography</span></a> </p> <h1>Fuzzing Engine (AFL/libFuzzer-like)</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~30 weeks</li> <li>1,810 lines</li> <li>blueprint #229</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/fuzzing-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/fuzzing-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/fuzzing-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/fuzzing-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/fuzzing-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/fuzzing-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/fuzzing-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/fuzzing-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/fuzzing-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/fuzzing-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Fuzzing Engine (AFL/libFuzzer-like) — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                     TARGET-EXECUTION BOUNDARY (untrusted: may crash / hang / OOM)
+                     ========================================================
+                                          |
+   +-----------------+   compiled with   |   +--------------------------------+
+   |  Target Source  |------------------&gt;|--&gt;| Instrumented Target Binary     |
+   +-----------------+  SanitizerCoverage |   | __sanitizer_cov_trace_pc_guard|
+                                          |   | + ASan/UBSan/MSan runtime      |
+                                          |   +----------------+---------------+
+                                          |                    | writes edge hit
+                                          |                    v
+                                          |   +--------------------------------+
+                                          |   | Shared Coverage Bitmap (mmap)  |
+                                          |   | prev_loc xor cur_loc -&gt; index  |
+                                          |   +----------------+---------------+
+                     ========================================================
+                                          |                    | read after run
+              +----------------+         |         +----------v------------+
+              |  Fork Server / |&lt;--------------------| Execution Loop      |
+              |  In-Process    |  exec + status pipe | dispatch, timeout,  |
+              |  Runner        |---------------------&gt;| OOM/hang detect    |
+              +----------------+                      +----------+---------+
+                                                                  |
+                                                                  v
+                                                     +------------------------+
+                                                     | Is-Interesting Decision|
+                                                     | new edge / new bucket? |
+                                                     +------------+-----------+
+                                          yes-------/              \----no (discard)
+                                          v
+                       +------------------------+       +------------------------+
+                       | Corpus (Queue) +        |&lt;-----&gt;| Power / Energy         |
+                       | On-Disk Store            |       | Scheduler (AFLFast)   |
+                       +-----------+--------------+       +-----------+------------+
+                                   |  seed selection                   |
+                                   v                                   |
+                       +------------------------+                     |
+                       | Mutation Engine          |&lt;--------------------+
+                       | havoc/splice/dict/       |
+                       | structure-aware          |
+                       +-----------+--------------+
+                                   | mutated input feeds back into Execution Loop
+                                   v
+                       +------------------------+       +------------------------+
+                       | Crash Detector +         |------&gt;| Minimizer              |
+                       | Deduplicator (stack/     |       | corpus (cmin) +        |
+                       | coverage hash)           |       | test-case (tmin)       |
+                       +------------------------+       +------------------------+</code></pre>
+<p>CLI / campaign driver: not pictured as a box but wraps every component above; owns the campaign directory, starts/stops workers, and exposes replay/minimize/sync subcommands (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/blueprint/#sec-1">§1</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/design/#sec-10">§10</a>).</p>
+<p>Target + coverage instrumentation: the compiler&#39;s SanitizerCoverage pass injects a call at every edge; the engine never rewrites the target&#39;s binary itself (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/trade-offs/#adr-2">ADR-02</a>). This is the sole point where the fuzzer&#39;s fate depends on toolchain cooperation rather than its own code.</p>
+<p>Shared coverage bitmap: an <code>mmap</code>&#39;d byte array, one counter-ish slot per hashed edge, written by the target process and read by the engine after each execution (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-1">§8.1</a>). It is the entire coverage signal — no call graphs, no data-flow, nothing else.</p>
+<p>Fork server / in-process runner: the execution boundary. The fork server model spawns a stopped child once, then forks it repeatedly to avoid <code>execve</code> cost per input (AFL whitepaper); the in-process model instead calls the harness function directly in the fuzzer&#39;s address space (libFuzzer model), trading isolation for speed (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-2">§8.2</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/compare/#sec-33">§33</a>).</p>
+<p>Execution loop: dispatches one input, arms a timeout, waits for exit/crash/timeout/OOM, and always leaves the bitmap and process state ready for the next execution — the untrusted target may misbehave, but the loop&#39;s own state may not become inconsistent (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#inv-5">I5</a>).</p>
+<p>Coverage-feedback / is-interesting decision: the single deterministic gate that separates &quot;this mutation mattered&quot; from &quot;discard&quot; — new edge, or same edge with a new hit-count bucket, keeps the input (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-3">§8.3</a>).</p>
+<p>Corpus (queue) + on-disk store: durable record of every retained input plus its coverage signature, favored/energy metadata, and lineage — this is the evolving population the mutation engine draws from (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-6">§8.6</a>).</p>
+<p>Mutation engine: applies deterministic bitflip/arithmetic/interesting-value passes plus stochastic havoc, splicing, dictionary/token substitution, and optional structure-aware/grammar mutation (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-4">§8.4</a>).</p>
+<p>Power/energy scheduler: AFLFast&#39;s Markov-chain-informed schedule decides how many mutation trials a seed receives, favoring seeds that exercise low-frequency paths (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-5">§8.5</a>, Böhme et al. 2016).</p>
+<p>Crash detector + deduplicator: classifies a non-zero exit/signal/sanitizer abort, then dedups via coverage-hash or stack-hash so that one root cause yields one artifact, not thousands (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-7">§8.7</a>).</p>
+<p>Minimizer: two distinct passes — corpus minimization (drop redundant queue entries without losing coverage) and test-case minimization (shrink one crashing input while preserving the crash) (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-8">§8.8</a>).</p>
+<p>Sanitizer interface: ASan/UBSan/MSan compiled into the target turn silent memory corruption into a loud, immediately-detected abort — the crash detector&#39;s primary source of true positives (Serebryany et al. 2012).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Edge Coverage Encoding</h3>
+<p>Per the AFL scheme, each edge is identified by combining the current and previous instrumented location:</p>
+<pre class="diagram"><code>edge_id  = cur_loc XOR (prev_loc &gt;&gt; 1)
+bitmap[edge_id mod MAP_SIZE] += 1   // saturating
+prev_loc = cur_loc &gt;&gt; 1</code></pre>
+<p><code>MAP_SIZE</code> is 65,536 (64 KiB) by default (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/numbers/#sec-4">§4</a>). The <code>&gt;&gt; 1</code> on <code>prev_loc</code> before storing avoids the map being dominated by same-edge-both-directions collisions (AFL whitepaper). This is the entirety of the coverage signal: no call stack, no data values, no path history beyond one hop.</p>
+<h3 id="sec-8-2">8.2 Bitmap Collision Problem (CollAFL)</h3>
+<p>Because <code>edge_id</code> is hashed into a fixed 64 KiB space, two distinct real edges can collide into the same bitmap slot, undercounting true coverage and hiding new paths from the is-interesting decision (Gan et al. 2018, CollAFL). Collision probability grows with live-edge count (birthday-bound, quantified in <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/numbers/#sec-34">§34</a>). Mitigation: larger <code>MAP_SIZE</code> for large targets, or a collision-aware hash (CollAFL&#39;s approach) — recorded as <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/trade-offs/#adr-8">ADR-08</a>.</p>
+<h3 id="sec-8-3">8.3 Fork-Server Protocol (sequence table)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Fuzzer</td>
+<td>spawn target under a stopped fork-server stub via <code>execve</code>, hold before <code>main</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Fork server (child)</td>
+<td>signal readiness on control pipe</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Fuzzer</td>
+<td>write &quot;go&quot; token to control pipe with the next input already staged</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Fork server</td>
+<td><code>fork()</code> a fresh worker; worker execs the harness body on the staged input</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Worker</td>
+<td>run to completion, exit/crash/signal</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Fork server</td>
+<td>report worker exit status to fuzzer over status pipe</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Fuzzer</td>
+<td>read bitmap, classify <code>ExitKind</code>, reset bitmap, go to step 3</td>
+</tr>
+</tbody></table></div>
+<p>Contrast — persistent/in-process model: steps 1-2 happen once; instead of forking per input, the harness loop calls the target function directly in-process (libFuzzer model) or the AFL persistent loop re-enters the same process N times before a fresh fork, trading isolation for a 10-100x execs/second gain (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/numbers/#sec-34">§34</a>-<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/numbers/#m-1">M1</a>). In-process execution requires <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#inv-5">I5</a> (clean child state) to hold across calls, not just across forks.</p>
+<h3 id="sec-8-4">8.4 Is-Interesting Decision (named steps)</h3>
+<ol>
+<li>Snapshot bitmap state before execution (all zero, per <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#inv-2">I2</a>).</li>
+<li>Run the input; target writes edge hits into the bitmap.</li>
+<li>Diff bitmap against the campaign&#39;s cumulative &quot;virgin map.&quot;</li>
+<li>If any never-seen edge index is now nonzero → <strong>new coverage</strong>, keep unconditionally.</li>
+<li>Else if a seen edge&#39;s hit count crosses into a new bucket (AFL uses log2-ish buckets: 1, 2, 3, 4-7, 8-15, 16-31, 32-127, 128+) → <strong>new edge-count bucket</strong>, keep.</li>
+<li>Else → discard input, no corpus mutation.</li>
+<li>On keep: merge bitmap into virgin map, create a <code>QueueEntry</code>, assign initial energy via <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-5">§8.5</a>.</li>
+</ol>
+<h3 id="sec-8-5">8.5 Mutation Catalogue</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Mutation Kind</th>
+<th>Mechanism</th>
+<th>When It Applies</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Deterministic bitflip</td>
+<td>flip 1/2/4 consecutive bits at every offset</td>
+<td>early/exhaustive pass over small-to-medium seeds</td>
+</tr>
+<tr>
+<td>Deterministic arithmetic</td>
+<td>add/subtract small integers to byte/word/dword at every offset</td>
+<td>targets near off-by-one and boundary conditions</td>
+</tr>
+<tr>
+<td>Interesting values</td>
+<td>splice in known edge-case constants (0, -1, INT_MAX, etc.)</td>
+<td>targets integer-comparison guards</td>
+</tr>
+<tr>
+<td>Havoc</td>
+<td>randomized stacked sequence of the above plus block insert/delete/duplicate</td>
+<td>bulk of the mutation budget after deterministic passes exhaust</td>
+</tr>
+<tr>
+<td>Splicing</td>
+<td>crossover: combine byte ranges from two corpus entries</td>
+<td>escapes local optima the single-seed mutators cannot reach</td>
+</tr>
+<tr>
+<td>Dictionary/token substitution</td>
+<td>insert known tokens (magic bytes, keywords, extracted comparisons) at mutation sites</td>
+<td>defeats magic-byte/keyword guards (P11)</td>
+</tr>
+<tr>
+<td>Structure-aware/grammar</td>
+<td>mutate at the grammar-node level using an input model</td>
+<td>deeply-structured formats where byte-level mutation rarely produces valid structure (Pham et al. 2019, AFLSmart)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Power/Energy Schedule (AFLFast, equation)</h3>
+<p>AFLFast models the fuzzing process as a Markov chain over seeds, where a seed&#39;s transition/selection probability should be inversely related to how often its exercised path has already been hit. Energy assigned to seed <code>s</code>:</p>
+<pre class="diagram"><code>energy(s) ∝ 1 / hit_count(path(s))^alpha</code></pre>
+<p>with <code>alpha</code> a tunable exponent (AFLFast default favors low-frequency paths superlinearly). Seeds on paths hit rarely receive proportionally more mutation trials; seeds on paths hit often are throttled — this is what prevents the scheduler from re-exploring the same well-trodden region forever (Böhme et al. 2016; P5, <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#inv-9">I9</a>).</p>
+<h3 id="sec-8-7">8.7 Seed-Selection / Queue-Culling Model</h3>
+<ul>
+<li>Favored seeds: the smallest, fastest-executing seed covering each currently-known edge — a minimal spanning set, recomputed periodically (culling).</li>
+<li>Non-favored seeds are still retained (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#inv-6">I6</a> forbids dropping coverage) but receive lower scheduling priority, not zero (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#inv-9">I9</a>).</li>
+<li>Queue aging: seeds untouched for a long duration receive an energy boost to prevent permanent starvation of rarely-revisited-but-still-favored seeds.</li>
+</ul>
+<h3 id="sec-8-8">8.8 Crash Detection and Deduplication (decision table)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Signal</th>
+<th>Classification</th>
+<th>Dedup Key</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Process exits 0</td>
+<td><code>ExitKind::Ok</code></td>
+<td>n/a</td>
+</tr>
+<tr>
+<td>Process killed by SIGSEGV/SIGABRT/SIGBUS/SIGFPE</td>
+<td><code>ExitKind::Crash</code></td>
+<td>stack-hash of unwound frames at fault</td>
+</tr>
+<tr>
+<td>Sanitizer runtime prints an ASan/UBSan/MSan report and aborts</td>
+<td><code>ExitKind::Crash</code> (sanitizer-flagged, <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#inv-12">I12</a>)</td>
+<td>sanitizer report&#39;s bug-type + top frame, or coverage-hash fallback</td>
+</tr>
+<tr>
+<td>Execution exceeds timeout</td>
+<td><code>ExitKind::Timeout</code></td>
+<td>input-hash (hangs are recorded, not stack-deduped)</td>
+</tr>
+<tr>
+<td>Execution exceeds memory limit / OOM-killed</td>
+<td><code>ExitKind::Oom</code></td>
+<td>input-hash</td>
+</tr>
+<tr>
+<td>Two crashes share a stack-hash</td>
+<td>merge into one crash group</td>
+<td>stack-hash</td>
+</tr>
+<tr>
+<td>Two crashes share only a coverage-hash (stack unavailable/stripped)</td>
+<td>merge with lower confidence, flagged for manual review</td>
+<td>coverage-hash</td>
+</tr>
+</tbody></table></div>
+<p>Stack-hash dedup is precise when symbols are available but false-splits ASLR-shifted-but-identical crashes if addresses leak into the hash unfiltered (mitigation: hash relative offsets, not absolute addresses). Coverage-hash dedup is more robust to symbol stripping but false-merges distinct bugs that happen to share a coverage signature (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#inv-7">I7</a>).</p>
+<h3 id="sec-8-9">8.9 Corpus and Test-Case Minimization (named steps — cmin/tmin)</h3>
+<p><strong>cmin (corpus minimization):</strong> 1) compute the coverage bitmap for every queue entry; 2) run a greedy set-cover: repeatedly pick the entry covering the most currently-uncovered edges; 3) stop when the union equals the full corpus&#39;s coverage (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#inv-6">I6</a> upper bound); 4) drop all unselected entries.</p>
+<p><strong>tmin (test-case minimization):</strong> 1) start from a crashing input; 2) attempt removing large chunks, replaying, keep the removal iff the crash (by dedup key) still reproduces; 3) repeat at decreasing chunk granularity down to single bytes; 4) attempt byte-value normalization (e.g., toward <code>0x00</code>) on remaining bytes without losing the crash signature.</p>
+<h3 id="sec-8-10">8.10 Input-to-State Correspondence (REDQUEEN, contrast)</h3>
+<p>Where dictionaries require a human or static-extraction step to know which tokens matter, REDQUEEN instruments comparison operations at runtime and directly captures the compared operand value, then patches that exact value into the mutated input at the corresponding offset (Aschermann et al. 2019). This is a lightweight, solver-free alternative to symbolic execution for defeating magic-byte/checksum guards (contrast <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/trade-offs/#sec-36">§36</a>) — noted as a natural Phase-10-adjacent extension, not a Phase-0-11 committed subsystem.</p>
+<h3 id="sec-8-11">8.11 Fuzzing-Campaign Lifecycle (state machine)</h3>
+<pre class="diagram"><code>  INIT -&gt; LOADING_SEEDS -&gt; DETERMINISTIC_PASS -&gt; HAVOC_LOOP &lt;-&gt; SPLICE_LOOP
+                                                     |  ^
+                                                     v  |
+                                              CRASH_TRIAGE
+                                                     |
+                                          (periodic) MINIMIZE_PASS
+                                                     |
+                                                     v
+                                              STATS_FLUSH -&gt; HAVOC_LOOP (continue)
+                                                     |
+                                        (operator stop / time budget) -&gt; SHUTDOWN</code></pre>
+<h3 id="sec-8-12">8.12 Malformed / Hard Examples</h3>
+<ul>
+<li>A bitmap collision (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-2">§8.2</a>) makes two genuinely different edges look identical, hiding real new coverage from the is-interesting decision — symptom: coverage plateaus earlier than target complexity warrants.</li>
+<li>A nondeterministic target (uninitialized memory, ASLR-sensitive pointer hashing in output, timing-dependent branches) pollutes feedback: the same input yields different bitmaps across runs, causing spurious corpus adds or spurious &quot;unreproducible&quot; crash flags (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#sec-24">§24</a>-<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#t-4">T4</a>).</li>
+<li>A slow input (pathological O(n^2) parse, accidental sleep/IO) tanks execs/second campaign-wide if not isolated with a per-input timeout budget separate from the hang timeout.</li>
+<li>A hang (infinite loop) must be caught by <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#inv-4">I4</a>&#39;s watchdog; a hang that occurs only on 1-in-1000 runs of the same input due to nondeterminism is materially harder to triage than a deterministic hang.</li>
+<li>A crash that will not reproduce — most commonly caused by ASLR/heap-layout drift, environment-variable differences, or genuine target nondeterminism; the replay sequence (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-13">§8.13</a>) exists specifically to control for this.</li>
+<li>A mutation that never reaches deeper code past a magic-byte check — the canonical case motivating dictionaries (P11) and REDQUEEN (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-10">§8.10</a>).</li>
+</ul>
+<h3 id="sec-8-13">8.13 Failure-Path Example — Replay Sequence</h3>
+<pre class="diagram"><code>load crash metadata (input hash, build id, runtime flags, seed)
+  -&gt; verify target build hash matches recorded build id
+  -&gt; restore recorded runtime flags (sanitizer options, env)
+  -&gt; inject saved input bytes via the harness ABI
+  -&gt; observe exit classification
+  -&gt; compare dedup key (stack-hash or coverage-hash) to recorded key
+  -&gt; MATCH: replay success, artifact confirmed
+  -&gt; MISMATCH: flag flaky (§24-T4), re-run N times before quarantining as ground truth</code></pre>
+<h3 id="sec-8-14">8.14 Nondeterminism Detection Procedure</h3>
+<p>Nondeterministic targets (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/reliability/#t-4">T4</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-12">§8.12</a>) are diagnosed, not guessed at, via a fixed procedure: 1) select a candidate input (any admitted queue entry or any input flagged by a replay mismatch); 2) execute it N times (N configurable, default 10) under otherwise identical runtime conditions (same build_id, same env, ASLR held constant where the platform allows); 3) diff the resulting bitmaps pairwise across all N runs; 4) if any pair differs, the target is classified nondeterministic and tagged in campaign metadata; 5) once tagged, the is-interesting decision (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-3">§8.3</a>) for that target widens its admission tolerance (a bitmap diff must persist across a repeat-check before being trusted as genuinely new coverage, not just admitted on a single observation) and the crash-dedup pipeline (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-8">§8.8</a>) marks any crash from that target as flaky-checked rather than confirmed until it independently reproduces across the same N-run check. This procedure is the operational backbone of the <code>nondeterminism-hunt</code> runbook (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/blueprint/#sec-26">§26</a>).</p>
+<h3 id="sec-8-15">8.15 Bitmap Saturation Response Procedure</h3>
+<p>When collision-rate telemetry (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/blueprint/#sec-13-10">§13.10</a>) crosses the <a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/numbers/#sec-4">§4</a> threshold, the response is a fixed, named sequence rather than an ad hoc tuning exercise: 1) confirm the breach is sustained (not a transient spike) over a rolling window; 2) snapshot the current bitmap density and live-edge estimate; 3) if the live-edge estimate materially exceeds the bitmap&#39;s designed capacity (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/numbers/#sec-34">§34</a>&#39;s birthday-bound estimate), resize the bitmap upward (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/trade-offs/#adr-4">ADR-04</a>&#39;s documented upsize path) and restart affected workers with the new size; 4) if resizing alone does not bring the collision rate back under threshold, recompile the target&#39;s instrumentation with CollAFL-style collision-aware hashing (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/architecture/#sec-8-2">§8.2</a>, Gan et al. 2018) rather than continuing to grow the bitmap indefinitely; 5) re-baseline the campaign&#39;s virgin map after either change, since a bitmap-size or hash-function change invalidates prior coverage bookkeeping. This procedure backs the <code>bitmap-saturation</code> runbook (<a class="cite" href="/system-design-blueprints/systems/fuzzing-engine/blueprint/#sec-26">§26</a>).</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

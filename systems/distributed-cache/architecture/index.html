@@ -1,0 +1,476 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Cache — Architecture · Engineering Blueprints</title><meta name="description" content="Distributed Cache, hld: §3 overview + §8 domain model. Distributed Cache (project 188) is a horizontally sharded, in-memory key-value cache cluster in the memcached / Redis-Cluster lineage: client-side consistent-hash routing onto a 16,384-slot table…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/distributed-cache/">Distributed Cache</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Distributed Cache</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~14 weeks</li> <li>2,540 lines</li> <li>blueprint #188</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-cache/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-cache/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-cache/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-cache/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-cache/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-cache/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-cache/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-cache/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-cache/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-cache/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Cache — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend side: client process
+%% legend rt: data-plane node components
+%% legend store: per-node engine (persistence boundary)
+%% legend ingest: gossip and operability components
+%% legend trust: separate Raft quorum, sole SlotTable writer
+  subgraph CLIENT[&quot;Client Library (dcache-client) — client process&quot;]
+    CL[&quot;&lt;b&gt;dcache-client&lt;/b&gt;&lt;br/&gt;hash ring | hot-key detector&lt;br/&gt;single-flight | ASK/MOVED&quot;]
+  end
+  subgraph SHARD[&quot;Shard Server (dcache-server) — data-plane node&quot;]
+    WIRE[&quot;&lt;b&gt;Wire Layer&lt;/b&gt;&lt;br/&gt;(3 listeners)&quot;]
+    ROUTE[&quot;&lt;b&gt;Routing/SlotTable&lt;/b&gt;&lt;br/&gt;(I1, I2)&quot;]
+    COH[&quot;&lt;b&gt;Coherency Engine&lt;/b&gt;&lt;br/&gt;(write-through/back/…)&quot;]
+    ENG[&quot;&lt;b&gt;Per-Node Engine&lt;/b&gt;&lt;br/&gt;(rank 59, delegated —&lt;br/&gt;persistence bnd.)&quot;]
+    REPL[&quot;&lt;b&gt;Replication&lt;/b&gt;&lt;br/&gt;(async, lag-tracked)&quot;]
+    MIG[&quot;&lt;b&gt;Migration&lt;/b&gt;&lt;br/&gt;(4-phase, §18)&quot;]
+    WIRE --&gt; ROUTE --&gt; COH --&gt; ENG
+    REPL &lt;-- &quot;(concurrency bnd.)&quot; --&gt; MIG
+  end
+  subgraph CLUSTER[&quot;Cluster Layer — separate quorum&quot;]
+    GOS[&quot;&lt;b&gt;Gossip&lt;/b&gt; (rank 72,&lt;br/&gt;liveness only)&lt;br/&gt;SWIM + Lifeguard&quot;]
+    RAFT[&quot;&lt;b&gt;Raft Coordinator&lt;/b&gt;&lt;br/&gt;(rank 39,&lt;br/&gt;sole SlotTable writer, I1)&quot;]
+  end
+  subgraph OPS[&quot;Operability Layer (dcache-rebalancer / dashboard / admin)&quot;]
+    REB[&quot;&lt;b&gt;Rebalancer&lt;/b&gt;&lt;br/&gt;(deterministic)&quot;]
+    DASH[&quot;&lt;b&gt;Dashboard&lt;/b&gt;&lt;br/&gt;(JSON API)&quot;]
+    ADM[&quot;&lt;b&gt;Admin CLI&lt;/b&gt;&quot;]
+  end
+  CLIENT -- &quot;Memcached binary | RESP3 | gRPC&lt;br/&gt;(protocol boundary)&quot; --&gt; SHARD
+  SHARD -- &quot;gRPC, mTLS&lt;br/&gt;(trust boundary)&quot; --&gt; CLUSTER
+  CLUSTER -- &quot;gRPC (admin, rate-limited)&quot; --&gt; OPS
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef trust stroke-width:1.5px
+  classDef side stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  class CL side
+  class WIRE,ROUTE,COH,REPL,MIG rt
+  class ENG store
+  class GOS,REB,DASH,ADM ingest
+  class RAFT trust</pre><figcaption><ul class="diagram-legend"><li><span class="swatch side"></span>client process</li><li><span class="swatch rt"></span>data-plane node components</li><li><span class="swatch store"></span>per-node engine (persistence boundary)</li><li><span class="swatch ingest"></span>gossip and operability components</li><li><span class="swatch trust"></span>separate Raft quorum, sole SlotTable writer</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>+----------------------------------------------------------------+
+| Client Library (dcache-client)               [client process]  |
+|  hash ring | hot-key detector | single-flight | ASK/MOVED       |
++---------------------------+--------------------------------------+
+                            | Memcached binary | RESP3 | gRPC   (protocol boundary)
++---------------------------v--------------------------------------+
+| Shard Server (dcache-server)                  [data-plane node] |
+|  Wire Layer  --&gt; Routing/SlotTable --&gt; Coherency Engine          |
+|  (3 listeners)     (I1, I2)              (write-through/back/…)  |
+|                                                |                 |
+|                                                v                 |
+|                                   Per-Node Engine  (rank 59,     |
+|                                    delegated — persistence bnd.) |
+|  Replication &lt;----------------------------&gt; Migration           |
+|  (async, lag-tracked)      (concurrency bnd.) (4-phase, §18)     |
++---------------------------+--------------------------------------+
+                            | gRPC, mTLS         (trust boundary)
++---------------------------v--------------------------------------+
+| Cluster Layer                                 [separate quorum] |
+|  Gossip (rank 72, liveness only)  |  Raft Coordinator (rank 39,  |
+|   SWIM + Lifeguard                |   sole SlotTable writer, I1) |
++---------------------------+--------------------------------------+
+                            | gRPC (admin, rate-limited)
++---------------------------v--------------------------------------+
+| Operability Layer (dcache-rebalancer / dashboard / admin)        |
+|  Rebalancer (deterministic) | Dashboard (JSON API) | Admin CLI   |
++----------------------------------------------------------------+</code></pre></details>
+<p><strong>Client library.</strong> Owns the hash ring and the redirect-follower state machine; the only
+place a <code>MOVED</code> permanently updates routing state (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#inv-6">I6</a>). Runs inside the caller&#39;s process —
+no separate hop.</p>
+<p><strong>Wire layer.</strong> Three concurrent listeners (Memcached binary : 11211, RESP3 : 6379, gRPC :
+50051) sharing one key namespace; the magic byte / first frame token disambiguates the
+protocol per connection, never per node (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-5">P5</a>).</p>
+<p><strong>Routing / slot table.</strong> A read-mostly <code>SlotTable</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/design/#sec-11">§11</a>) behind an <code>ArcSwap</code>; the data path
+reads a local snapshot and never calls the coordinator inline (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-3">P3</a>). This is the
+concurrency boundary between the hot path and cluster control.</p>
+<p><strong>Coherency engine.</strong> Dispatches to one of five policies per namespace (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/build/#sec-20">§20</a>); the boundary
+between &quot;cache&quot; and &quot;cache in front of a backing store.&quot;</p>
+<p><strong>Per-node engine.</strong> Delegated to LRU-LFU-Cache (rank 59) behind the <code>Engine</code> trait (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/design/#sec-11">§11</a>);
+this is the persistence-adjacent boundary — the engine owns in-memory storage, the WAL
+(rank 69) owns durability when write-back is enabled.</p>
+<p><strong>Replication.</strong> Async, primary → N replicas, lag-tracked per replica; the data-plane&#39;s own
+internal consistency boundary, distinct from cluster-layer consensus.</p>
+<p><strong>Migration.</strong> The four-phase (Importing → DoubleWrite → Catchup → Cutover) state machine
+that moves slot ownership online; touches both the data plane (double-write) and the
+cluster layer (the <code>SlotMoved</code> commit).</p>
+<p><strong>Cluster layer.</strong> Gossip (liveness, eventually consistent) and the Raft coordinator
+(ownership, linearizable) are structurally separate processes on separate hosts — this is
+the project&#39;s central trust and authority boundary (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-cache/trade-offs/#adr-7">ADR-07</a>).</p>
+<p><strong>Operability layer.</strong> The rebalancer, dashboard, and admin CLI are the only sanctioned
+callers of the coordinator&#39;s <code>ProposeEvent</code> RPC (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/design/#sec-11">§11</a>); this is the admin trust boundary
+(<a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#sec-24">§24</a>, admin surface).</p>
+<p>Three properties recur throughout this document: the data path is one-way at steady state
+(client hashes → client routes → server serves → replicas tail); the cluster layer is
+strictly out-of-band of the data path; the wire layer is multi-protocol by construction,
+never a per-node configuration choice.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-memcached-binary-protocol-frame">Memcached binary protocol frame</h3>
+<p>24-byte fixed header, then extras / key / value:</p>
+<pre class="diagram"><code>0:     magic (0x80 request, 0x81 response)
+1:     opcode
+2–3:   key length (u16 BE)
+4:     extras length
+5:     data type (0x00 in this implementation)
+6–7:   vbucket id / status (u16 BE)
+8–11:  total body length (u32 BE)
+12–15: opaque (passthrough)
+16–23: CAS (u64 BE)</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Opcode</th>
+<th>Name</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0x00</td>
+<td>GET</td>
+<td></td>
+</tr>
+<tr>
+<td>0x01</td>
+<td>SET</td>
+<td>extras: flags(4) + expiry(4)</td>
+</tr>
+<tr>
+<td>0x02</td>
+<td>ADD</td>
+<td></td>
+</tr>
+<tr>
+<td>0x03</td>
+<td>REPLACE</td>
+<td></td>
+</tr>
+<tr>
+<td>0x04</td>
+<td>DELETE</td>
+<td></td>
+</tr>
+<tr>
+<td>0x07</td>
+<td>QUIT</td>
+<td></td>
+</tr>
+<tr>
+<td>0x08</td>
+<td>FLUSH</td>
+<td>namespace-scoped</td>
+</tr>
+<tr>
+<td>0x0b</td>
+<td>NOOP</td>
+<td></td>
+</tr>
+<tr>
+<td>0x0c</td>
+<td>VERSION</td>
+<td></td>
+</tr>
+<tr>
+<td>0x10</td>
+<td>STAT</td>
+<td>small subset; full STAT is <code>PhaseDeferred(&quot;§37&quot;)</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-resp3-type-prefixes">RESP3 type prefixes</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Prefix</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>+</code></td>
+<td>Simple string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>-</code></td>
+<td>Error</td>
+<td></td>
+</tr>
+<tr>
+<td><code>:</code></td>
+<td>Integer</td>
+<td></td>
+</tr>
+<tr>
+<td><code>$</code></td>
+<td>Bulk string</td>
+<td><code>$-1</code> = nil</td>
+</tr>
+<tr>
+<td><code>*</code></td>
+<td>Array</td>
+<td><code>*-1</code> = nil</td>
+</tr>
+<tr>
+<td><code>%</code></td>
+<td>Map</td>
+<td>new in RESP3</td>
+</tr>
+<tr>
+<td><code>~</code></td>
+<td>Set</td>
+<td>new in RESP3</td>
+</tr>
+<tr>
+<td><code>&gt;</code></td>
+<td>Push</td>
+<td>server-pushed, keyspace notifications</td>
+</tr>
+<tr>
+<td><code>=</code></td>
+<td>Verbatim string</td>
+<td></td>
+</tr>
+<tr>
+<td><code>,</code></td>
+<td>Double</td>
+<td></td>
+</tr>
+<tr>
+<td><code>#</code></td>
+<td>Boolean</td>
+<td></td>
+</tr>
+</tbody></table></div>
+<p><code>HELLO</code> negotiates the protocol version (default 2; RESP3 on <code>HELLO 3</code>) and carries <code>AUTH</code>.
+Commands in Phase 2: <code>GET</code>, <code>SET</code> (<code>EX</code>/<code>PX</code>/<code>XX</code>/<code>NX</code>/<code>KEEPTTL</code>), <code>DEL</code>, <code>EXISTS</code>, <code>INCR</code>,
+<code>DECR</code>, <code>PING</code>, <code>HELLO</code>, <code>AUTH</code>, <code>INFO</code> (subset), <code>DBSIZE</code>; <code>CLUSTER *</code> lands in <a class="cite" href="/system-design-blueprints/systems/distributed-cache/build/#sec-16">§16</a> Phase 4.</p>
+<h3 id="sec-8-slot-migration-state-transition-table">Slot-migration state-transition table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>Source reads</th>
+<th>Dest reads</th>
+<th>Source writes</th>
+<th>Dest writes</th>
+<th>Next phase</th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Importing</td>
+<td>serves</td>
+<td><code>ASK source</code> for slot keys</td>
+<td>serves</td>
+<td>accepted, stored locally</td>
+<td>DoubleWrite</td>
+<td>dest confirms import-ready</td>
+</tr>
+<tr>
+<td>DoubleWrite</td>
+<td>serves</td>
+<td>serves</td>
+<td>replicated to dest</td>
+<td>replicated to source</td>
+<td>Catchup</td>
+<td>bulk copy of existing keys completes</td>
+</tr>
+<tr>
+<td>Catchup</td>
+<td>brief read-only for slot</td>
+<td>serves</td>
+<td>blocked (drain window)</td>
+<td>serves</td>
+<td>Cutover</td>
+<td>in-flight writes drained</td>
+</tr>
+<tr>
+<td>Cutover</td>
+<td><code>MOVED dest</code></td>
+<td>serves, authoritative</td>
+<td>rejected</td>
+<td>serves</td>
+<td>(terminal)</td>
+<td>coordinator commits <code>SlotMoved</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-replication-record-layout">Replication record layout</h3>
+<p><code>seq (u64) | epoch (Epoch) | op (Set|Delete|Migrate) | timestamp | HMAC</code> — applied in strict
+<code>seq</code> order (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#inv-8">I8</a>); a corrupted or out-of-order record is rejected, never applied
+speculatively.</p>
+<h3 id="sec-8-worked-example-get-during-doublewrite">Worked example — GET during DoubleWrite</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend side: the client
+%% legend rt: destination node serves from local data
+%% legend ingest: source node reached via ASK
+  C([&quot;&lt;b&gt;client&lt;/b&gt;&quot;])
+  D[&quot;&lt;b&gt;node (dest)&lt;/b&gt;&lt;br/&gt;slot in DoubleWrite&quot;]
+  Q{&quot;key present locally&lt;br/&gt;(post bulk-copy)?&quot;}
+  S[&quot;&lt;b&gt;serve&lt;/b&gt;&quot;]
+  A[&quot;&lt;b&gt;ASK node (source)&lt;/b&gt;&quot;]
+  R[&quot;&lt;b&gt;client retries once&lt;/b&gt;&lt;br/&gt;against source with&lt;br/&gt;ASKING prefix&quot;]
+  C -- &quot;GET key&quot; --&gt; D
+  D --&gt; Q
+  Q -- &quot;yes&quot; --&gt; S
+  Q -- &quot;no&quot; --&gt; A
+  A --&gt; R
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef side stroke-width:1.5px
+  class C side
+  class D,S rt
+  class A,R ingest</pre><figcaption><ul class="diagram-legend"><li><span class="swatch side"></span>the client</li><li><span class="swatch rt"></span>destination node serves from local data</li><li><span class="swatch ingest"></span>source node reached via ASK</li></ul><p class="diagram-note">Drawn from the text diagram in “Worked example — GET during DoubleWrite”.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>client -&gt; node(dest): GET key            [slot in DoubleWrite]
+node(dest): key present locally (post bulk-copy)? yes -&gt; serve
+                                          no  -&gt; ASK node(source); client retries once
+                                                 against source with ASKING prefix</code></pre></details>
+<h3 id="sec-8-malformed-input-example">Malformed-input example</h3>
+<p>A Memcached frame whose declared total body length (bytes 8–11) does not equal
+<code>key_len + extras_len + value_len</code>: the codec rejects the frame, closes the connection, and
+increments <code>wire_malformed_frame_total</code> (T-1) — it never attempts a best-effort parse.</p>
+<h3 id="sec-8-failure-path-example">Failure-path example</h3>
+<p>A replica receives a replication record whose HMAC fails verification: the record is
+rejected (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#inv-3">I3</a> remain intact because nothing is applied), the replica requests a rebase,
+and the primary streams a fresh engine snapshot from <code>scan_slot</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#fm-4">FM-4</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-1">P1</a> — The client is the router.</strong> Routing logic lives in the client library, not a proxy. Tradeoff: the client library carries more logic than a thin proxy client would. Operational implication: topology is observable to the application (metrics, tracing attach to the caller&#39;s own process). Violating it (routing in a proxy) breaks <a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-1">P1</a>&#39;s whole premise — see <a class="cite" href="/system-design-blueprints/systems/distributed-cache/trade-offs/#sec-36">§36</a> Alt 1&#39;s rejection.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-2">P2</a> — Cluster topology is consensus-backed.</strong> Slot ownership, replica assignment, and the epoch live in the Raft log (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#inv-2">I2</a>). Tradeoff: a second quorum to operate. Violating it (deriving ownership from gossip) produces split-brain slot ownership (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/study/#sec-32">MM2</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-cache/trade-offs/#sec-36">§36</a> Alt 2).</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-3">P3</a> — The data path never blocks on the cluster path.</strong> The data path reads a local <code>SlotTable</code> snapshot; it never calls the coordinator inline. Tradeoff: topology updates are eventually — not immediately — visible to the data plane. Violating it collapses the p99 latency target (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-cache/numbers/#m-3">M3</a>) the instant a Raft round trip lands on the hot path.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-4">P4</a> — Migrations are online by construction.</strong> Exactly one node is authoritative for a slot at every instant; the migration window admits reads from both sides. Tradeoff: a more complex state machine (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/build/#sec-18">§18</a>) than stop-the-world migration. Violating it (skip the double-write window) reintroduces the maintenance-window outage this design exists to avoid.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-5">P5</a> — The wire surface is multi-protocol, simultaneously.</strong> Every node listens on Memcached binary, RESP3, and gRPC concurrently over one key namespace. Tradeoff: three codecs to maintain instead of one. Violating it (protocol-specific node pools) fragments the fleet and reintroduces the operational cost this design avoids (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/trade-offs/#adr-9">ADR-09</a>).</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-6">P6</a> — The per-node engine is pluggable, not bespoke.</strong> Eviction is delegated to the <code>Engine</code> trait (rank 59). Tradeoff: an extra trait-object indirection on every engine call. Violating it (forking the cluster code per eviction policy) makes TinyLFU/ARC/ S3-FIFO experiments require a cluster-code rewrite.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-7">P7</a> — No silent fallbacks.</strong> <code>MOVED</code> is a client bug (stale hash table); <code>ASK</code> is a migration in flight and must not be retained as authoritative (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#inv-6">I6</a>). Tradeoff: clients must implement the redirect state machine correctly. Violating it produces redirect storms (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#fm-2">FM-2</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-cache/study/#sec-32">MM3</a>).</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-8">P8</a> — Replication is async and lag-aware.</strong> The primary acks after local apply; reads with a freshness requirement specify <code>min_lag_ms</code>. Tradeoff: acknowledged writes can be lost on primary failure (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/trade-offs/#adr-8">ADR-08</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#fm-6">FM-6</a>). Violating it (silently promoting a lagging replica) serves stale reads as if they were fresh.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-9">P9</a> — Hot keys are a client concern first, server concern second.</strong> Detection, ephemeral caching, and coalescing happen client-side; shadow replicas (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/build/#sec-21">§21</a>) are the server-side escalation. Tradeoff: client library complexity. Violating it pushes all hot-key load onto a single shard primary with no absorption layer.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-10">P10</a> — Determinism is the default for the rebalancer.</strong> The rebalancer&#39;s plan is a pure function of (current topology, target topology, weights, seed). Tradeoff: less &quot;clever&quot; heuristic freedom. Violating it makes two operators running the same rebalance get different plans — unacceptable for change management.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-11">P11</a> — Slot count is a load-bearing constant, never parameterized at runtime.</strong> 16,384 is compiled in (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/trade-offs/#adr-4">ADR-04</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#inv-13">I13</a>). Tradeoff: changing it requires a new cluster, not an online operation. Violating it (making slot count configurable per cluster) breaks every slot-indexed structure&#39;s fixed-size assumptions (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/numbers/#sec-34">§34</a>).</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-12">P12</a> — Observability is a first-class deliverable, not an afterthought.</strong> Every phase ships metrics and traces before it ships a feature flag to disable them. Tradeoff: more upfront work per phase. Violating it means the first production incident is also the first time anyone looks at what telemetry exists.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-13">P13</a> — Fail closed on ambiguous authorization.</strong> An ACL check that cannot resolve (stale cache, unknown principal) denies rather than allows. Tradeoff: a transient ACL propagation delay can cause spurious denials. Violating it fails open, the worse security failure mode (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/reliability/#sec-24">§24</a>).</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/distributed-cache/architecture/#p-14">P14</a> — Backward compatibility is a wire-format contract, not a convention.</strong> Every wire/storage schema change is versioned and dual-read for one release (<a class="cite" href="/system-design-blueprints/systems/distributed-cache/blueprint/#sec-27">§27</a>). Tradeoff: slower schema iteration. Violating it breaks a rolling upgrade mid-fleet.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

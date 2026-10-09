@@ -1,0 +1,397 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>WebSocket Server from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="WebSocket Server from Scratch, hld: §3 overview + §8 domain model. Build a standards-conformant RFC 6455 WebSocket server in Rust with zero external WebSocket-protocol crates: the HTTP Upgrade handshake, the binary frame codec (parse + serialize)…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/networking-protocols/">Networking &amp; Protocols</a> </li><li> <a href="/system-design-blueprints/systems/websocket-server/">WebSocket Server from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:13"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/networking-protocols/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Networking &amp; Protocols</span></a> </p> <h1>WebSocket Server from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~9 weeks</li> <li>2,117 lines</li> <li>blueprint #81</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-ok" title="Every phase meets its definition of done">Build: all phases</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/websocket-server/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/websocket-server/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/websocket-server/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/websocket-server/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/websocket-server/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/websocket-server/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/websocket-server/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/websocket-server/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/websocket-server/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/websocket-server/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:WebSocket Server from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                        ┌───────────────────────────────────────────────┐
+                        │              TCP LISTENER (tokio)              │
+                        │        src/main.rs / src/bin/echo_server.rs    │
+                        └───────────────────┬─────────────────────────────┘
+                                            │ accept()
+                                            ▼
+                        ┌───────────────────────────────────────────────┐
+                        │   TLS TERMINATION (rustls, optional, §21)      │
+                        │              src/tls.rs                        │
+                        └───────────────────┬─────────────────────────────┘
+                                            │ plaintext byte stream
+                                            ▼
+                        ┌───────────────────────────────────────────────┐
+                        │  HANDSHAKE (HTTP/1.1 Upgrade, §13)             │
+                        │  src/handshake.rs — httparse + SHA-1 + base64  │
+                        └───────────────────┬─────────────────────────────┘
+                                            │ 101 Switching Protocols
+                                            ▼
+              ┌─────────────────────────────────────────────────────────────┐
+              │                CONNECTION (per socket, §18)                  │
+              │                    src/connection.rs                        │
+              │  ┌───────────────┐   ┌────────────────┐   ┌───────────────┐ │
+   read half →│  │ FRAME PARSER  │──▶│  REASSEMBLER   │──▶│ CONTROL/CLOSE │ │
+              │  │ src/frame/    │   │ src/reassembly │   │ src/control.rs│ │
+              │  │  parser.rs    │   │      .rs       │   │ src/close.rs  │ │
+              │  └───────────────┘   └────────────────┘   └───────┬───────┘ │
+              │          ▲                                        │         │
+              │          │ decompress (if negotiated)             │ app msg │
+              │  ┌───────┴────────┐                                │         │
+              │  │ EXTENSIONS      │                                ▼         │
+              │  │ src/extensions/ │                       ┌───────────────┐ │
+              │  │  deflate.rs     │                       │ APPLICATION   │ │
+              │  └───────┬────────┘                        │ (echo logic)  │ │
+              │          │ compress (if negotiated)        └───────┬───────┘ │
+              │  ┌───────▼────────┐   ┌────────────────┐          │         │
+   write half ←│  │ SERIALIZER     │◀──│ BACKPRESSURE   │◀─────────┘         │
+              │  │ src/frame/     │   │ QUEUE (bounded) │                    │
+              │  │  serializer.rs │   │ src/backpressure│                    │
+              │  └────────────────┘   │      .rs        │                    │
+              │                       └────────────────┘                    │
+              └─────────────────────────────────────────────────────────────┘
+                                            │ metrics/spans
+                                            ▼
+                        ┌───────────────────────────────────────────────┐
+                        │   METRICS / TRACING (src/metrics.rs, §24)      │
+                        └───────────────────────────────────────────────┘</code></pre>
+<p><strong>TCP Listener</strong> — accepts connections, spawns one <code>tokio</code> task per connection (<a class="cite" href="/system-design-blueprints/systems/websocket-server/trade-offs/#adr-10">ADR-10</a>);
+trust boundary starts here (all bytes past this point are attacker-controlled).
+<strong>TLS Termination</strong> — optional per-connection <code>rustls</code> handshake (<a class="cite" href="/system-design-blueprints/systems/websocket-server/build/#sec-21">§21</a>); if absent, the
+plaintext path runs directly into the Handshake box; concurrency boundary: TLS state is
+owned by the connection task, never shared.
+<strong>Handshake</strong> — parses the HTTP/1.1 Upgrade request with <code>httparse</code> (<a class="cite" href="/system-design-blueprints/systems/websocket-server/trade-offs/#adr-18">ADR-18</a>), computes
+<code>Sec-WebSocket-Accept</code> (RFC 6455 <a class="cite" href="/system-design-blueprints/systems/websocket-server/numbers/#sec-4-2">§4.2</a>.2), negotiates extensions (RFC 7692), and writes the
+101 response; after this box the socket is WebSocket-framed, never HTTP again.
+<strong>Frame Parser</strong> — a pull-based state machine (<a class="cite" href="/system-design-blueprints/systems/websocket-server/build/#sec-14">§14</a>) that turns a byte cursor into
+<code>FrameHeader</code> + payload slices; persistence boundary: none (in-memory only, bounded by
+<code>max_message_size</code>, <a class="cite" href="/system-design-blueprints/systems/websocket-server/reliability/#inv-9">I9</a>).
+<strong>Reassembler</strong> — accumulates fragmented Text/Binary messages (<a class="cite" href="/system-design-blueprints/systems/websocket-server/build/#sec-16">§16</a>); control frames bypass
+it entirely (<a class="cite" href="/system-design-blueprints/systems/websocket-server/reliability/#inv-8">I8</a>).
+<strong>Extensions</strong> — permessage-deflate (de)compression sits between the wire and the
+reassembler/serializer (<a class="cite" href="/system-design-blueprints/systems/websocket-server/build/#sec-20">§20</a>); RSV1 on the wire means &quot;compressed&quot; only when negotiated.
+<strong>Control/Close</strong> — Ping→Pong auto-reply, Pong bookkeeping, and the close handshake state
+machine (<a class="cite" href="/system-design-blueprints/systems/websocket-server/build/#sec-17">§17</a>); persistence boundary: close-code and reason are the only state that outlives
+the socket (into <code>metrics</code>).
+<strong>Application (echo)</strong> — the Phase-7 reference binary; the codec has no built-in echo logic,
+keeping the domain model transport-agnostic.
+<strong>Backpressure Queue</strong> — a single bounded <code>mpsc</code> per connection (<a class="cite" href="/system-design-blueprints/systems/websocket-server/trade-offs/#adr-11">ADR-11</a>/<a class="cite" href="/system-design-blueprints/systems/websocket-server/trade-offs/#adr-12">ADR-12</a>) enforcing
+<a class="cite" href="/system-design-blueprints/systems/websocket-server/reliability/#inv-11">I11</a>; the single writer task is the only thing allowed to touch the socket&#39;s write half.
+<strong>Metrics/Tracing</strong> — <code>tracing</code> spans per connection/frame (<a class="cite" href="/system-design-blueprints/systems/websocket-server/trade-offs/#adr-16">ADR-16</a>), exported per <a class="cite" href="/system-design-blueprints/systems/websocket-server/blueprint/#sec-24">§24</a>.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<p><strong>Wire format (RFC 6455 <a class="cite" href="/system-design-blueprints/systems/websocket-server/blueprint/#sec-5-2">§5.2</a>), bit layout of the frame header:</strong></p>
+<pre class="diagram"><code> 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-------+-+-------------+-------------------------------+
+|F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+|I|S|S|S|  (4)  |A|     (7)     |   (16/64 bits if len=126/127)  |
+|N|V|V|V|       |S|             |   (present iff indicated)      |
+| |1|2|3|       |K|             |                               |
++-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+|     Extended payload length continued, if payload len == 127  |
++ - - - - - - - - - - - - - - - +-------------------------------+
+|                     Masking-key (32 bits), if MASK set to 1    |
++-------------------------------+-------------------------------+
+|                    Payload Data (XOR&#39;d with masking key)       |
++------------------------------------------------------------- +</code></pre>
+<p><strong>Opcode table (RFC 6455 <a class="cite" href="/system-design-blueprints/systems/websocket-server/blueprint/#sec-5-2">§5.2</a>):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Value</th>
+<th>Name</th>
+<th>Fragmentable</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0x0</td>
+<td>Continuation</td>
+<td>n/a</td>
+<td>Only valid mid-message (<a class="cite" href="/system-design-blueprints/systems/websocket-server/reliability/#inv-5">I5</a>)</td>
+</tr>
+<tr>
+<td>0x1</td>
+<td>Text</td>
+<td>Yes</td>
+<td>Payload validated as UTF-8 on completion (<a class="cite" href="/system-design-blueprints/systems/websocket-server/reliability/#inv-12">I12</a>)</td>
+</tr>
+<tr>
+<td>0x2</td>
+<td>Binary</td>
+<td>Yes</td>
+<td>No content validation</td>
+</tr>
+<tr>
+<td>0x3–0x7</td>
+<td>Reserved (non-control)</td>
+<td>—</td>
+<td>Protocol error if received</td>
+</tr>
+<tr>
+<td>0x8</td>
+<td>Close</td>
+<td>No</td>
+<td>Payload: optional 2-byte code + UTF-8 reason (<a class="cite" href="/system-design-blueprints/systems/websocket-server/reliability/#inv-7">I7</a>)</td>
+</tr>
+<tr>
+<td>0x9</td>
+<td>Ping</td>
+<td>No</td>
+<td>Auto-replied with Pong (<a class="cite" href="/system-design-blueprints/systems/websocket-server/reliability/#inv-14">I14</a>)</td>
+</tr>
+<tr>
+<td>0xA</td>
+<td>Pong</td>
+<td>No</td>
+<td>Logged, not replied</td>
+</tr>
+<tr>
+<td>0xB–0xF</td>
+<td>Reserved (control)</td>
+<td>—</td>
+<td>Protocol error if received</td>
+</tr>
+</tbody></table></div>
+<p><strong>Payload-length encoding table:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>7-bit field value</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0–125</td>
+<td>Actual payload length, no extension</td>
+</tr>
+<tr>
+<td>126</td>
+<td>Next 2 bytes = unsigned 16-bit big-endian length</td>
+</tr>
+<tr>
+<td>127</td>
+<td>Next 8 bytes = unsigned 64-bit big-endian length (MSB must be 0 per RFC 6455 <a class="cite" href="/system-design-blueprints/systems/websocket-server/blueprint/#sec-5-2">§5.2</a>)</td>
+</tr>
+</tbody></table></div>
+<p><strong>State-transition / handshake sequence table (client C, server S):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Action</th>
+<th>Precondition</th>
+<th>Postcondition</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>C</td>
+<td>TCP connect</td>
+<td>—</td>
+<td>Socket open</td>
+</tr>
+<tr>
+<td>2</td>
+<td>C</td>
+<td>Send HTTP/1.1 GET with <code>Upgrade: websocket</code>, <code>Sec-WebSocket-Key: &lt;b64 16B&gt;</code>, <code>Sec-WebSocket-Version: 13</code></td>
+<td>—</td>
+<td>Server buffer has request bytes</td>
+</tr>
+<tr>
+<td>3</td>
+<td>S</td>
+<td>Parse request (<code>httparse</code>), validate headers</td>
+<td>Full header block received</td>
+<td><code>HandshakeRequest</code> built or <code>WsError::InvalidHandshake</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>S</td>
+<td>Compute <code>Sec-WebSocket-Accept</code> = base64(SHA-1(key + <code>258EAFA5-E914-47DA-95CA-C5AB0DC85B11</code>))</td>
+<td>Step 3 succeeded</td>
+<td>Accept value ready (<a class="cite" href="/system-design-blueprints/systems/websocket-server/reliability/#inv-1">I1</a>)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>S</td>
+<td>Send <code>101 Switching Protocols</code> + accept header</td>
+<td>Step 4 done</td>
+<td>Connection state → <code>Open</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>C/S</td>
+<td>Exchange WebSocket frames</td>
+<td>State = <code>Open</code></td>
+<td>Frames parsed/serialized per <a class="cite" href="/system-design-blueprints/systems/websocket-server/build/#sec-14">§14</a>/<a class="cite" href="/system-design-blueprints/systems/websocket-server/build/#sec-15">§15</a></td>
+</tr>
+<tr>
+<td>7</td>
+<td>Either</td>
+<td>Send Close frame</td>
+<td>Any time</td>
+<td>State → <code>ClosingLocal</code> or <code>ClosingRemote</code></td>
+</tr>
+<tr>
+<td>8</td>
+<td>Peer</td>
+<td>Echo Close frame</td>
+<td>Received Close</td>
+<td>State → <code>Closed</code>, TCP shutdown</td>
+</tr>
+</tbody></table></div>
+<p><strong>Worked example (client masked Text frame &quot;Hi&quot;, masking key <code>0x37FA213D</code>):</strong></p>
+<p>Unmasked payload <code>Hi</code> = <code>0x48 0x69</code>. XOR with repeating key bytes <code>37 FA 21 3D</code>:
+<code>0x48^0x37=0x7F</code>, <code>0x69^0xFA=0x93</code>. Wire bytes: <code>81 82 37 FA 21 3D 7F 93</code> — <code>81</code>=FIN=1,
+opcode=0x1 (Text); <code>82</code>=MASK=1, len=2; then 4-byte key, then 2 masked payload bytes.</p>
+<p><strong>Malformed-input example:</strong> wire bytes <code>81 FE 00 7E ...</code> — MASK bit unset (<code>FE</code> = <code>1111 1110</code>,
+top bit of second byte is MASK; here it&#39;s the payload-length top bit region, illustrating a
+client frame sent with MASK=0) → RFC 6455 <a class="cite" href="/system-design-blueprints/systems/websocket-server/blueprint/#sec-5-1">§5.1</a> violation → <code>WsError::UnmaskedClientFrame</code> →
+<a class="cite" href="/system-design-blueprints/systems/websocket-server/reliability/#inv-2">I2</a> detection fires → Close 1002 sent, connection dropped, no payload buffered (P4).</p>
+<p><strong>Failure-path example:</strong> server receives a complete Text message whose reassembled bytes
+are <code>0x48 0xFF 0xFE</code> (invalid UTF-8 continuation bytes) → <a class="cite" href="/system-design-blueprints/systems/websocket-server/reliability/#inv-12">I12</a> fails at <code>finalize()</code> →
+<code>WsError::InvalidUtf8</code> → close.rs maps to code 1007 → server sends Close(1007, &quot;invalid
+UTF-8&quot;) → waits ≤5s (<a class="cite" href="/system-design-blueprints/systems/websocket-server/numbers/#sec-4">§4</a>) for peer&#39;s Close echo → TCP shutdown regardless (P10).</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

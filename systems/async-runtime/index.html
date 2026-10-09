@@ -1,0 +1,281 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Async Runtime / Executor · Engineering Blueprints</title><meta name="description" content="Async Runtime / Executor, plain words. Implement a Tokio-like multi-threaded async runtime and task executor, in Rust, that schedules Futures cooperatively via poll/Waker, spawns tasks onto a work-stealing scheduler, integrates an…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <span aria-current="page">Async Runtime / Executor</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Async Runtime / Executor</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux</li> <li>12 phases</li> <li>~23 weeks</li> <li>1,805 lines</li> <li>blueprint #129</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/async-runtime/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/async-runtime/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/async-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/async-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/async-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/async-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/async-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/async-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/async-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/async-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Async Runtime / Executor">  <p class="note warn">
+The <strong>plain-words page for this system has not been written yet</strong>. Below is the architecture overview taken
+        straight from the blueprint; the other tabs are generated from the blueprint too.
+</p> <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌───────────────────────────────────────────────────────────────────────┐
+│ User code: async fn, .await, spawn, TaskGroup, select!, JoinSet       │
+└───────────────────────────────┬───────────────────────────────────────┘
+                                │  Runtime::block_on / spawn / spawn_blocking
+┌───────────────────────────────▼───────────────────────────────────────┐
+│ Task layer (rt-task, §13)                                             │
+│  RawTask{Header, F: Future, Output-slot} — one alloc per spawn        │
+│  Header: AtomicU32{state,notified,refcount} — Waker vtable points here│
+└──────────┬───────────────────────────────────────────────┬────────────┘
+          │ schedule()                                    │ spawn_blocking
+┌──────────▼─────────────────────────────┐   ┌─────────────▼────────────┐
+│ Work-stealing scheduler (rt-executor-mt│   │ Blocking pool (rt-blocking│
+│ , §15)                                 │   │ , §21)                    │
+│  Worker0..N: Chase-Lev deque + LIFO slot│   │  Bounded thread pool,     │
+│  Global injector (bounded MPMC ring)   │   │  spawn-on-demand up to cap│
+│  Parker: futex/parking_lot park/unpark │   └───────────────────────────┘
+└──────────┬──────────────────────────────┘
+          │ poll(cx) -&gt; Poll&lt;T&gt;                     ┌──────────────────┐
+┌──────────▼──────────────────────────────┐         │ Timer wheel      │
+│ Cooperative budget (rt-budget, §16)     │◄────────┤ (rt-time, §18)   │
+│  Per-task poll counter; yields at 0     │  register│ 8-level HHWT    │
+└──────────┬──────────────────────────────┘  timer   └──────────────────┘
+          │ Pending ⇒ awaits reactor / sync primitive
+┌──────────▼──────────────────────────────┐   ┌───────────────────────┐
+│ Reactor (rt-reactor, §22)                │   │ Sync + channels        │
+│  Reactor trait: register/deregister/drive│   │ (rt-sync, rt-chan,     │
+│  epoll (Linux) / kqueue (BSD) / io_uring │   │  §17/§19)              │
+│  (opt-in) backends                       │   │ Mutex/RwLock/Semaphore│
+└──────────┬──────────────────────────────┘   │ mpsc/oneshot/watch/bc │
+          │ readiness event -&gt; Waker::wake   └───────────────────────┘
+┌──────────▼──────────────────────────────────────────────────────────┐
+│ Introspection (rt-trace, §23): tokio-console wire protocol, per-task │
+│ spans (poll count, busy/idle time), runtime stats (queue depth)     │
+└───────────────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>Task layer.</strong> The task is the unit of accounting, cancellation, scheduling, and tracing (<a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-1">P1</a>). Every other subsystem operates on a type-erased <code>Header</code> pointer, never on the concrete <code>Future</code>. <strong>Scheduler.</strong> Each worker owns one Chase-Lev deque plus a single-slot LIFO fast path (<a class="cite" href="/system-design-blueprints/systems/async-runtime/trade-offs/#adr-4">ADR-04</a>/<a class="cite" href="/system-design-blueprints/systems/async-runtime/trade-offs/#adr-19">ADR-19</a>); the global injector is the only cross-thread spawn boundary, sized to bound backpressure (<a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#inv-3">I3</a>). <strong>Budget.</strong> Every <code>poll</code> call is metered; a task that exhausts its budget is re-queued rather than run to a natural yield point, bounding any one task&#39;s monopolization of a worker (<a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-5">P5</a>, <a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#inv-5">I5</a>). <strong>Timer wheel.</strong> A hierarchical wheel (Varghese &amp; Lauck) gives O(1) insert/cancel independent of pending-timer count (<a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-9">P9</a>). <strong>Reactor.</strong> A trait boundary, not an embedded dependency (<a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-10">P10</a>, <a class="cite" href="/system-design-blueprints/systems/async-runtime/trade-offs/#adr-9">ADR-09</a>); production backends are epoll/kqueue/io_uring, and a test reactor implements the same trait for deterministic unit tests. <strong>Sync/channels.</strong> Wait-list-based primitives built on the same <code>Waker</code> contract as the task layer — no primitive bypasses the executor&#39;s wakeup path. <strong>Introspection.</strong> A side-channel that observes but never mutates scheduling decisions (<a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#inv-12">I12</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Future / Poll / Waker state machine</h3>
+<pre class="diagram"><code>enum Poll&lt;T&gt; { Ready(T), Pending }
+
+trait Future {
+    type Output;
+    fn poll(self: Pin&lt;&amp;mut Self&gt;, cx: &amp;mut Context&lt;&#39;_&gt;) -&gt; Poll&lt;Self::Output&gt;;
+}</code></pre>
+<p>A <code>Future</code> is a compiler-generated (for <code>async fn</code>) or hand-written state machine; <code>poll</code> advances it exactly one step and either returns <code>Ready(T)</code> (terminal) or <code>Pending</code> (suspended, having registered <code>cx.waker()</code> with whatever it is waiting on). The <code>Waker</code> is the callback contract: whoever holds it after a <code>Pending</code> return <strong>must</strong> call <code>wake()</code> exactly when the future can make further progress, and the executor must re-poll only after such a call (never spuriously, though spurious wakes are tolerated — a wasted poll, not a correctness bug). <code>Pin&lt;&amp;mut Self&gt;</code> prevents the future&#39;s address from moving between polls, which is required because <code>async fn</code> desugaring can produce self-referential structs (a local borrowed across an <code>.await</code> point) — moving such a struct invalidates the internal reference (Turon; &quot;Pin and suffering&quot;, <a class="cite" href="/system-design-blueprints/systems/async-runtime/study/#sec-5">§5</a>).</p>
+<h3 id="sec-8-2">8.2 Task state-transition table (canonical; mirrors <a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#inv-1">I1</a>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>To</th>
+<th>Trigger</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>—</td>
+<td>Idle</td>
+<td><code>spawn()</code> allocates <code>RawTask</code>, returns <code>JoinHandle</code></td>
+<td>initial state</td>
+</tr>
+<tr>
+<td>Idle</td>
+<td>Scheduled</td>
+<td><code>schedule()</code> called (by spawn or by a wake)</td>
+<td>pushed onto a worker deque or the injector</td>
+</tr>
+<tr>
+<td>Scheduled</td>
+<td>Running</td>
+<td>worker dequeues and begins <code>poll</code></td>
+<td>exactly one worker at a time (<a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#inv-2">I2</a>)</td>
+</tr>
+<tr>
+<td>Running</td>
+<td>Idle</td>
+<td><code>poll</code> returns <code>Pending</code>, no wake arrived during the poll</td>
+<td>task parks until woken</td>
+</tr>
+<tr>
+<td>Running</td>
+<td>Scheduled</td>
+<td><code>poll</code> returns <code>Pending</code>, but a wake arrived <em>during</em> the poll (notified bit set)</td>
+<td>re-queued immediately, no park</td>
+</tr>
+<tr>
+<td>Running</td>
+<td>Complete</td>
+<td><code>poll</code> returns <code>Ready(T)</code></td>
+<td>output stored in the output slot</td>
+</tr>
+<tr>
+<td>Complete</td>
+<td>Joined</td>
+<td><code>JoinHandle::poll</code> observes <code>Complete</code>, reads output</td>
+<td>terminal</td>
+</tr>
+<tr>
+<td>any</td>
+<td>Cancelled</td>
+<td><code>JoinHandle::drop</code> or <code>AbortHandle::abort()</code></td>
+<td>observed cooperatively at the task&#39;s <em>next</em> poll (<a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-3">P3</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Worked example — ping-pong wakeup</h3>
+<p>Two tasks A and B each hold a <code>oneshot</code>-like slot referencing the other. A&#39;s first poll registers its <code>Waker</code> and returns <code>Pending</code>; the scheduler parks A. B&#39;s first poll writes to A&#39;s slot and calls <code>A_waker.wake()</code>; this CASes A&#39;s header Idle→Scheduled and pushes A onto B&#39;s worker&#39;s deque (<a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-6">P6</a>, local LIFO). The worker&#39;s next dequeue pops A (LIFO — cache-hot), polls it; A observes the write, returns <code>Ready</code>. Total round trip: 2 polls, 1 wake, 0 heap allocations (<a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#inv-4">I4</a>), 1 deque push/pop. This is the <code>bench_yield</code> fixture&#39;s steady-state path (<a class="cite" href="/system-design-blueprints/systems/async-runtime/numbers/#sec-30">§30</a>, <a class="cite" href="/system-design-blueprints/systems/async-runtime/numbers/#m-6">M6</a>).</p>
+<h3 id="sec-8-4">8.4 Malformed-input / misuse example</h3>
+<p>A future whose <code>poll</code> returns <code>Pending</code> <strong>without</strong> registering any waker (a hand-written bug, not a compiler-generated one) causes the task to park with no one who will ever call <code>wake()</code> — a permanent stall indistinguishable, from the scheduler&#39;s view, from legitimate long-idle I/O wait. The conformance fixture <code>waker/no-register-pending.json</code> (<a class="cite" href="/system-design-blueprints/systems/async-runtime/blueprint/#sec-13-5">§13.5</a>) constructs exactly this future and asserts the task is observably &quot;parked forever&quot; (poll count frozen, no panic, no crash) — the runtime cannot detect this class (<a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#inv-5">I5</a>&#39;s budget only bounds <em>running</em> time, not <em>parked</em> time) and the pitfall is documented, not silently corrected (<a class="cite" href="/system-design-blueprints/systems/async-runtime/blueprint/#sec-13-6">§13.6</a>).</p>
+<h3 id="sec-8-5">8.5 Failure-path example — panic during poll</h3>
+<p>A task&#39;s future panics inside <code>poll</code> (e.g., an <code>unwrap()</code> on a <code>None</code>). The worker&#39;s poll call site wraps every <code>poll</code> in <code>catch_unwind</code> (<a class="cite" href="/system-design-blueprints/systems/async-runtime/trade-offs/#adr-24">ADR-24</a>-adjacent hygiene); on catch, the task transitions Running→Complete with the output slot holding an error marker instead of <code>T</code>; the <code>JoinHandle::poll</code> observes this and returns <code>Err(JoinError::Panicked(payload))</code> instead of <code>Ok(T)</code>. The panic does not propagate to the worker thread (which would poison the whole scheduler) — this is the single most load-bearing failure-isolation property of the executor (<a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#fm-3">FM-3</a>, <a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#sec-25">§25</a>).</p>
+<h3 id="sec-8-6">8.6 Work-stealing scheduler model</h3>
+<p>Each worker <code>W_i</code> owns a Chase-Lev deque (top = steal end, bottom = owner end) plus a one-slot LIFO fast-path cache. Owner operations (<code>push_bottom</code>, <code>pop_bottom</code>) are wait-free in the uncontended case; a remote <code>steal</code> CASes the top index. State exposed per worker: <code>{local_queue_len, lifo_slot_occupied, parked: bool}</code>. The global injector is a bounded MPMC ring (Vyukov) that every worker drains when its local queue and LIFO slot are both empty, on a periodic check (every 60 local-loop iterations) to bound cross-worker spawn latency without per-iteration injector-check overhead dominating (<a class="cite" href="/system-design-blueprints/systems/async-runtime/blueprint/#sec-15-3">§15.3</a>).</p>
+<pre class="diagram"><code>Worker loop (state names only, no control flow bodies):
+  Running-Local  -&gt; pop LIFO slot or deque bottom -&gt; poll
+  Local-Empty    -&gt; drain N items from global injector
+  Injector-Empty -&gt; pick random remote worker -&gt; attempt steal (half of remote&#39;s deque)
+  Steal-Failed   -&gt; retry another remote, bounded attempts
+  All-Empty      -&gt; park (double-check injector + steal targets first, I11)</code></pre>
+<h3 id="sec-8-7">8.7 Timer wheel model</h3>
+<p>An 8-level hierarchical wheel, 64 slots/level, level <code>k</code>&#39;s slot width = <code>64^k</code> ms (level 0 = 1 ms, level 7 ≈ 50 years — see <a class="cite" href="/system-design-blueprints/systems/async-runtime/build/#sec-18">§18</a> derivation). Insert computes <code>(deadline - now)</code>, picks the level from the leading set bit, and links the entry into that level&#39;s slot&#39;s intrusive doubly-linked list — O(1). Cancel unlinks via the entry&#39;s own pointers — O(1), no search. A tick advances the level-0 cursor by one slot (1 ms); every 64 ticks the level-1 cursor advances one slot and that slot&#39;s entries are <em>rotated</em> down into level-0 slots based on their now-precisely-known remaining time; the cascade continues up the levels only as often as each level&#39;s cursor wraps.</p>
+<h3 id="sec-8-8">8.8 Reactor model (epoll / kqueue / io_uring)</h3>
+<pre class="diagram"><code>trait Reactor {
+    fn register(&amp;self, source: RawFd, interest: Interest, waker: Waker) -&gt; SourceToken;
+    fn deregister(&amp;self, token: SourceToken);
+    fn drive(&amp;self, timeout: Option&lt;Duration&gt;) -&gt; usize; // events dispatched
+}</code></pre>
+<p><code>epoll</code> (Linux) and <code>kqueue</code> (BSD/macOS) are <strong>readiness-based</strong>: <code>drive</code> blocks in <code>epoll_wait</code>/<code>kevent</code> up to <code>timeout</code>, and for each ready fd calls the registered <code>Waker</code>. <code>io_uring</code> (opt-in Linux) is <strong>completion-based</strong>: operations are submitted via an SQE and completion is polled from a CQE — <code>drive</code> here reaps completions rather than readiness notifications, and <code>register</code> maps to submitting an operation rather than watching a descriptor (Stevens&#39;s readiness/completion distinction, <a class="cite" href="/system-design-blueprints/systems/async-runtime/study/#sec-5">§5</a>). Both models converge on the same trait boundary because both terminate in &quot;call this <code>Waker</code>&quot; — the divergence is entirely inside <code>drive</code>&#39;s implementation, invisible to the task layer (<a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-10">P10</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-1">P1</a> — The task is the unit of accounting.</strong> Every poll, wake, spawn, and drop is tracked per task (<code>TaskId</code>); scheduling, cancellation, and tracing all key off the same <code>Header</code>. Tradeoff: extra bookkeeping per task vs. a scheduler that cannot answer &quot;which task is stuck.&quot; Violating it: metrics and scheduling drift apart, and <code>rt-trace</code> (<a class="cite" href="/system-design-blueprints/systems/async-runtime/build/#sec-23">§23</a>) cannot attribute stalls.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-2">P2</a> — Wakers are allocation-free reference-counted handles.</strong> The <code>RawWaker</code> vtable (<code>clone</code>/<code>wake</code>/<code>wake_by_ref</code>/<code>drop</code>) operates on a pointer-pair into the task&#39;s <code>Header</code>; no heap allocation occurs in the wake path. Tradeoff: the header must be <code>#[repr(C)]</code> and manually reference-counted (<code>unsafe</code>). Violating it: a hot I/O loop&#39;s steady-state throughput collapses under allocator contention.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-3">P3</a> — Drop is cancellation.</strong> Dropping a <code>JoinHandle</code> (or a <code>TaskGroup</code>/<code>Scope</code> going out of scope) signals cancellation; there is no separate <code>.cancel()</code> method. Tradeoff: cancellation is always cooperative and observed only at the next poll — never instantaneous. Violating it (adding a second cancel path) creates two sources of truth for &quot;is this task alive.&quot;</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-4">P4</a> — Cooperative scheduling is a contract, not a mechanism.</strong> A future that never returns <code>Poll::Pending</code> is an application bug; the runtime detects (budget, <a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-5">P5</a>) but does not correct it (no preemption, <a class="cite" href="/system-design-blueprints/systems/async-runtime/trade-offs/#adr-6">ADR-06</a>). Violating this expectation (assuming the runtime preempts) causes silent starvation of every other task on that worker.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-5">P5</a> — Fairness is budget-based, not priority-based.</strong> Every task gets a fixed poll budget per schedule quantum (<a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#inv-5">I5</a>); exhausting it yields control regardless of task &quot;importance.&quot; Tradeoff: a latency-critical task with a long single poll still waits behind budget exhaustion elsewhere. Violating it (skipping budget checks) reintroduces unbounded monopolization.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-6">P6</a> — Work-stealing: LIFO-local, FIFO-remote.</strong> Each worker pushes/pops its own deque LIFO (recency = cache-hot); a remote stealer takes FIFO from the opposite end (steals the coldest, least-contended half). Violating the asymmetry (e.g., stealing LIFO) causes stealers to contend with the owner on the same hot end.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-7">P7</a> — Structured concurrency is the default fan-out.</strong> <code>TaskGroup</code>/<code>Scope</code> own their children&#39;s lifetime; the parent cannot return until every child is joined or cancelled (<a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-3">P3</a>). Tradeoff: a parent&#39;s return is blocking on cancellation acknowledgement. Violating it (detached spawn as default) is the &quot;spawn and forget&quot; leak class.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-8">P8</a> — Backpressure is bounded by default.</strong> The default <code>mpsc</code> channel and the injector queue are capacity-bounded (<a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#inv-3">I3</a>); unbounded variants are explicitly opt-in and separately named. Violating it silently trades a bounded backlog for unbounded memory growth.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-9">P9</a> — Time is a wheel, not a heap.</strong> The hierarchical timer wheel gives O(1) insert/cancel independent of pending-timer count; a binary-heap priority queue is O(log n) and rejected (<a class="cite" href="/system-design-blueprints/systems/async-runtime/trade-offs/#adr-5">ADR-05</a>). Violating it at scale (&gt;1M pending timers) degrades tick latency super-linearly.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-10">P10</a> — The reactor is an injected trait, never an embedded dependency.</strong> <code>rt-executor-mt</code> imports <code>Reactor</code>, never <code>epoll</code>/<code>kqueue</code> directly; production and test backends are equally valid implementations. Violating it couples the scheduler to one OS&#39;s I/O model and makes deterministic testing impossible.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-11">P11</a> — No hidden global state.</strong> A <code>Runtime</code> is a value; multiple runtimes coexist in one process; the only process-global state is the (per-runtime) injector, which is itself owned by the <code>Runtime</code> value, not a <code>static</code>. Violating it (a <code>static</code> scheduler) breaks multi-runtime embedding and testing isolation.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-12">P12</a> — Determinism is a first-class test mode, not the default.</strong> <code>Runtime::deterministic_test()</code> yields a single-threaded, fixed-poll-order executor for reproducible test failures; the production default is non-deterministic multi-thread scheduling for throughput. Violating it (no deterministic mode) makes flaky concurrency bugs unreproducible.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-13">P13</a> — Send/Sync are earned, not assumed.</strong> <code>Runtime</code> is <code>Send</code> but not <code>Sync</code> (internal mutability the design does not want locked); <code>JoinHandle&lt;T&gt;</code> is <code>Send + Sync</code> only when <code>T: Send</code>. Violating it (blanket unsafe impls) reintroduces data races the type system exists to prevent.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-14">P14</a> — Every public panic path and error is typed and documented.</strong> <code>JoinError</code> distinguishes <code>Cancelled</code> from <code>Panicked(Box&lt;dyn Any + Send&gt;)</code>; no public API silently swallows a panic. Violating it hides application bugs behind runtime &quot;flakiness.&quot;</li><li id="p-15"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-15">P15</a> — Observability never mutates.</strong> <code>rt-trace</code> (<a class="cite" href="/system-design-blueprints/systems/async-runtime/build/#sec-23">§23</a>) reads scheduling state via relaxed loads only, never CAS (<a class="cite" href="/system-design-blueprints/systems/async-runtime/reliability/#inv-12">I12</a>); a trace crate that &quot;helps&quot; by synchronizing for a cleaner read introduces the exact side-channel bug this principle exists to forbid. Tradeoff: the exported view can be momentarily stale by one CAS window. Violating it turns a passive observer into an accidental scheduling participant.</li><li id="p-16"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-16">P16</a> — A dependency is either wrapped or it is load-bearing, never both silently.</strong> <code>libc</code>/<code>io-uring</code> syscall bindings are wrapped behind <code>Reactor</code> (<a class="cite" href="/system-design-blueprints/systems/async-runtime/trade-offs/#adr-9">ADR-09</a>, <a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-10">P10</a>); nothing outside <code>rt-reactor</code> calls them directly. Tradeoff: one extra trait-dispatch indirection per I/O op. Violating it (a convenience direct call from <code>rt-executor-mt</code>) reintroduces the OS-coupling <a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-10">P10</a> exists to prevent.</li><li id="p-17"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-17">P17</a> — Telemetry cardinality is bounded by design, not by convention.</strong> Per-task metrics are aggregated by <code>TaskId</code> bucket before export (<a class="cite" href="/system-design-blueprints/systems/async-runtime/trade-offs/#adr-30">ADR-30</a>) rather than emitting one label series per raw <code>TaskId</code>. Tradeoff: individual-task metric resolution is bucketed, not exact. Violating it lets a high-spawn-rate workload silently produce unbounded label cardinality in the metrics backend.</li><li id="p-18"><strong><a class="cite" href="/system-design-blueprints/systems/async-runtime/architecture/#p-18">P18</a> — A version is a promise about call sites, not just a number.</strong> A MINOR bump never requires a call-site change (<a class="cite" href="/system-design-blueprints/systems/async-runtime/blueprint/#sec-27">§27</a>); only a MAJOR bump may. Tradeoff: some internal simplifications (e.g., <code>Header</code>&#39;s bit-packing) must stay flexible enough to never leak into the public contract. Violating it breaks every consumer&#39;s trust in SemVer as a safe-upgrade signal.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

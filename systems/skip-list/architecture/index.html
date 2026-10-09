@@ -1,0 +1,563 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Skip List — Architecture · Engineering Blueprints</title><meta name="description" content="Skip List, hld: §3 overview + §8 domain model. Build a from-scratch probabilistic ordered-map library in Rust: a classic sequential skip list, a deterministic (1-2-3) variant, an indexable (order-statistics) variant, and a lock-free concurrent…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/data-structures-algorithms/">Data Structures &amp; Algorithms</a> </li><li> <a href="/system-design-blueprints/systems/skip-list/">Skip List</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:353"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/data-structures-algorithms/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Data Structures &amp; Algorithms</span></a> </p> <h1>Skip List</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~8 weeks</li> <li>3,908 lines</li> <li>blueprint #404</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-ok" title="Every phase meets its definition of done">Build: all phases</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/skip-list/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/skip-list/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/skip-list/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/skip-list/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/skip-list/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/skip-list/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/skip-list/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/skip-list/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/skip-list/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/skip-list/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Skip List — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Component Diagram</h3>
+<pre class="diagram"><code>Application (sklist CLI / library user)
+        |  get / insert / remove / range / rank / select
+        v
+skl-core : OrderedMap trait  +  LevelGenerator (geometric, p)  +  Rng  +  Comparator
+        |                              |                                  |
+        v                              v                                  v
+skl-list (sequential)          skl-variants                       skl-concurrent (lock-free)
+  Node{key,val,forward[]}        DetSkipList (1-2-3, worst-case)     ConcurrentSkipList
+  head sentinel, levels          IndexableSkipList (span/rank/       MarkedPtr (logical delete bit)
+  search via update[]              select, order statistics)         CAS insert + helping unlink
+  insert/remove/range            |                                   find() snips marked nodes
+        |                        |                                   Ebr (epoch reclamation)
+        +------------------------+-----------------------------------+
+                                 v
+skl-bench : height distribution + expected O(log n) + concurrent scaling + loom linearizability</code></pre>
+<h3 id="sec-3-2">3.2 Trust and Ownership Boundaries</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Boundary</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Key/value trust</strong></td>
+<td>Caller-supplied; <code>K: Ord</code> is the only contract; no validation beyond <code>Ord</code></td>
+</tr>
+<tr>
+<td><strong>Sequential concurrency</strong></td>
+<td><code>SkipList</code> / <code>DetSkipList</code> / <code>IndexableSkipList</code> are <code>!Send + !Sync</code>; single-threaded only</td>
+</tr>
+<tr>
+<td><strong>Lock-free concurrency</strong></td>
+<td><code>ConcurrentSkipList&lt;K,V&gt;</code> is <code>Send + Sync where K: Send+Sync, V: Send+Sync</code>; linearizability is the correctness contract</td>
+</tr>
+<tr>
+<td><strong>Linearization points</strong></td>
+<td>Insert: level-0 CAS link succeeds. Delete: first mark on top-level pointer succeeds. Get: load of level-0 pointer (marked or not).</td>
+</tr>
+<tr>
+<td><strong>Memory management</strong></td>
+<td>Sequential list: <code>Box::from_raw</code> on drop. Concurrent list: EBR retire list; freed only after epoch advance past all referencing threads.</td>
+</tr>
+<tr>
+<td><strong>No persistence</strong></td>
+<td>Zero FDs opened; no <code>fsync</code>; no WAL; crash = data loss (by design).</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-3-3">3.3 Component Responsibilities</h3>
+<p><strong>skl-core</strong> — shared vocabulary; zero data structures, only traits + tiny types.</p>
+<ul>
+<li><code>OrderedMap&lt;K,V&gt;</code> trait: <code>get / insert / remove / range / iter</code>; all variants implement it.</li>
+<li><code>LevelGenerator</code>: geometric distribution with <code>p_inv</code> (e.g. 2 → p=1/2, 4 → p=1/4); <code>random_level()</code> flips until fail or <code>max_level</code>; <code>E[height] = 1/(1−p)</code>.</li>
+<li><code>Rng(u64)</code>: xorshift / wyrand; <code>no_std</code>; seeded per-thread; &lt;5 ns per call.</li>
+<li><code>Comparator</code>: newtype over key comparison; supports reverse and custom orderings.</li>
+<li><code>SklError { Empty }</code>: thin error enum; future variants behind feature flags.</li>
+<li>Invariant: no heap allocation; no <code>unsafe</code>.</li>
+</ul>
+<p><strong>skl-list — sequential SkipList</strong> — the canonical Pugh structure.</p>
+<ul>
+<li><code>Node&lt;K,V&gt;</code>: <code>key</code>, <code>value</code>, <code>forward: Vec&lt;*mut Node&lt;K,V&gt;&gt;</code>; <code>forward[0]</code> = level-0 successor.</li>
+<li><code>SkipList&lt;K,V&gt;</code>: <code>head</code> (sentinel, <code>max_level</code> forward nulls), <code>level</code> (current top level), <code>max_level</code>, <code>len</code>, <code>gen: LevelGenerator</code>.</li>
+<li><strong>Search path</strong>: start at <code>head.forward[level-1]</code>; advance while <code>forward[i].key &lt; target</code>; drop down; record <code>update[i]</code> at each drop.</li>
+<li><strong>Insert</strong>: fill <code>update[]</code> via search; <code>random_level()</code> → <code>L</code>; allocate <code>Node</code>; splice into <code>forward[0..L]</code>; bump <code>level</code> if <code>L &gt; level</code>.</li>
+<li><strong>Delete</strong>: fill <code>update[]</code>; unlink node at each <code>i</code> it appears; shrink <code>level</code> while <code>head.forward[level-1]</code> is null.</li>
+<li>Invariant: <code>forward[0]</code> traversal yields all keys in ascending order at all times.</li>
+<li>Phase refs: search → <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-14">§14</a>; insert → <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-15">§15</a>; delete → <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-16">§16</a>; range → <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-17">§17</a>; analysis → <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-18">§18</a>.</li>
+</ul>
+<p><strong>skl-variants — DetSkipList</strong> — deterministic worst-case O(log n).</p>
+<ul>
+<li>Maintains <strong>gap invariant</strong>: between any two consecutive level-(i+1) pointers there are exactly 1, 2, or 3 level-i nodes.</li>
+<li>Insert: may trigger a cascade of raises to restore the invariant; analogous to B-tree node splitting.</li>
+<li>Delete: may trigger lowering; analogous to B-tree underflow merge/redistribute.</li>
+<li>Isomorphic to a B-tree with fanout 2–4; gives same worst-case guarantee without rotations.</li>
+<li>Phase ref: <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-19">§19</a>.</li>
+</ul>
+<p><strong>skl-variants — IndexableSkipList</strong> — order-statistics via span counts.</p>
+<ul>
+<li>Each <code>forward[i]</code> pointer carries a <code>span: usize</code> = number of level-0 nodes it skips over (including the pointed-to node).</li>
+<li><code>rank(key)</code>: walk search path; accumulate <code>span</code> for each forward step taken; O(log n).</li>
+<li><code>select(i)</code>: walk forward consuming <code>span</code> until <code>i</code> is exhausted; O(log n).</li>
+<li>Insert/delete: update spans on <code>update[]</code> predecessors; O(log n) incremental maintenance.</li>
+<li>Invariant: sum of all level-0 spans = <code>len</code>; sum of spans on any level path = exact node count skipped.</li>
+<li>Phase ref: <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-20">§20</a>.</li>
+</ul>
+<p><strong>skl-concurrent — MarkedPtr + ConcurrentSkipList</strong> — lock-free ordered map.</p>
+<ul>
+<li><code>MarkedPtr&lt;K,V&gt;(AtomicPtr&lt;CNode&lt;K,V&gt;&gt;)</code>: low bit = logical-delete mark; <code>is_marked()</code> checks bit; <code>unmark()</code> strips it; pointer arithmetic avoids alignment UB via <code>repr(C)</code> on <code>CNode</code>.</li>
+<li><code>CNode&lt;K,V&gt;</code>: <code>key</code>, <code>value</code>, <code>top_level: usize</code>, <code>next: Vec&lt;MarkedPtr&lt;K,V&gt;&gt;</code>.</li>
+<li><code>ConcurrentSkipList</code>: <code>head: *const CNode&lt;K,V&gt;</code> (never reclaimed), <code>max_level</code>, <code>gen: LevelGenerator</code>, <code>ebr: Ebr</code>.</li>
+<li><strong><code>find(key, preds, succs)</code></strong>: for each level top→bottom, advance while <code>next &lt; key</code>; if <code>next</code> is marked, CAS it out (HELPING); record <code>preds[i]</code> and <code>succs[i]</code>; return <code>found: bool</code>.</li>
+<li><strong>Insert</strong>: <code>find()</code>; if found → <code>Err</code>; allocate <code>CNode</code>; CAS <code>preds[0].next[0]</code> to new node (level-0 link = linearization point); then CAS upper levels bottom-up (best-effort; incomplete towers are safe).</li>
+<li><strong>Delete</strong>: <code>find()</code>; mark <code>next[top..=0]</code> top-down (logical delete); physical unlink via next <code>find()</code> call that traverses and helps CAS them out.</li>
+<li><strong>Helping</strong> ensures wait-free delete for the deleter; any thread meeting a marked node removes it.</li>
+<li>Phase refs: lock-free foundations → <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-21">§21</a>; full ConcurrentSkipList → <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-22">§22</a>; EBR → <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-23">§23</a>.</li>
+</ul>
+<p><strong>skl-concurrent — Ebr</strong> — epoch-based reclamation.</p>
+<ul>
+<li>Global epoch counter (0/1/2 cycling); per-thread <code>Pin</code> struct increments on guard entry.</li>
+<li><code>retire(ptr)</code>: pushes <code>ptr</code> onto per-thread retire list tagged with current epoch.</li>
+<li>Epoch advance: when all threads have observed the current epoch (all pins ≥ current), advance global epoch; free retire-list entries from epoch − 2.</li>
+<li>Quiescent state: between operations (no live guard held).</li>
+<li>Invariant: a retired node is freed only after every thread that could have read it has passed a quiescent state.</li>
+<li>Phase ref: <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-23">§23</a>.</li>
+</ul>
+<p><strong>skl-bench</strong> — analysis and validation harness.</p>
+<ul>
+<li>Height distribution: histogram of <code>random_level()</code> outputs; compare to geometric PMF.</li>
+<li>O(log n) empirical: time <code>get</code> at n = 10³, 10⁴, 10⁵, 10⁶, 10⁷; fit log curve; assert slope matches 1/(1−p)·log₂(n).</li>
+<li>Sequential throughput: <code>SkipList</code> vs <code>std::BTreeMap</code> at varied p and n.</li>
+<li>Concurrent scaling: <code>ConcurrentSkipList</code> ops/sec/core at 1, 2, 4, 8, 16 threads; assert near-linear read scaling.</li>
+<li>Loom harness: tiny <code>ConcurrentSkipList</code> (≤4 nodes) under loom scheduler; assert no data races + linearizability of concurrent insert/delete/get sequences.</li>
+<li>Phase ref: <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-25">§25</a>.</li>
+</ul>
+<p><strong>skl-cli — <code>sklist</code> binary</strong> — developer and demonstration interface.</p>
+<ul>
+<li>Subcommands: <code>insert &lt;k&gt; &lt;v&gt;</code>, <code>get &lt;k&gt;</code>, <code>del &lt;k&gt;</code>, <code>range &lt;lo&gt; &lt;hi&gt;</code>, <code>rank &lt;k&gt;</code>, <code>select &lt;i&gt;</code>, <code>load &lt;file&gt;</code> (bulk sorted input), <code>stats</code> (level histogram, height, len), <code>bench</code>, <code>viz</code> (ASCII tower dump).</li>
+<li><code>--variant sequential|deterministic|indexable|concurrent</code> selects the backend.</li>
+<li><code>--p</code> and <code>--max-level</code> configure <code>LevelGenerator</code>.</li>
+<li>Phase ref: <a class="cite" href="/system-design-blueprints/systems/skip-list/build/#sec-25">§25</a>.</li>
+</ul>
+<h3 id="sec-3-4">3.4 Data Flow — Insert (Sequential)</h3>
+<pre class="diagram"><code>caller: insert(k, v)
+  → SkipList::insert
+    → search fills update[0..level]: per-level last node with key &lt; k
+    → LevelGenerator::random_level() → picked height L
+    → allocate Node { key=k, value=v, forward = L null slots }
+    → splice levels 0..L: new node&#39;s forward[i] takes update[i].forward[i];
+       update[i].forward[i] now points at the new node (linearizes per level)
+    → if L exceeds self.level: head.forward[self.level..L] point at new node; self.level ← L
+    → self.len incremented by 1</code></pre>
+<p>Splice order is bottom-up; level-0 is the canonical successor chain. Cost: expected O(log n) (M-series, Performance Engineering).</p>
+<h3 id="sec-3-5">3.5 Data Flow — Concurrent Delete (Lock-Free)</h3>
+<pre class="diagram"><code>caller: remove(k)
+  → ConcurrentSkipList::remove
+    → find(k, preds, succs) → found=true, victim = succs[0]
+    → logical delete, top-down (level victim.top_level down to 1):
+        each victim.next[i] CAS&#39;d unmark → mark
+    → victim.next[0] CAS&#39;d unmark → mark  (level-0 mark = linearization point of delete)
+    → retire(victim) via Ebr             (physical unlink deferred to helping)</code></pre>
+<p>Top-down marking means an upper-level pointer is never observed marked while a lower one is still live; the level-0 mark is the single point at which the key becomes logically absent.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Skip-List Structure, Probabilistic + Lock-Free Semantics</h2>
+<h3 id="sec-8-1">8.1 Tower Structure — ASCII Diagram</h3>
+<p>Seven keys {10, 20, 30, 40, 50, 60, 70}; p = 1/2; max_level = 4 (levels 0–3):</p>
+<pre class="diagram"><code>Level 3: HEAD ------------------------------------&gt; 50 ---------&gt; NIL
+Level 2: HEAD ------------&gt; 30 ----------------&gt; 50 ---------&gt; NIL
+Level 1: HEAD -----&gt; 20 --&gt; 30 ---------&gt; 40 --&gt; 50 --&gt; 60 --&gt; NIL
+Level 0: HEAD -&gt; 10 -&gt; 20 -&gt; 30 -&gt; 40 -&gt; 50 -&gt; 60 -&gt; 70 -&gt; NIL
+                  A    B    C    D    E    F    G</code></pre>
+<ul>
+<li><code>HEAD</code>: sentinel; <code>forward[i]</code> = first real node at level i (or NIL).</li>
+<li>Each node&#39;s <code>forward</code> vec length = its tower height (1..=max_level).</li>
+<li>Level 0 = the complete sorted linked list; every higher level is a random subset.</li>
+<li>Node <code>E</code> (key=50) has tower height 4 — appears at all levels.</li>
+</ul>
+<h3 id="sec-8-2">8.2 Search Algorithm (drop-down/forward) — Traced</h3>
+<p><strong>Target = 45</strong>:</p>
+<pre class="diagram"><code>cur = HEAD, i = 3 (top level of list)
+  forward[3].key = 50 &gt;= 45  →  drop down: i = 2
+  forward[2].key = 30 &lt; 45   →  advance:  cur = 30
+  forward[2].key = 50 &gt;= 45  →  drop down: i = 1
+  forward[1].key = 40 &lt; 45   →  advance:  cur = 40
+  forward[1].key = 50 &gt;= 45  →  drop down: i = 0
+  forward[0].key = 50 &gt;= 45  →  drop down: i = -1 → stop
+  Result: not found (no node with key == 45).</code></pre>
+<p><strong>update[] array</strong> (filled during insert/delete searches):</p>
+<pre class="diagram"><code>update[3] = HEAD    ← rightmost level-3 node whose forward[3].key &lt; target
+update[2] = 30
+update[1] = 40
+update[0] = 40</code></pre>
+<p><code>update[i]</code> = predecessor of the target at level i; the new node splices after each <code>update[i]</code>.</p>
+<p><strong>Invariant</strong>: at every level <code>i</code>, <code>update[i].forward[i].key &gt;= target</code> (or NIL); traversal never overshoots.</p>
+<h3 id="sec-8-3">8.3 Insert — Traced (target = 35, random_level = 2)</h3>
+<p>New node <code>N</code> (key=35, tower height=2, levels 0–1):</p>
+<pre class="diagram"><code>search → update[1] = 30, update[0] = 30
+random_level() = 2
+
+Splice level 0:  30.forward[0] = N;  N.forward[0] = 40
+Splice level 1:  30.forward[1] = N;  N.forward[1] = 40
+
+After insert level 0:
+HEAD -&gt; 10 -&gt; 20 -&gt; 30 -&gt; 35 -&gt; 40 -&gt; 50 -&gt; 60 -&gt; 70 -&gt; NIL
+After insert level 1:
+HEAD -&gt; 20 -&gt; 30 -&gt; 35 -&gt; 40 -&gt; 50 -&gt; 60 -&gt; NIL</code></pre>
+<p><strong>Level grow</strong>: if <code>random_level()</code> returns L &gt; current list level:</p>
+<ul>
+<li><code>update[i] = HEAD</code> for i in (current_level..L)</li>
+<li>Splice HEAD.forward[i] for those levels</li>
+<li><code>list.level = L</code></li>
+</ul>
+<p><strong>Sorted invariant</strong>: splice is between <code>update[0]</code> and <code>update[0].forward[0]</code>; search guarantees <code>update[0].key &lt; key &lt; update[0].forward[0].key</code>.</p>
+<h3 id="sec-8-4">8.4 Delete — Traced (target = 30, tower height = 3)</h3>
+<pre class="diagram"><code>search → update[2] = HEAD, update[1] = HEAD, update[0] = 20
+node = update[0].forward[0] = 30  (verify key matches)
+
+Unlink level 0: 20.forward[0]   = 30.forward[0]   = 40
+Unlink level 1: HEAD.forward[1] = 30.forward[1]   = 40
+Unlink level 2: HEAD.forward[2] = 30.forward[2]   = 50</code></pre>
+<p><strong>Level shrink</strong>: after unlink, while <code>list.level &gt; 1 &amp;&amp; HEAD.forward[list.level-1] == NIL</code>: decrement <code>list.level</code>.</p>
+<p><strong>Missing-key</strong>: if <code>update[0].forward[0] == NIL || key != target</code> → return <code>None</code> (no-op).</p>
+<p><strong>Empty-list delete</strong>: HEAD.forward[0] == NIL → immediate <code>None</code>.</p>
+<h3 id="sec-8-5">8.5 Probability Model</h3>
+<p><strong>Core probability</strong>:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Formula</th>
+<th>p=1/2</th>
+<th>p=1/4</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>P[node at level ≥ i]</td>
+<td>p^(i−1)</td>
+<td>(1/2)^(i−1)</td>
+<td>(1/4)^(i−1)</td>
+</tr>
+<tr>
+<td>E[tower height]</td>
+<td>1/(1−p)</td>
+<td>2</td>
+<td>4/3</td>
+</tr>
+<tr>
+<td>E[forward ptrs/node]</td>
+<td>1/(1−p) + max_level·p^max_level</td>
+<td>≈2</td>
+<td>≈4/3</td>
+</tr>
+<tr>
+<td>E[total forward ptrs]</td>
+<td>n/(1−p)</td>
+<td>2n</td>
+<td>4n/3</td>
+</tr>
+<tr>
+<td>max_level (cap)</td>
+<td>⌈log_{1/p}(n)⌉</td>
+<td>⌈log₂(n)⌉</td>
+<td>⌈log₄(n)⌉</td>
+</tr>
+<tr>
+<td>Expected search cost</td>
+<td>(1/p)·log_{1/p}(n) + 1/(1−p)</td>
+<td>≈2·log₂(n)</td>
+<td>≈(4/3)·log₄(n)+4/3</td>
+</tr>
+</tbody></table></div>
+<p><strong>Search cost derivation sketch</strong>:</p>
+<ul>
+<li>At level i, expected nodes traversed before dropping down = 1/(1−p) (geometric).</li>
+<li>Number of levels = log_{1/p}(n) in expectation.</li>
+<li>Total expected comparisons = O(log n); constant factor ≈ 1/(p·ln(1/p)).</li>
+</ul>
+<p><strong>Tail bound</strong> (Pugh): P[search cost &gt; c·log n] ≤ 1/n^(c-1) for suitable c; probability of exceeding 3·log n is polynomially small.</p>
+<p><strong>p choice</strong>: p=1/2 default (balanced: lower constant vs p=1/4&#39;s smaller space cost; p=1/4 suits memory-constrained no_std).</p>
+<h3 id="sec-8-6">8.6 Deterministic 1-2-3 Skip List — Gap Invariant + B-Tree Correspondence</h3>
+<p><strong>Gap invariant</strong>: between any two consecutive level-(i+1) nodes, the number of level-i nodes is ∈ {1, 2, 3}.</p>
+<p><strong>Worked insert rebalance</strong> (gap violation = 4):</p>
+<pre class="diagram"><code>Before: ... A(L2) --[4 L1 nodes]--&gt; B(L2) ...
+         A-L2 -- n1 -- n2 -- n3 -- n4 -- B-L2 (gap=4 at L2: VIOLATION)
+Action:  Raise n2 to L2 → split gap into (1 + 1 + 2) or similar ≤3 segments.
+         A-L2 -- n1 -- n2(L2) -- n3 -- n4 -- B-L2  (gaps = 1, 2 ✓)</code></pre>
+<p><strong>Insert</strong>: find insertion point; insert at level 0; walk up, check gap — if gap = 4, raise middle node, possibly cascading up.</p>
+<p><strong>Delete</strong>: remove node; check gap — if gap = 0 (two consecutive level-i+1 nodes adjacent), lower one; if gap causes upward violation, cascade.</p>
+<p><strong>B-tree correspondence</strong>:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>B-tree (order 2)</th>
+<th>1-2-3 skip list</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Internal node with fanout 2–4</td>
+<td>Raised node covering gap 1–3</td>
+</tr>
+<tr>
+<td>Split when fanout = 5</td>
+<td>Raise when gap = 4</td>
+</tr>
+<tr>
+<td>Merge when fanout = 1</td>
+<td>Lower when gap = 0</td>
+</tr>
+<tr>
+<td>Tree height = O(log n) (worst-case)</td>
+<td>Level count = O(log n) (worst-case)</td>
+</tr>
+</tbody></table></div>
+<p><strong>Worst-case</strong>: O(log n) search + O(log n) rebalance; no randomness required.</p>
+<h3 id="sec-8-7">8.7 Indexable Skip List — Span Mechanism, rank + select</h3>
+<p><strong>Span</strong>: each forward pointer <code>forward[i]</code> carries an integer span = number of level-0 nodes it skips over (including the destination node at level 0, counted once).</p>
+<p><strong>Annotated diagram</strong> (spans in parentheses):</p>
+<pre class="diagram"><code>Level 2: HEAD --(3)--&gt; 30 --(3)--&gt; 60 --&gt; NIL
+Level 1: HEAD --(2)--&gt; 20 --(1)--&gt; 30 --(2)--&gt; 50 --(1)--&gt; 60 --&gt; NIL
+Level 0: HEAD --(1)--&gt; 10 --(1)--&gt; 20 --(1)--&gt; 30 --(1)--&gt; 40 --(1)--&gt; 50 --(1)--&gt; 60 --&gt; NIL</code></pre>
+<p><strong>rank(key=50)</strong> — count level-0 nodes strictly before 50:</p>
+<pre class="diagram"><code>cur=HEAD, rank=0, i=2
+  forward[2].key=30 &lt; 50  → rank += span[2]=3, cur=30
+  forward[2].key=60 ≥ 50  → drop i=1
+  forward[1].key=50 ≥ 50  → drop i=0
+  forward[0].key=50 ≥ 50  → stop
+  rank = 3  (keys 10, 20, 30 are before 50; off-by-one: check = 3 ✓)</code></pre>
+<p><strong>select(i=4)</strong> — the 4th node (0-indexed) = key 40:</p>
+<pre class="diagram"><code>cur=HEAD, remaining=4, i=2
+  span[2]=3 ≤ 4  → remaining -= 3 = 1, cur=30, advance
+  span[2]=3 &gt; 1  → drop i=1
+  span[1]=2 &gt; 1  → drop i=0
+  span[0]=1 ≤ 1  → remaining -= 1 = 0, cur=40
+  result: &amp;40  ✓</code></pre>
+<p><strong>Span maintenance on insert</strong> (new node at position r, tower height h):</p>
+<ul>
+<li>For each level i where update[i] precedes new node: <code>new.span[i] = update[i].span[i] - (r - rank_of_update[i])</code>; <code>update[i].span[i] = r - rank_of_update[i] + 1</code>.</li>
+<li>For levels above new node&#39;s height: <code>update[i].span[i] += 1</code>.</li>
+</ul>
+<p><strong>On delete</strong>: reverse the span arithmetic; all O(log n) because the search path visits O(log n) nodes.</p>
+<h3 id="sec-8-8">8.8 Lock-Free Semantics — MarkedPtr, CAS Insert, Delete + Helping</h3>
+<h4 id="sec-8-markedptr-diagram">MarkedPtr Diagram</h4>
+<pre class="diagram"><code>  AtomicPtr bits (64-bit):
+  [  62 bits: raw pointer to CNode  | 1 bit: MARK ]
+                                       ^-- low bit; pointer always 8-byte aligned</code></pre>
+<pre class="code language-rust" data-lang="rust"><code>impl&lt;K, V&gt; MarkedPtr&lt;K, V&gt; {
+    fn is_marked(&amp;self, ord: Ordering) -&gt; bool { /* load &amp; 1 != 0 */ }
+    fn mark(&amp;self, ord: Ordering) -&gt; bool { /* CAS to set low bit */ }
+    fn cas_ptr(&amp;self, old: *mut _, new: *mut _, ord: Ordering) -&gt; bool { /* AtomicPtr::compare_exchange */ }
+}</code></pre>
+<h4 id="sec-8-concurrent-insert-cas-bottom-up-level-0-linearization-point">Concurrent Insert (CAS bottom-up, level-0 = linearization point)</h4>
+<p>Concurrent insert, named-algorithm prose. First <code>find(key, preds, succs)</code> fills <code>preds[i]</code>
+(predecessor at level <code>i</code>, snipping marked nodes en route) and <code>succs[i]</code> (successor at level <code>i</code>).
+A fresh <code>CNode(key, value, top_level=L)</code> is allocated and its <code>next[0..=L]</code> slots are
+initialised (plain stores, before the node is reachable) to the recorded <code>succs[i]</code>.</p>
+<p>The <strong>linearization point</strong> is the level-0 link: a single <code>CAS(preds[0].next[0], succs[0] → new)</code>.
+If it fails (a concurrent writer changed level 0), <code>find</code> re-runs to refresh <code>preds</code>/<code>succs</code> and the
+CAS is re-attempted; the node is published the instant this CAS succeeds. Higher levels (1..=L) are
+then linked the same way — each <code>CAS(preds[i].next[i], succs[i] → new)</code>, refreshing via <code>find</code> on
+failure — but this is post-LP work: the node is already reachable at level 0, so a stall here only
+costs index quality, never correctness.</p>
+<p><strong>Why level-0 is the linearization point</strong>: a concurrent <code>get</code> traversing level 0 either sees the new node (returns it) or misses it (as if insert hadn&#39;t happened) — exactly one of these is consistent with any serial order.</p>
+<h4 id="sec-8-concurrent-delete-mark-top-down-helping-unlink">Concurrent Delete (mark top-down → helping unlink)</h4>
+<p>Concurrent delete, named-algorithm prose. <strong>Logical delete</strong> marks every pointer of the victim
+top-down (level <code>top_level</code> down to 0). At each level the victim&#39;s <code>next[i]</code> is read: if it is
+already marked another thread won the race for that level and this level is done; otherwise a
+<code>CAS(node.next[i], ptr → marked(ptr))</code> sets the mark, retrying on a benign CAS failure. The
+<strong>level-0 mark is the linearization point</strong> of the delete.</p>
+<p><strong>Physical unlink</strong> is not performed by the deleter directly: it calls <code>find(key, preds, succs)</code>,
+whose snipping splices the marked node out of every level. This is the <em>helping</em> mechanism — any
+thread that later traverses through the marked node unlinks it.</p>
+<p><strong>Helping invariant</strong>: <code>find()</code> always CASes away marked successors before returning <code>preds</code>/<code>succs</code>. Physically unlinked nodes are retired to EBR; any thread pinned to current epoch defers their deallocation.</p>
+<h4 id="sec-8-aba-scenario-avoidance">ABA Scenario + Avoidance</h4>
+<pre class="diagram"><code>Thread T1: reads preds[0] -&gt; A, succs[0] -&gt; B; preempted.
+Thread T2: deletes B, then inserts B&#39; at same address (memory reuse without EBR) → A.next = B&#39;.
+T1 resumes: CAS(A.next, B, new) succeeds — but B ≠ B&#39;; ABA corruption.</code></pre>
+<p><strong>Avoidance</strong>:</p>
+<ol>
+<li><strong>Marked pointers</strong>: a node is logically deleted (marked) before physical unlink; <code>find()</code> CASes away marked nodes rather than re-using them — so <code>preds[0]</code> is always an unmarked node.</li>
+<li><strong>EBR (Ebr)</strong>: retired nodes are freed only after all current epoch readers exit — no memory reuse while any thread holds a pointer to B.</li>
+<li><strong>Mark-then-unlink ordering</strong>: once marked, a node&#39;s pointer cannot be CASed by an inserting thread (mark check precedes CAS in <code>find()</code>).</li>
+</ol>
+<h3 id="sec-8-9">8.9 Edge + Degenerate Cases</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Sequential behavior</th>
+<th>Concurrent behavior</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Empty list</td>
+<td><code>get</code>/<code>remove</code> → <code>None</code>; <code>level=0</code>; HEAD.forward all NIL</td>
+<td><code>find()</code> returns <code>preds=HEAD</code>, <code>succs=NIL</code>; insert proceeds normally</td>
+</tr>
+<tr>
+<td>Single element</td>
+<td><code>remove</code> → unlink level 0; <code>list.level</code> may shrink to 0</td>
+<td>Logical delete marks single node; <code>find()</code> unlinks it via CAS</td>
+</tr>
+<tr>
+<td>Duplicate key insert</td>
+<td><code>update[0].forward[0].key == key</code> → overwrite <code>value</code>, return <code>Some(old)</code></td>
+<td>Level-0 <code>find()</code> sees existing node → <code>insert</code> detects found=true; overwrites value via <code>compare_exchange</code> on a value cell</td>
+</tr>
+<tr>
+<td>All towers height=1</td>
+<td>List degenerates to sorted linked list; search = O(n) worst case; <code>max_level</code> not grown</td>
+<td>Same; <code>find()</code> traverses level 0 only; CAS contention is highest per-node</td>
+</tr>
+<tr>
+<td>max_level cap hit</td>
+<td><code>random_level()</code> returns <code>max_level</code>; no new levels added; HEAD.forward[max_level-1] may be non-NIL</td>
+<td>Same cap applies; <code>top_level = min(random_level(), max_level - 1)</code></td>
+</tr>
+<tr>
+<td>Delete racing concurrent insert (same key)</td>
+<td>N/A (single-threaded)</td>
+<td>Insert: level-0 CAS succeeds → node is live. Concurrent delete marks level-0 pointer. If delete marks before insert&#39;s level-1+ CASes complete, <code>find()</code> in insert&#39;s retry sees the marked node and re-does search; the node is transiently live then deleted — linearizable outcome</td>
+</tr>
+<tr>
+<td>Concurrent deletes same key</td>
+<td>N/A</td>
+<td>Only one thread successfully CASes the mark bit (first <code>mark()</code> wins); second thread detects already-marked on its first CAS; both call <code>find()</code> for unlink — idempotent</td>
+</tr>
+<tr>
+<td>p=1 (all height 1)</td>
+<td>compile-time rejected: <code>LevelGenerator::new</code> panics if p_inv &lt;= 1</td>
+<td>same</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

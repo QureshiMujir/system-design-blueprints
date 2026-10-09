@@ -1,0 +1,353 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Vectorizer / Auto-SIMD Pass — Architecture · Engineering Blueprints</title><meta name="description" content="Vectorizer / Auto-SIMD Pass, hld: §3 overview + §8 domain model. Build a standalone auto-vectorization pass — a loop vectorizer plus a straight-line Superword-Level-Parallelism (SLP) vectorizer — that consumes SSA IR annotated with loop info, scalar evolution…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/vectorizer/">Vectorizer / Auto-SIMD Pass</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Vectorizer / Auto-SIMD Pass</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~36 weeks</li> <li>2,254 lines</li> <li>blueprint #147</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/vectorizer/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/vectorizer/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/vectorizer/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/vectorizer/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/vectorizer/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/vectorizer/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/vectorizer/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/vectorizer/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/vectorizer/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/vectorizer/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Vectorizer / Auto-SIMD Pass — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌──────────────────────────────────────────────────────────────────────────┐
+│ Host IR: SSA + LoopInfo + ScalarEvolution + AliasAnalysis  (Project #143) │
+└──────────────────────────────────┬───────────────────────────────────────┘
+                                    │ Function, per innermost-first Loop
+┌───────────────────────────────────▼──────────────────────────────────────┐
+│ §13 Phase 1 — vec-stride: access classification (Constant/Linear/       │
+│               Unknown/Random) per memory reference                       │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ StrideKind per access
+┌───────────────────────────────────▼──────────────────────────────────────┐
+│ §14 Phase 2 — vec-deps: GCD → Banerjee → Omega ladder;                  │
+│               DependenceGraph (direction + distance vectors)             │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ DependenceGraph
+┌───────────────────────────────────▼──────────────────────────────────────┐
+│ §15 Phase 3 — vec-legality: LegalityVerdict (Legal{hints}/Illegal{why})  │
+│               — trust boundary: nothing past here mutates without proof │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ Legal only
+┌───────────────────────────────────▼──────────────────────────────────────┐
+│ §16 Phase 4 — vec-cost (+x86/aarch64): per-VF Cost; VF selection         │
+│               — concurrency boundary: pure function of (VPlan, target)  │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ Chosen VF, candidate VPlans costed
+┌───────────────────────────────────▼──────────────────────────────────────┐
+│ §17 Phase 5 — vec-vplan / vec-loop: strip-mine, build vector body,       │
+│               reductions, epilog loop                                    │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ Transformed IR (vector + epilog)
+┌───────────────────────────────────▼──────────────────────────────────────┐
+│ §18 Phase 6 — vec-alias-check / vec-epilog: runtime disjointness guard,  │
+│               scalar-fallback branch — protocol boundary: dynamic proof │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ Guarded vector path
+┌───────────────────────────────────▼──────────────────────────────────────┐
+│ §19 Phase 7 — vec-mask: if-conversion, masked load/store, gather/scatter │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ IR with masked/gather ops resolved
+┌───────────────────────────────────▼──────────────────────────────────────┐
+│ §20 Phase 8 — vec-slp: basic-block seed search, isomorphic-tree pack     │
+└───────────────────────────────────┬──────────────────────────────────────┘
+                                    │ Final vectorized IR
+┌───────────────────────────────────▼──────────────────────────────────────┐
+│ §21 Phase 9 — vec-diff / vec-fuzz: scalar-vs-vector output equivalence,  │
+│               persistence boundary: fixture corpus on disk               │
+└──────────────────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>Box notes.</strong> <em>Host IR</em> is read-only input; the pass never mutates it before a
+<code>LegalityVerdict::Legal</code>. <em>vec-stride</em> and <em>vec-deps</em> are pure analyses, no IR mutation,
+queryable independently (their own conformance buckets, <a class="cite" href="/system-design-blueprints/systems/vectorizer/study/#sec-5">§5</a>&#39;s Phase N.5). <em>vec-legality</em>
+is the trust boundary: everything downstream assumes its <code>LegalityHints</code> are sound —
+violating that assumption is the single highest-severity bug class in this system (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#t-1">T1</a>,
+<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#fm-1">FM-1</a>). <em>vec-cost</em> is a concurrency boundary by construction: it is a pure function
+<code>(VPlan, &amp;dyn CostModel) -&gt; Cost</code>, safely callable from multiple threads across
+different functions. <em>vec-vplan/vec-loop</em> is where mutation first happens, and only on a
+proven-legal, proven-profitable candidate. <em>vec-alias-check</em> is a protocol boundary in
+the sense that it hands a <em>dynamic</em> proof obligation to the generated code itself — the
+static analysis explicitly punts. <em>vec-mask</em> and <em>vec-slp</em> are the two remaining
+transform stages; <em>vec-diff/vec-fuzz</em> is the persistence boundary where every
+transformation&#39;s evidence (scalar vs. vector output) is written to a fixture corpus for
+regression.</p>
+<h3 id="sec-3-1">3.1 Why Dependence Analysis Comes First</h3>
+<p>A loop with no loop-carried dependence is unconditionally vectorizable up to any VF the
+target supports; a loop with a positive-distance dependence is vectorizable only at
+VF ≤ distance; a loop with any negative-distance dependence is never vectorizable without
+a transformation this pass does not perform (loop skewing/distribution). The dependence
+graph is therefore the first prerequisite fact every later stage consumes — legality
+cannot be decided, and profitability cannot be estimated, before it exists (<a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-2">I2</a>).</p>
+<h3 id="sec-3-2">3.2 VPlan As the Staged Intermediate</h3>
+<p>Mutating the original IR once per candidate VF is wasteful and dangerous: a rejected
+candidate would need a full undo. Instead, a <code>VPlan</code> (<a class="cite" href="/system-design-blueprints/systems/vectorizer/design/#sec-11">§11</a>) is built once per candidate
+(VF, unroll-factor) pair; the cost model (<a class="cite" href="/system-design-blueprints/systems/vectorizer/build/#sec-16">§16</a>) walks it without touching the original
+function; only the winning plan is lowered to real IR (<a class="cite" href="/system-design-blueprints/systems/vectorizer/build/#sec-17">§17</a>). This mirrors LLVM&#39;s own
+motivation for introducing VPlan over the pre-VPlan direct-mutation vectorizer (<a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-2">P2</a>,
+<a class="cite" href="/system-design-blueprints/systems/vectorizer/trade-offs/#adr-3">ADR-03</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Loop &amp; IR Model</h3>
+<p>A <code>Loop</code> (from the host IR, #143) is a natural loop with a single header dominating all
+blocks in the loop, an induction variable recognized by <code>ScalarEvolution</code> as an affine
+recurrence <code>{base, +, step}</code>, and a trip count either constant or a runtime SCEV
+expression. Every memory access inside the loop body is a <code>Place</code> (pointer + element
+type); <code>vec-stride</code> (<a class="cite" href="/system-design-blueprints/systems/vectorizer/build/#sec-13">§13</a>) classifies each <code>Place</code>&#39;s per-iteration address delta:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>StrideKind</th>
+<th>Meaning</th>
+<th>Vectorization path</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Constant(0)</code></td>
+<td>loop-invariant address</td>
+<td>broadcast/hoist, not vectorized as an access</td>
+</tr>
+<tr>
+<td><code>Constant(k)</code>, k = element size</td>
+<td>unit stride</td>
+<td>direct contiguous vector load/store</td>
+</tr>
+<tr>
+<td><code>Linear{base,step}</code>, step ≠ element size</td>
+<td>affine non-unit stride</td>
+<td>strided/gather-scatter (<a class="cite" href="/system-design-blueprints/systems/vectorizer/build/#sec-19">§19</a>)</td>
+</tr>
+<tr>
+<td><code>Unknown</code></td>
+<td>address depends on another loaded value (<code>a[b[i]]</code>)</td>
+<td>gather/scatter or reject</td>
+</tr>
+<tr>
+<td><code>Random</code></td>
+<td>provably data-dependent, no affine model</td>
+<td>reject or gather/scatter with cost penalty</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Dependence Analysis: Direction/Distance Vectors and the Three-Test Ladder</h3>
+<p>For a pair of memory accesses <code>(S1, S2)</code> in a loop nest of depth <code>d</code>, a <strong>direction
+vector</strong> <code>Θ = (θ_1 … θ_d)</code> records, per loop level, whether the dependence is <code>&lt;</code> (S1&#39;s
+iteration precedes S2&#39;s, &quot;forward&quot;), <code>&gt;</code> (backward — blocks vectorization), <code>=</code> (same
+iteration), or <code>*</code> (unknown, conservatively assumed both). A <strong>distance vector</strong>
+<code>Δ = (δ_1 … δ_d)</code>, when computable, gives the exact iteration-count gap. Allen &amp; Kennedy&#39;s
+fundamental theorem of vectorization: <strong>a loop is vectorizable at level <code>i</code> iff no
+dependence has direction <code>&gt;</code> at level <code>i</code></strong> (<a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-2">I2</a>).</p>
+<p>The ladder (<a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-4">P4</a>, <a class="cite" href="/system-design-blueprints/systems/vectorizer/trade-offs/#adr-4">ADR-04</a>), cheapest test first:</p>
+<ol>
+<li><strong>GCD test</strong> — O(1) per subscript pair: if <code>gcd</code> of the induction-variable
+coefficients does not divide the constant offset difference, no dependence exists;
+otherwise inconclusive, fall through.</li>
+<li><strong>Banerjee test</strong> — O(d) per pair: bounds a linear inequality system over the
+iteration-space box; answers &quot;definitely no dependence,&quot; &quot;definitely a dependence
+with this direction,&quot; or &quot;maybe.&quot;</li>
+<li><strong>Omega test</strong> (Pugh 1992) — exact integer linear programming, worst case
+O(2^d) (bounded by <a class="cite" href="/system-design-blueprints/systems/vectorizer/numbers/#sec-4">§4</a>&#39;s depth cap of 6 ⇒ ≤ 64 subproblems); runs only on a Banerjee
+&quot;maybe.&quot;</li>
+</ol>
+<pre class="diagram"><code>DependenceGraph
+ ├─ edges: Vec&lt;DependenceEdge&gt;
+ │   ├─ (S1,S2, True,  Θ=(&lt;),  Δ=(3))   -- RAW, distance 3: vectorizable at VF ≤ 3
+ │   ├─ (S3,S4, Anti,  Θ=(=),  Δ=(0))   -- WAR, same iteration: fine
+ │   └─ (S5,S6, True,  Θ=(&gt;),  Δ=(-1))  -- RAW, backward: BLOCKS vectorization (I2)
+ └─ reduction_edges: Vec&lt;InstructionId&gt;  -- flagged separately, see §8.3</code></pre>
+<h3 id="sec-8-3">8.3 Loop-Level Vectorization: Strip-Mining, Reductions, If-Conversion</h3>
+<p><strong>Strip-mining</strong>: transform <code>for i in 0..n { body(i) }</code> into a vector loop
+<code>for i in (0..n).step_by(VF) { vbody(i..i+VF) }</code> plus an epilog for <code>n mod VF</code> (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-14">P14</a>).
+The vector body replaces each scalar operation with its <code>VF</code>-wide <code>VPInstruction</code>
+(<a class="cite" href="/system-design-blueprints/systems/vectorizer/design/#sec-11">§11</a>); memory ops become <code>VPLoad</code>/<code>VPStore</code> with <code>gather</code>/<code>scatter</code>/<code>mask</code> flags set per
+<a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#sec-8-1">§8.1</a>&#39;s stride classification.</p>
+<p><strong>Reductions</strong> (<code>acc = acc OP a[i]</code>): the loop-carried dependence on <code>acc</code> has distance 1
+and would otherwise block vectorization; <code>vec-legality</code> recognizes the pattern (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-7">I7</a>) and
+<code>vec-loop</code> emits a <code>VPReduce</code> — a VF-wide partial-accumulator vector plus a horizontal
+combine after the loop. For floating point, this only proceeds under the fast-math
+contract (<a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-5">P5</a>) since the partial-sum tree changes rounding.</p>
+<p><strong>If-conversion</strong>: a conditional in the loop body (<code>if cond(i) { a[i] = f(i) }</code>) is
+converted to a <code>VPSelect</code>/masked-store pair — compute both arms unconditionally (if safe)
+or guard with a mask (<a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#sec-8">§8</a>&#39;s mask model below), and select/store per-lane based on
+<code>cond_vector</code>. This trades control flow for data-parallel predication, the same
+transform LLVM calls &quot;predication.&quot;</p>
+<h3 id="sec-8-4">8.4 Superword-Level Parallelism (SLP)</h3>
+<p>Loop vectorization exploits parallelism <em>across iterations</em>; SLP (Larsen &amp; Amarasinghe,
+PLDI 2000) exploits parallelism <em>across statements</em> in straight-line code with no loop.
+Algorithm: (1) find &quot;seed&quot; pairs — adjacent stores or adjacent uses of adjacent loads;
+(2) build a tree upward from each seed following operand dependencies; (3) verify the
+tree is isomorphic (same opcode at each level, matching operand count); (4) cost the
+packed tree against the sum of scalar costs; (5) if profitable, replace with a single
+vector operation per tree level. SLP naturally runs on the unrolled remainder that
+<code>vec-loop</code>&#39;s epilog can produce, and on independently loop-free kernels (color-space
+conversion, quaternion math) — hence <a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-9">P9</a>&#39;s ordering (SLP after loop vectorization).</p>
+<h3 id="sec-8-5">8.5 Cost Model &amp; Profitability</h3>
+<p>The <code>Cost</code> (<a class="cite" href="/system-design-blueprints/systems/vectorizer/design/#sec-11">§11</a>) for a <code>VPInstruction</code> at a given VF combines target-measured
+<code>throughput</code> (reciprocal instructions/cycle), <code>latency</code> (cycles to result), and a
+<code>register_pressure</code> contribution. Total plan cost sums per-instruction costs across the
+<code>VPlan</code>&#39;s blocks; the plan is profitable iff <code>total_cost(VF) &lt; scalar_cost * (1 - margin)</code>, where <code>margin</code> accounts for measurement noise (default 5%). VF selection (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-11">I11</a>)
+takes <code>min(legality_hints.max_vf, largest VF whose register_pressure ≤ target register file size)</code>.</p>
+<h3 id="sec-8-6">8.6 Worked Example</h3>
+<p>Input: <code>for i in 0..1024 { c[i] = a[i] + b[i]; }</code>, all <code>f32</code>, unit stride, no aliasing
+proven. <code>vec-stride</code>: all three <code>StrideKind::Constant(4)</code> (unit stride). <code>vec-deps</code>: no
+edges (no aliasing among <code>a</code>,<code>b</code>,<code>c</code> — read-only/write-only, disjoint). <code>vec-legality</code>:
+<code>Legal{ hints: { max_vf: 16, stride_pattern: Unit, needs_runtime_alias_check: false, needs_masking: false } }</code>. <code>vec-cost</code>: AVX-512 <code>VPArith(Add)</code> throughput cost favors
+VF=16; total cost 1024/16 × (load+load+add+store cost) ≪ scalar cost. <code>vec-loop</code>: strip-
+mine to 64 vector iterations of VF 16, trip count 1024 is exactly divisible ⇒ empty
+epilog. Result: 16-wide <code>vaddps</code> loop, differential-verified equal to scalar (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-1">I1</a>).</p>
+<h3 id="sec-8-7">8.7 Malformed-Input Example</h3>
+<p>Input: <code>for i in 1..1024 { a[i] = a[i-1] * 2; }</code>. <code>vec-deps</code> finds <code>DependenceEdge{ from: store(a[i-1] read), to: store(a[i]), kind: True, direction: (&lt;), distance: Some(1) }</code> —
+forward, distance 1. This is legal at VF ≤ 1 only (any VF &gt; 1 would read a not-yet-
+written future element) — <code>vec-legality</code> returns <code>Legal{ hints: { max_vf: 1, … } }</code>,
+which the cost model correctly rejects as unprofitable (VF 1 has no vector benefit); the
+loop remains scalar. This is <strong>not</strong> an <code>Illegal</code> verdict — it is a correctly-bounded
+legal verdict that profitability rejects, illustrating <a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-1">P1</a>&#39;s clean separation.</p>
+<h3 id="sec-8-8">8.8 Failure-Path Example</h3>
+<p>Input: <code>for i in 0..n { c[i] = a[i] / b[i]; }</code> where <code>b</code> is not provably non-zero anywhere
+(no <code>#[assume(b[i] != 0)]</code> annotation, no dominating check). <code>vec-legality</code> returns
+<code>Illegal{ reason: ExceptionPossible(div_instr), span: … }</code> (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-13">I13</a>) because a vector divide
+would speculatively execute the divide on all VF lanes, including lanes whose scalar
+counterpart was never reached under the loop&#39;s actual control flow (there is none here,
+but the <em>value</em> itself might trap on some lane the scalar path would still have
+executed — the real risk is on a <em>masked/if-converted</em> variant of this loop, where an
+unmasked division would execute lanes the scalar path skips entirely). The diagnostic
+names the exact instruction (<a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-11">P11</a>, <a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-14">I14</a>); the loop stays scalar. If masking is available
+(<a class="cite" href="/system-design-blueprints/systems/vectorizer/build/#sec-19">§19</a>) and the target supports masked divide, <code>vec-mask</code> may instead guard the divide
+with the branch&#39;s own mask rather than reject outright — the two stages cooperate rather
+than one unconditionally overriding the other.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-1">P1</a> — Legality Before Profitability.</strong> No cost estimate is ever consulted before a <code>LegalityVerdict::Legal</code> exists for the candidate. Tradeoff: two full analysis passes instead of one fused pass. Operational implication: the two stages are independently unit-testable and independently bypassable (a debug flag can force &quot;cost only&quot; runs against known-legal fixtures). Violating it: a cost heuristic that also approves legality collapses the miscompile firewall (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#t-1">T1</a>, <a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#fm-1">FM-1</a>).</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-2">P2</a> — Explicit Staged IR (VPlan).</strong> Every candidate (VF, UF) pair is materialized as a <code>VPlan</code> before any mutation. Tradeoff: extra allocation per candidate. Operational implication: multiple candidates can be costed and compared without an undo path. Violating it: direct-IR-mutation-per-candidate requires transactional rollback, a much larger correctness surface.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-3">P3</a> — Target-Dispatched Cost.</strong> <code>dyn CostModel</code> per target; the vectorizer core never special-cases a target by name. Tradeoff: a new target requires a new <code>CostModel</code> impl, not a branch. Operational implication: <code>vec-cost-x86</code>/<code>vec-cost-aarch64</code> are independently calibrated and independently benchmarked. Violating it: cost logic forked by <code>if target == &quot;x86&quot;</code> strings rots silently as targets are added.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-4">P4</a> — Two-Test Dependence Ladder (GCD → Banerjee → Omega).</strong> Cheap tests run first; the exact-but-exponential Omega test runs only when Banerjee returns &quot;maybe.&quot; Tradeoff: three code paths instead of one. Operational implication: bounds the p99 analysis latency (<a class="cite" href="/system-design-blueprints/systems/vectorizer/numbers/#sec-4">§4</a>). Violating it: always running Omega blows the 80 ms p99 budget on deep nests (worst case 2^6).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-5">P5</a> — Fast-Math Is a Semantics Contract, Not a Performance Switch.</strong> FP reduction reassociation is permitted only under an explicit fast-math flag threaded from the host IR. Tradeoff: some FP reductions are left un-vectorized by default. Operational implication: users opt into a documented precision change, never receive it silently. Violating it: silent reassociation is a reproducibility bug users cannot diagnose (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#t-2">T2</a>).</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-6">P6</a> — Deterministic Everything.</strong> No <code>HashMap</code> iteration reaches codegen order; every internal collection that affects emitted instruction order is sorted or insertion-ordered. Tradeoff: minor overhead from sorted structures. Operational implication: byte-identical output enables bisection and the differential harness. Violating it: flaky regression tests that &quot;sometimes&quot; reproduce (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#t-5">T5</a>).</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-7">P7</a> — No Global Mutable State In the Pipeline.</strong> Every stage is a pure function of its explicit inputs; no thread-local or process-global cache of IR-derived facts. Tradeoff: recomputation across stages where caching might help. Operational implication: multiple function-level pass invocations run concurrently with no coordination. Violating it: cross-invocation data races under a multi-threaded host pipeline.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-8">P8</a> — Runtime Checks Are a Last Resort, Not a Default.</strong> A runtime alias check is inserted only when static alias analysis returns <code>Unknown</code>. Tradeoff: static analysis must be trusted when it says &quot;no alias.&quot; Operational implication: keeps the common case (provably disjoint arrays) branch-free. Violating it: unconditional alias-checking taxes every loop with a check that is dead weight 90%+ of the time (<a class="cite" href="/system-design-blueprints/systems/vectorizer/trade-offs/#adr-8">ADR-08</a>).</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-9">P9</a> — SLP Runs After Loop Vectorization.</strong> The pipeline order is fixed: loop vectorization first, SLP second, because loop vectorization&#39;s unrolled remainder can create new SLP opportunities. Tradeoff: SLP cannot influence the loop vectorizer&#39;s VF choice. Operational implication: a single fixed pipeline order, no iteration to a fixpoint between the two. Violating it: SLP-first ordering misses candidates created by loop-vec&#39;s own unrolling (<a class="cite" href="/system-design-blueprints/systems/vectorizer/trade-offs/#adr-11">ADR-11</a>).</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-10">P10</a> — Cost Model Owns Register Pressure.</strong> The <code>Cost</code> struct&#39;s <code>register_pressure</code> field is not advisory — VF selection is bounded by it (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-11">I11</a>). Tradeoff: a conservative VF is chosen over a theoretically-faster wider one when pressure would spill. Operational implication: no separate post-hoc spill-detection pass is needed. Violating it: over-wide VF selection silently negates gains via register spills (<a class="cite" href="/system-design-blueprints/systems/vectorizer/trade-offs/#adr-15">ADR-15</a>).</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-11">P11</a> — Diagnostics On Every Illegal Verdict.</strong> <code>LegalityVerdict::Illegal</code> always carries the specific <code>IllegalReason</code> and the blocking <code>InstructionId</code>/<code>Span</code>. Tradeoff: every illegal path must construct and thread a diagnostic value. Operational implication: <code>-Rpass-missed</code>-equivalent diagnostics are free, not a separate feature. Violating it: a bare &quot;cannot vectorize&quot; gives operators nothing to act on (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-14">I14</a>).</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-12">P12</a> — Differential Oracle Over Self-Consistency.</strong> The scalar interpreter (<code>vec-interp</code>) built in Phase 0 is the ground truth every vectorized output is checked against; property tests alone are not trusted. Tradeoff: maintaining a second, independent execution engine. Operational implication: an internally consistent but wrong cost model or legality check cannot silently pass CI. Violating it: property-only testing catches internal contradictions, not external wrongness (<a class="cite" href="/system-design-blueprints/systems/vectorizer/trade-offs/#adr-13">ADR-13</a>).</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-13">P13</a> — Conformance Fixtures Before Optimization.</strong> Every phase&#39;s fixture corpus (N.5) is authored before performance tuning begins on that phase. Tradeoff: slower initial phase velocity. Operational implication: a regression in a later phase&#39;s optimization pass is caught immediately by an earlier, stable fixture set. Violating it: tuning against a moving-target fixture set hides regressions.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/vectorizer/architecture/#p-14">P14</a> — Epilogs Are Mandatory, Never Silently Dropped.</strong> Any trip count not evenly divisible by VF gets an epilog loop (or masked equivalent, <a class="cite" href="/system-design-blueprints/systems/vectorizer/trade-offs/#adr-9">ADR-09</a>); there is no &quot;assume trip count is a multiple of VF&quot; fast path. Tradeoff: extra code size per vectorized loop. Operational implication: correctness holds for every trip count, not just benchmark-convenient ones. Violating it: an epilog-free vectorizer miscompiles every loop whose trip count isn&#39;t a multiple of VF (<a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/vectorizer/reliability/#fm-2">FM-2</a>).</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

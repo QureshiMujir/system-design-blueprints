@@ -1,0 +1,603 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Cloud Object Lifecycle Manager — Architecture · Engineering Blueprints</title><meta name="description" content="Cloud Object Lifecycle Manager, hld: §3 overview + §8 domain model. A standalone lifecycle control plane (olmd daemon + olmctl CLI) that, given (a) per-bucket declarative lifecycle policies and (b) read access to an object store's namespace + per-object metadata…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/">Cloud Object Lifecycle Manager</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Cloud Object Lifecycle Manager</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~19 weeks</li> <li>1,875 lines</li> <li>blueprint #276</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Cloud Object Lifecycle Manager — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend ingest: operator entry points and status view
+%% legend rt: scan side of the olmd daemon
+%% legend store: stored state (policy, metadata)
+%% legend trust: time source (eval-clock)
+CLI[&quot;&lt;b&gt;olmctl (CLI, P10)&lt;/b&gt;&lt;br/&gt;policy put/get/lint · dry-run&lt;br/&gt;status · drain · audit&quot;]
+API[&quot;&lt;b&gt;olm-api (Control API, P10)&lt;/b&gt;&lt;br/&gt;policy CRUD · validate(olm-policy)&lt;br/&gt;dry-run preview · status/metrics read&lt;br/&gt;kill-switch · drain/pause&quot;]
+PS[(&quot;&lt;b&gt;Policy Store (in olm-meta, P2)&lt;/b&gt;&lt;br/&gt;bucketId → versioned Policy doc&quot;)]
+SV[&quot;&lt;b&gt;Status/Metrics view (P11)&lt;/b&gt;&lt;br/&gt;per-bucket: last-scan, queued, done&quot;]
+subgraph OLMD[&quot;olmd daemon (P12 wiring) — leader-per-bucket-shard via olm-audit lease (P9)&quot;]
+  direction TB
+  CK[&quot;&lt;b&gt;Clock Source (P3)&lt;/b&gt;&lt;br/&gt;UTC wall + monotonic guard&quot;]
+  SS[&quot;&lt;b&gt;Scan Supervisor (P4)&lt;/b&gt;&lt;br/&gt;daily cadence (#204)&quot;]
+  NS[&quot;&lt;b&gt;Namespace Scanner (P4)&lt;/b&gt;&lt;br/&gt;prefix partitioning&lt;br/&gt;incremental checkpoints&quot;]
+  MS[(&quot;&lt;b&gt;olm-meta MetaStore (P2)&lt;/b&gt;&lt;br/&gt;in-mem | persistent(LSM)&quot;)]
+  CK -- &quot;eval-clock (frozen per scan run)&quot; --&gt; SS
+  SS -- &quot;scan task per (bucket, prefix-shard),&lt;br/&gt;resumable from ScanCheckpoint&quot; --&gt; NS
+  NS -- &quot;enumerate(prefix, after_key)&quot; --&gt; MS
+  MS -- &quot;ObjectMeta + version chain&quot; --&gt; NS
+end
+CLI -- &quot;gRPC / HTTP+JSON (control plane)&quot; --&gt; API
+API -- &quot;write policy (versioned)&quot; --&gt; PS
+API -- &quot;read state&quot; --&gt; SV
+PS --&gt; OLMD
+classDef ingest stroke-width:1.5px
+classDef rt stroke-width:1.5px
+classDef store stroke-width:1.5px
+classDef trust stroke-width:1.5px
+class CLI,API,SV ingest
+class SS,NS rt
+class PS,MS store
+class CK trust</pre><figcaption><ul class="diagram-legend"><li><span class="swatch ingest"></span>operator entry points and status view</li><li><span class="swatch rt"></span>scan side of the olmd daemon</li><li><span class="swatch store"></span>stored state (policy, metadata)</li><li><span class="swatch trust"></span>time source (eval-clock)</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>                          ┌─────────────────────────────────────────────────────────┐
+                          │                      olmctl  (CLI, P10)                   │
+                          │   policy put/get/lint · dry-run · status · drain · audit  │
+                          └───────────────────────────┬─────────────────────────────┘
+                                                       │  gRPC / HTTP+JSON (control plane)
+                          ┌────────────────────────────▼────────────────────────────┐
+                          │                    olm-api  (Control API, P10)            │
+                          │  policy CRUD · validate(olm-policy) · dry-run preview ·   │
+                          │  status/metrics read · kill-switch · drain/pause          │
+                          └───────┬───────────────────────────────────────┬──────────┘
+                                  │ write policy (versioned)               │ read state
+                                  ▼                                        ▼
+        ┌──────────────────────────────────┐         ┌──────────────────────────────────────┐
+        │  Policy Store (in olm-meta, P2)   │         │  Status/Metrics view (P11)             │
+        │  bucketId → versioned Policy doc  │         │  per-bucket: last-scan, queued, done   │
+        └──────────────────────────────────┘         └──────────────────────────────────────┘
+                                  │
+   ┌──────────────────────────────┼───────────────────────────────────────────────────────────┐
+   │  olmd  daemon (P12 wiring) — leader-per-bucket-shard via olm-audit lease (P9)               │
+   │                                                                                             │
+   │   ┌─────────────────────────┐    eval-clock (frozen per scan run)                           │
+   │   │ Scan Supervisor (P4)    │◀──────────────── Clock Source (P3): UTC wall + monotonic guard│
+   │   │ daily cadence (#204)    │                                                               │
+   │   └───────────┬─────────────┘                                                               │
+   │               │ scan task per (bucket, prefix-shard), resumable from ScanCheckpoint         │
+   │               ▼                                                                             │
+   │   ┌─────────────────────────┐  enumerate(prefix, after_key)   ┌──────────────────────────┐  │
+   │   │ Namespace Scanner (P4)  │────────────────────────────────▶│ olm-meta MetaStore (P2)  │  │
+   │   │ prefix partitioning     │◀───────────────────────────────│ in-mem | persistent(LSM) │  │
+   │   │ incremental checkpoints │   ObjectMeta + version chain     └──────────────────────────┘  │
+   │   └───────────┬─────────────┘                                                               │
+   └─────────────────────────────────────────────────────────────────────────────────────────────┘</code></pre></details>
+<p><strong>Architecture (continued):</strong></p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: eval, queue and execute path of olmd
+%% legend store: durable queue, audit log and WAL
+%% legend side: backend storage and previous diagram
+%% legend ingest: compiled policy input
+PREV([&quot;&lt;b&gt;Namespace Scanner (P4)&lt;/b&gt;&lt;br/&gt;from the previous diagram&quot;])
+subgraph OLMD[&quot;olmd daemon (continued)&quot;]
+  direction TB
+  EE[&quot;&lt;b&gt;Eval Engine (olm-eval, P3)&lt;/b&gt;&lt;br/&gt;filter → action →&lt;br/&gt;conflict/overlap resolve&quot;]
+  POL[&quot;&lt;b&gt;Policy (compiled, P1)&lt;/b&gt;&quot;]
+  Q[(&quot;&lt;b&gt;Durable Work Queue (olm-queue, P5)&lt;/b&gt;&lt;br/&gt;WAL-backed ring · per-tenant rate limit&lt;br/&gt;backpressure · retry/backoff · dead-letter&quot;)]
+  EX[&quot;&lt;b&gt;Executors (olm-exec, P6-P8)&lt;/b&gt;&lt;br/&gt;transition · expire · abort-MPU&lt;br/&gt;noncurrent · intelligent-tiering&quot;]
+  BE[&quot;&lt;b&gt;Backend (olm-backend, P6)&lt;/b&gt;&lt;br/&gt;local-FS | #107 store |&lt;br/&gt;(cloud S3/GCS deferred)&quot;]
+  AU[(&quot;&lt;b&gt;Audit + WAL (olm-audit, P9)&lt;/b&gt;&lt;br/&gt;append-only AuditRecord · group-commit&lt;br/&gt;recovery scan · idempotency-token table&lt;br/&gt;lease/leader-election&lt;br/&gt;checkpoint persistence&quot;)]
+  EE -- &quot;decide(meta, policy, clock)&quot; --&gt; POL
+  POL -- &quot;EvalDecision[]&quot; --&gt; EE
+  EE -- &quot;EvalDecision → WorkItem&lt;br/&gt;(+ActionToken idempotency key)&quot; --&gt; Q
+  Q -- &quot;lease(batch)&quot; --&gt; EX
+  EX -- &quot;execute(WorkItem)&lt;br/&gt;copy/relocate · delete-version&lt;br/&gt;· abort upload · verify&quot; --&gt; BE
+  BE -- &quot;result(ok/retry/dead)&quot; --&gt; EX
+  EX -- &quot;append (decision, action, result)&quot; --&gt; AU
+end
+PREV -- &quot;stream&amp;lt;ObjectMeta&amp;gt;&quot; --&gt; EE
+classDef rt stroke-width:1.5px
+classDef store stroke-width:1.5px
+classDef side stroke-width:1.5px
+classDef ingest stroke-width:1.5px
+class EE,EX rt
+class Q,AU store
+class BE,PREV side
+class POL ingest</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>eval, queue and execute path of olmd</li><li><span class="swatch store"></span>durable queue, audit log and WAL</li><li><span class="swatch side"></span>backend storage and previous diagram</li><li><span class="swatch ingest"></span>compiled policy input</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>   ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+   │  olmd daemon (continued)                                                                      │
+   │               │ stream&lt;ObjectMeta&gt;                                                          │
+   │               ▼                                                                             │
+   │   ┌─────────────────────────┐   decide(meta, policy, clock)    ┌──────────────────────────┐  │
+   │   │ Eval Engine (olm-eval,  │─────────────────────────────────│ Policy (compiled, P1)    │  │
+   │   │ P3): filter→action→     │   EvalDecision[]                 └──────────────────────────┘  │
+   │   │ conflict/overlap resolve│                                                               │
+   │   └───────────┬─────────────┘                                                               │
+   │               │ EvalDecision → WorkItem(+ActionToken idempotency key)                       │
+   │               ▼                                                                             │
+   │   ┌─────────────────────────────────────────────────────────────────────────────────────┐ │
+   │   │ Durable Work Queue (olm-queue, P5)                                                    │ │
+   │   │  WAL-backed ring · per-tenant rate limit · backpressure · retry/backoff · dead-letter │ │
+   │   └───────────┬─────────────────────────────────────────────────────────────────────────┘ │
+   │               │ lease(batch)                                                                │
+   │               ▼                                                                             │
+   │   ┌─────────────────────────┐   execute(WorkItem)              ┌──────────────────────────┐  │
+   │   │ Executors (olm-exec, P6- │─────────────────────────────────▶│ Backend (olm-backend,P6) │  │
+   │   │ P8): transition · expire │  copy/relocate · delete-version  │ local-FS | #107 store |  │
+   │   │ · abort-MPU · noncurrent │  · abort upload · verify         │ (cloud S3/GCS deferred)  │  │
+   │   │ · intelligent-tiering    │◀───────────────────────────────│                          │  │
+   │   └───────────┬─────────────┘   result(ok/retry/dead)          └──────────────────────────┘  │
+   │               │ append (decision, action, result)                                           │
+   │               ▼                                                                             │
+   │   ┌─────────────────────────────────────────────────────────────────────────────────────┐ │
+   │   │ Audit + WAL (olm-audit, P9): append-only AuditRecord · group-commit · recovery scan ·  │ │
+   │   │ idempotency-token table · lease/leader-election · checkpoint persistence              │ │
+   │   └─────────────────────────────────────────────────────────────────────────────────────┘ │
+   └─────────────────────────────────────────────────────────────────────────────────────────────┘</code></pre></details>
+<p><strong>Per-box detail.</strong></p>
+<p><strong>olmctl (CLI, <a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-10">P10</a>).</strong> Thin client over <code>olm-api</code>. Subcommands: <code>policy put|get|lint|diff|rm</code>, <code>dryrun</code>, <code>scan status</code>, <code>queue stat</code>, <code>audit tail|grep</code>, <code>drain</code>, <code>pause|resume</code>, <code>kill-switch</code>. Validates policy locally (links <code>olm-policy</code>) before sending so malformed input never reaches the server. No state of its own; exit codes are machine-parseable. Trust boundary: authenticated caller; mutating commands require an operator role token.</p>
+<p><strong>olm-api (Control API, <a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-10">P10</a>).</strong> The only mutation entry point for policies + operator controls. Stateless request handlers; all durable state lives in <code>olm-meta</code>/<code>olm-audit</code>. Validates every policy through <code>olm-policy</code> (reject malformed/over-large/conflicting before persist). Exposes dry-run preview (runs <code>olm-eval</code> over a sampled or full namespace <em>without enqueuing</em>). Read endpoints surface scan/queue/audit status. Hosts the kill-switch and drain/pause controls. Trust boundary: external operators; rate-limited; never executes actions itself.</p>
+<p><strong>Policy Store (in olm-meta, <a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-2">P2</a>).</strong> <code>bucketId → versioned LifecyclePolicy document</code>. Each write creates a new immutable policy version with a monotonically increasing <code>policy_epoch</code>; evaluation always reads the epoch active at scan start and pins it for the whole run (determinism). Concurrency: single-writer via the API; readers (scanner) snapshot. Persistence: same store as object metadata or a dedicated namespace.</p>
+<p><strong>Status/Metrics view (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-11">P11</a>).</strong> Read-only projection: per-bucket last-scan timestamp + checkpoint, objects scanned, decisions emitted, work queued/in-flight/done/dead, bytes transitioned, expirations executed. Backed by metrics counters + the audit log; no write path.</p>
+<p><strong>Clock Source (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-3">P3</a>).</strong> Provides the <code>eval-clock</code>: a single UTC instant frozen at scan-run start, used for every age/date comparison in that run. Backed by <code>CLOCK_REALTIME</code> for the absolute instant, guarded by <code>CLOCK_MONOTONIC</code> to detect wall-clock jumps mid-run (abort + alert on backward jump). Why frozen: two objects evaluated 6 hours apart in the same daily run must see the <em>same</em> &quot;today&quot; so the run is deterministic and reproducible.</p>
+<p><strong>Scan Supervisor (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-4">P4</a>).</strong> Triggers per-bucket scans on the daily cadence (cron model from #204) and on operator demand. Splits each bucket into prefix-shards, spawns a resumable scan task per shard, enforces leader-per-shard via the <code>olm-audit</code> lease, throttles concurrent scans to the configured fan-out. Owns the scan-completion SLO.</p>
+<p><strong>Namespace Scanner (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-4">P4</a>).</strong> Streams <code>ObjectMeta</code> (including the full version chain for versioned buckets) from <code>olm-meta</code> via <code>enumerate(prefix, after_key, limit)</code>, partitioned by prefix for parallelism, checkpointing <code>(prefix-shard, last_key, policy_epoch, eval_clock)</code> after each batch so a crash resumes mid-bucket without rescanning completed ranges (monotonic checkpoints). Applies backpressure from the downstream queue.</p>
+<p><strong>olm-meta MetaStore (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-2">P2</a>).</strong> Abstracts object metadata + version chains + the policy store behind one trait. In-memory impl for tests/Phase-0; persistent impl (LSM-style, #68) for scale — sorted by <code>(bucket, key, version-ordinal)</code> for ordered prefix scans, bloom filters to skip absent prefixes. The scanner&#39;s <em>only</em> read dependency; the executor reads version metadata here too before acting.</p>
+<p><strong>Eval Engine (olm-eval, <a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-3">P3</a>).</strong> Pure function <code>decide(&amp;ObjectMeta, &amp;Policy, eval_clock) -&gt; Vec&lt;EvalDecision&gt;</code>: match filters (prefix ∧ tags ∧ size), select applicable actions, resolve conflicts/overlaps (most-specific / earliest-effective wins; transition-vs-expiration ordering), apply min-age/min-days lattice rules, emit decisions. Deterministic and side-effect-free → unit-testable and fuzzable in isolation. No I/O.</p>
+<p><strong>Durable Work Queue (olm-queue, <a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-5">P5</a>).</strong> WAL-backed FIFO-with-priority queue. <code>enqueue(WorkItem)</code> is durable before ack to the scanner. Consumers <code>lease(batch, visibility_timeout)</code>; on success <code>ack</code>, on failure <code>nack</code> → retry with exponential backoff + jitter; after <code>max_attempts</code> → dead-letter. Per-tenant token-bucket rate limiting + global concurrency cap provide backpressure to the scanner. Idempotency: duplicate <code>ActionToken</code> enqueues collapse.</p>
+<p><strong>Executors (olm-exec, <a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-6">P6</a>–<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-8">P8</a>).</strong> Lease <code>WorkItem</code>s, re-read current version metadata (guard against staleness), and perform the action through <code>Backend</code>: <strong>transition</strong> (copy/relocate to new storage class, verify, update metadata, optionally delete source), <strong>expiration</strong> (delete a specific version / insert or remove a delete marker), <strong>abort-MPU</strong> (abort incomplete multipart uploads older than N days), <strong>noncurrent</strong> transition/expiration (act on the version chain honouring <code>NewerNoncurrentVersions</code>), <strong>intelligent-tiering</strong> (access-time-driven tier moves). Every action is idempotent given its <code>ActionToken</code>; every result is audited.</p>
+<p><strong>Backend (olm-backend, <a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-6">P6</a>).</strong> Narrow trait the executors call: <code>copy_object</code>, <code>set_storage_class</code>, <code>delete_version</code>, <code>put_delete_marker</code>, <code>list_multipart_uploads</code>, <code>abort_multipart_upload</code>, <code>head_version</code>. Impls: local-FS (a faithful versioning-aware store for tests + small deployments) and #107 object store. Cloud S3/GCS/Azure impls are designed-for but <code>PhaseDeferred(&quot;Deferred Features Register&quot;)</code>. Trust boundary: this is the only component with destructive authority.</p>
+<p><strong>Audit + WAL (olm-audit, <a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-9">P9</a>).</strong> Append-only log of every decision + action + result (who/what/when/which-version/why-rule). WAL with group-commit + fsync policy + recovery scan (from #69/#71). Hosts the idempotency-token table (was this <code>ActionToken</code> already completed?), the leader-election lease, and durable checkpoint persistence. The forensic source of truth; never mutated in place.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Policy Language</h2>
+<h3 id="sec-8-lifecycle-policy-dsl-json-on-the-wire-compiled-to-typed-lifecyclepolicy">Lifecycle Policy DSL (JSON on the wire; compiled to typed <code>LifecyclePolicy</code>)</h3>
+<p>A policy is a bucket-scoped list of rules. Each rule = <code>{ id, status, filter, actions[] }</code>. Wire format mirrors S3/GCS field names for conformance; we accept S3-style JSON and a GCS-compatibility shim.</p>
+<p><strong>EBNF (abstract grammar):</strong></p>
+<pre class="diagram"><code>Policy        ::= &quot;{&quot; &quot;rules&quot; &quot;:&quot; &quot;[&quot; Rule { &quot;,&quot; Rule } &quot;]&quot; &quot;}&quot;
+Rule          ::= &quot;{&quot; &quot;id&quot; &quot;:&quot; String &quot;,&quot;
+                      &quot;status&quot; &quot;:&quot; (&quot;Enabled&quot; | &quot;Disabled&quot;) &quot;,&quot;
+                      [ &quot;filter&quot; &quot;:&quot; Filter &quot;,&quot; ]
+                      &quot;actions&quot; &quot;:&quot; &quot;[&quot; Action { &quot;,&quot; Action } &quot;]&quot; &quot;}&quot;
+Filter        ::= &quot;{}&quot;                              (* match all *)
+                | &quot;{&quot; &quot;prefix&quot; &quot;:&quot; String &quot;}&quot;
+                | &quot;{&quot; &quot;objectSizeGreaterThan&quot; &quot;:&quot; UInt &quot;}&quot;
+                | &quot;{&quot; &quot;objectSizeLessThan&quot; &quot;:&quot; UInt &quot;}&quot;
+                | &quot;{&quot; &quot;tag&quot; &quot;:&quot; Tag &quot;}&quot;
+                | &quot;{&quot; &quot;and&quot; &quot;:&quot; &quot;{&quot; FilterTerms &quot;}&quot; &quot;}&quot;   (* AND-combine *)
+FilterTerms   ::= [ &quot;prefix&quot; &quot;:&quot; String ]
+                  [ &quot;tags&quot; &quot;:&quot; &quot;[&quot; Tag { &quot;,&quot; Tag } &quot;]&quot; ]
+                  [ &quot;objectSizeGreaterThan&quot; &quot;:&quot; UInt ]
+                  [ &quot;objectSizeLessThan&quot; &quot;:&quot; UInt ]
+Tag           ::= &quot;{&quot; &quot;key&quot; &quot;:&quot; String &quot;,&quot; &quot;value&quot; &quot;:&quot; String &quot;}&quot;
+Action        ::= Transition | Expiration | NoncurrentTransition
+                | NoncurrentExpiration | AbortIncompleteMPU
+Transition    ::= &quot;{&quot; &quot;type&quot; &quot;:&quot; &quot;Transition&quot; &quot;,&quot;
+                      ( &quot;days&quot; &quot;:&quot; UInt | &quot;date&quot; &quot;:&quot; Rfc3339Date ) &quot;,&quot;
+                      &quot;storageClass&quot; &quot;:&quot; StorageClass &quot;}&quot;
+Expiration    ::= &quot;{&quot; &quot;type&quot; &quot;:&quot; &quot;Expiration&quot; &quot;,&quot;
+                      ( &quot;days&quot; &quot;:&quot; UInt
+                      | &quot;date&quot; &quot;:&quot; Rfc3339Date
+                      | &quot;expiredObjectDeleteMarker&quot; &quot;:&quot; Bool ) &quot;}&quot;
+NoncurrentTransition ::= &quot;{&quot; &quot;type&quot; &quot;:&quot; &quot;NoncurrentVersionTransition&quot; &quot;,&quot;
+                      &quot;noncurrentDays&quot; &quot;:&quot; UInt &quot;,&quot;
+                      [ &quot;newerNoncurrentVersions&quot; &quot;:&quot; UInt &quot;,&quot; ]
+                      &quot;storageClass&quot; &quot;:&quot; StorageClass &quot;}&quot;
+NoncurrentExpiration ::= &quot;{&quot; &quot;type&quot; &quot;:&quot; &quot;NoncurrentVersionExpiration&quot; &quot;,&quot;
+                      &quot;noncurrentDays&quot; &quot;:&quot; UInt
+                      [ &quot;,&quot; &quot;newerNoncurrentVersions&quot; &quot;:&quot; UInt ] &quot;}&quot;
+AbortIncompleteMPU   ::= &quot;{&quot; &quot;type&quot; &quot;:&quot; &quot;AbortIncompleteMultipartUpload&quot; &quot;,&quot;
+                      &quot;daysAfterInitiation&quot; &quot;:&quot; UInt &quot;}&quot;
+StorageClass  ::= &quot;STANDARD&quot; | &quot;STANDARD_IA&quot; | &quot;ONEZONE_IA&quot;
+                | &quot;INTELLIGENT_TIERING&quot; | &quot;GLACIER_IR&quot;
+                | &quot;GLACIER&quot; | &quot;DEEP_ARCHIVE&quot;</code></pre>
+<h3 id="sec-8-storage-class-lattice-allowed-transitions-min-days">Storage-Class Lattice (Allowed Transitions + Min-Days)</h3>
+<p>Partial order by &quot;colder/cheaper-to-store, slower-to-retrieve&quot;. A transition is legal only <strong>downward</strong> (toward colder) and only after the source class&#39;s minimum residency.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From \ To</th>
+<th>STD_IA</th>
+<th>ONEZONE_IA</th>
+<th>INT_TIER</th>
+<th>GLACIER_IR</th>
+<th>GLACIER</th>
+<th>DEEP_ARCHIVE</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>STANDARD</td>
+<td>✓ (≥30d*)</td>
+<td>✓ (≥30d*)</td>
+<td>✓ (≥0d)</td>
+<td>✓ (≥0d)</td>
+<td>✓ (≥0d)</td>
+<td>✓ (≥0d)</td>
+</tr>
+<tr>
+<td>STANDARD_IA</td>
+<td>—</td>
+<td>—</td>
+<td>✓</td>
+<td>✓</td>
+<td>✓ (≥30d)</td>
+<td>✓ (≥30d)</td>
+</tr>
+<tr>
+<td>ONEZONE_IA</td>
+<td>—</td>
+<td>—</td>
+<td>✓</td>
+<td>✓</td>
+<td>✓ (≥30d)</td>
+<td>✓ (≥30d)</td>
+</tr>
+<tr>
+<td>INT_TIER</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>✓</td>
+<td>✓</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>GLACIER_IR</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>✓</td>
+<td>✓</td>
+</tr>
+<tr>
+<td>GLACIER</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>✓ (≥90d)</td>
+</tr>
+<tr>
+<td>DEEP_ARCHIVE</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<p><code>*</code> STD→IA min-days is configurable (S3 historically 30d; some classes 0d). <code>—</code> = illegal (enforced by <a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/reliability/#inv-1">I1</a>). Upward transitions (warming) are not a lifecycle action (require RESTORE, deferred <a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#sec-8">§8</a>). The lattice is encoded as a <code>const</code> table in <code>olm-model</code>; <code>olm-eval</code> consults it before emitting a <code>Transition</code> decision.</p>
+<h3 id="sec-8-object-version-metadata-record-read-by-scanner-executor">Object / Version Metadata Record (Read by Scanner + Executor)</h3>
+<pre class="diagram"><code>ObjectMeta {
+  bucket: BucketId,
+  key: ObjectKey,                 // UTF-8, ≤ 1024 bytes
+  version: VersionId,             // opaque; &quot;null&quot; for unversioned
+  is_latest: bool,                // current version of the key?
+  is_delete_marker: bool,         // version is a delete marker
+  size: u64,                      // bytes (0 for delete marker)
+  storage_class: StorageClass,
+  created_at: Utc,                // version creation (last-modified)
+  noncurrent_since: Option&lt;Utc&gt;,  // when it became noncurrent (for NoncurrentDays)
+  last_access_at: Option&lt;Utc&gt;,    // for intelligent-tiering
+  tags: TagSet,                   // object tags (AND-combined in filters)
+  etag: Etag,
+  owner: Option&lt;OwnerId&gt;,
+}</code></pre>
+<p>Version chain for a key = the latest version + ordered noncurrent versions (newest→oldest) + delete markers, sorted by <code>created_at</code> desc. <code>noncurrent_since</code> for version <em>v</em> = <code>created_at</code> of the version that superseded <em>v</em> (S3 semantics: a version becomes noncurrent when a newer version is written).</p>
+<h3 id="sec-8-versioning-semantics">Versioning Semantics</h3>
+<ul>
+<li><strong>Unversioned bucket:</strong> one version per key; Expiration deletes the object; transitions change its class in place.</li>
+<li><strong>Versioned bucket:</strong> Expiration on the <em>current</em> version inserts a <strong>delete marker</strong> (the object &quot;disappears&quot; but versions remain). NoncurrentVersionExpiration permanently deletes <em>noncurrent</em> versions. <code>ExpiredObjectDeleteMarker: true</code> deletes a delete marker that has <em>no</em> noncurrent versions behind it (cleanup of orphaned markers). <code>NewerNoncurrentVersions: K</code> retains the K newest noncurrent versions and only acts on the rest.</li>
+<li><strong>Delete-marker rules:</strong> an expiration <code>Days/Date</code> action does <strong>not</strong> apply to delete markers (only <code>ExpiredObjectDeleteMarker</code> targets them). A delete marker with zero noncurrent versions behind it is &quot;expired&quot; and may be removed.</li>
+<li><strong>Latest vs noncurrent:</strong> <code>Transition</code>/<code>Expiration</code> (non-&quot;Noncurrent&quot; actions) apply to the <em>current</em> version; <code>NoncurrentVersion*</code> apply to <em>noncurrent</em> versions.</li>
+</ul>
+<h3 id="sec-8-object-storage-class-lifecycle-state-transition-table">Object Storage-Class Lifecycle — State-Transition Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Event</th>
+<th>Next state</th>
+<th>Action emitted</th>
+<th>Guard</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>STANDARD, age&lt;30d</td>
+<td>scan</td>
+<td>STANDARD</td>
+<td>none</td>
+<td>min-age not met</td>
+</tr>
+<tr>
+<td>STANDARD, age≥30d, rule→IA</td>
+<td>scan</td>
+<td>STANDARD_IA</td>
+<td>Transition(STD_IA)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/reliability/#inv-1">I1</a> lattice ✓</td>
+</tr>
+<tr>
+<td>STANDARD_IA, age≥(IA+30)d, rule→GLACIER</td>
+<td>scan</td>
+<td>GLACIER</td>
+<td>Transition(GLACIER)</td>
+<td>residency ≥30d</td>
+</tr>
+<tr>
+<td>any, age≥expDays, current, unversioned</td>
+<td>scan</td>
+<td>DELETED</td>
+<td>DeleteVersion</td>
+<td>matched by Expiration</td>
+</tr>
+<tr>
+<td>any, age≥expDays, current, versioned</td>
+<td>scan</td>
+<td>DELETE_MARKER inserted</td>
+<td>PutDeleteMarker</td>
+<td>matched by Expiration</td>
+</tr>
+<tr>
+<td>noncurrent, noncurrentDays≥N, rank&gt;K</td>
+<td>scan</td>
+<td>DELETED</td>
+<td>DeleteVersion(noncurrent)</td>
+<td>NoncurrentExpiration + NewerNoncurrentVersions</td>
+</tr>
+<tr>
+<td>DELETE_MARKER, 0 noncurrent behind</td>
+<td>scan</td>
+<td>DELETED</td>
+<td>DeleteVersion(marker)</td>
+<td>ExpiredObjectDeleteMarker</td>
+</tr>
+<tr>
+<td>INT_TIER, no access ≥90d</td>
+<td>scan</td>
+<td>colder tier</td>
+<td>Transition (auto)</td>
+<td>intelligent-tiering</td>
+</tr>
+<tr>
+<td>MPU initiated, age≥N</td>
+<td>scan</td>
+<td>ABORTED</td>
+<td>AbortMultipartUpload</td>
+<td>AbortIncompleteMPU</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-worked-examples">Worked Examples</h3>
+<p><strong>E1 — tier then expire current versions:</strong></p>
+<pre class="code language-json" data-lang="json"><code>{ &quot;rules&quot;: [{
+  &quot;id&quot;: &quot;logs-tier-expire&quot;, &quot;status&quot;: &quot;Enabled&quot;,
+  &quot;filter&quot;: { &quot;prefix&quot;: &quot;logs/&quot; },
+  &quot;actions&quot;: [
+    { &quot;type&quot;: &quot;Transition&quot;, &quot;days&quot;: 30,  &quot;storageClass&quot;: &quot;STANDARD_IA&quot; },
+    { &quot;type&quot;: &quot;Transition&quot;, &quot;days&quot;: 90,  &quot;storageClass&quot;: &quot;GLACIER&quot; },
+    { &quot;type&quot;: &quot;Expiration&quot;, &quot;days&quot;: 365 } ] }] }</code></pre>
+<p><strong>E2 — keep 3 noncurrent, expire older after 30d; clean orphan markers:</strong></p>
+<pre class="code language-json" data-lang="json"><code>{ &quot;rules&quot;: [{
+  &quot;id&quot;: &quot;versions&quot;, &quot;status&quot;: &quot;Enabled&quot;, &quot;filter&quot;: {},
+  &quot;actions&quot;: [
+    { &quot;type&quot;: &quot;NoncurrentVersionExpiration&quot;, &quot;noncurrentDays&quot;: 30, &quot;newerNoncurrentVersions&quot;: 3 },
+    { &quot;type&quot;: &quot;Expiration&quot;, &quot;expiredObjectDeleteMarker&quot;: true } ] }] }</code></pre>
+<p><strong>E3 — size + tag filter, abort stale uploads:</strong></p>
+<pre class="code language-json" data-lang="json"><code>{ &quot;rules&quot;: [{
+  &quot;id&quot;: &quot;big-cold&quot;, &quot;status&quot;: &quot;Enabled&quot;,
+  &quot;filter&quot;: { &quot;and&quot;: { &quot;prefix&quot;: &quot;data/&quot;, &quot;tags&quot;: [{&quot;key&quot;:&quot;tier&quot;,&quot;value&quot;:&quot;cold&quot;}],
+                       &quot;objectSizeGreaterThan&quot;: 1048576 } },
+  &quot;actions&quot;: [
+    { &quot;type&quot;: &quot;Transition&quot;, &quot;days&quot;: 0, &quot;storageClass&quot;: &quot;GLACIER_IR&quot; },
+    { &quot;type&quot;: &quot;AbortIncompleteMultipartUpload&quot;, &quot;daysAfterInitiation&quot;: 7 } ] }] }</code></pre>
+<h3 id="sec-8-malformed-policy-examples-must-reject-in-olm-policy">Malformed-Policy Examples (Must Reject in <code>olm-policy</code>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Example</th>
+<th>Why rejected</th>
+<th>Error</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Transition</code> STANDARD→STANDARD</td>
+<td>no-op / illegal self-transition</td>
+<td><code>PolicyError::IllegalTransition</code></td>
+</tr>
+<tr>
+<td><code>Expiration days:0</code> on versioned current</td>
+<td>ambiguous immediate delete</td>
+<td><code>PolicyError::ZeroDayExpiration</code></td>
+</tr>
+<tr>
+<td><code>Transition</code> to a warmer class</td>
+<td>upward not allowed (lattice)</td>
+<td><code>PolicyError::IllegalTransition</code></td>
+</tr>
+<tr>
+<td>two <code>Transition</code> to same class diff days</td>
+<td>overlapping/contradictory</td>
+<td><code>PolicyError::ConflictingActions</code></td>
+</tr>
+<tr>
+<td><code>newerNoncurrentVersions</code> on a non-noncurrent action</td>
+<td>field misuse</td>
+<td><code>PolicyError::FieldNotApplicable</code></td>
+</tr>
+<tr>
+<td><code>prefix</code> &gt; 1024 bytes / invalid UTF-8</td>
+<td>bounds</td>
+<td><code>PolicyError::PrefixTooLong</code></td>
+</tr>
+<tr>
+<td><code>date</code> not RFC 3339 / not UTC midnight</td>
+<td>S3 requires midnight UTC</td>
+<td><code>PolicyError::BadDate</code></td>
+</tr>
+<tr>
+<td><code>&gt; 1000</code> rules in one policy</td>
+<td>bound (S3 limit)</td>
+<td><code>PolicyError::TooManyRules</code></td>
+</tr>
+<tr>
+<td>both <code>days</code> and <code>date</code> in one action</td>
+<td>mutually exclusive</td>
+<td><code>PolicyError::DaysDateConflict</code></td>
+</tr>
+<tr>
+<td>Expiration <code>Days</code> targeting delete markers</td>
+<td>only <code>ExpiredObjectDeleteMarker</code> does</td>
+<td><code>PolicyError::MarkerByDays</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-conflict-overlap-resolution-rules">Conflict / Overlap Resolution Rules</h3>
+<ul>
+<li><strong>Two rules match one object:</strong> union of <em>non-conflicting</em> actions; for the <em>same action class</em> on the same target, the <strong>shorter</strong> Days / <strong>earlier</strong> Date wins (most-aggressive-but-legal), matching S3&#39;s &quot;smallest applicable&quot; behaviour; ties broken by lexically-smallest <code>rule.id</code> (determinism).</li>
+<li><strong>Transition vs Expiration on the same object/day:</strong> Expiration wins (no point transitioning an object that expires the same day) — emit only the expiration.</li>
+<li><strong>Multiple transitions:</strong> ordered by effective day; each must be lattice-legal from the <em>expected</em> class at its effective day (not the current class) — the evaluator simulates the class timeline.</li>
+<li><strong>Disabled rules:</strong> ignored entirely (status != Enabled).</li>
+<li><strong>Prefix overlap:</strong> more-specific prefix does not override; both apply, then per-action-class resolution above runs.</li>
+<li><strong>Result is order-independent:</strong> resolution is a deterministic fold → same <code>EvalDecision[]</code> regardless of rule order (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/reliability/#inv-7">I7</a>).</li>
+</ul>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Idempotency over speed.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-1">P1</a>) Every executed action is keyed by a deterministic <code>ActionToken</code>; re-execution is a no-op. <em>Tradeoff:</em> an idempotency-table lookup + write per action. <em>Operational:</em> a crashed/retried executor never double-deletes or double-bills. <em>Violation breaks:</em> at-least-once retries become at-least-once <em>effects</em> → duplicate deletes, mass data loss.</li><li id="p-2"><strong>Version-id pinning.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-2">P2</a>) Decisions and actions name an exact <code>VersionId</code>; the executor re-heads the version and aborts if the pinned version no longer matches (overwritten/deleted concurrently). <em>Tradeoff:</em> extra HEAD per action. <em>Operational:</em> a PUT racing a scan never causes the wrong object to be expired. <em>Violation breaks:</em> expire the <em>current</em> object when you meant a <em>noncurrent</em> one — irreversible.</li><li id="p-3"><strong>Determinism of rule evaluation.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-3">P3</a>) <code>decide(meta, policy, eval_clock)</code> is a pure function; identical inputs → identical outputs, byte-for-byte. <em>Tradeoff:</em> the clock must be frozen + threaded explicitly (no <code>now()</code> inside eval). <em>Operational:</em> dry-run preview equals real run; re-scan is reproducible; conformance is testable. <em>Violation breaks:</em> flaky decisions, un-auditable behaviour, &quot;why did it delete that?&quot; with no answer.</li><li id="p-4"><strong>Dry-run before destructive action.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-4">P4</a>) Every policy change and every operator-triggered run can preview decisions without enqueuing; destructive actions on a <em>new</em> policy default to a dry-run grace window. <em>Tradeoff:</em> a preview pass costs a scan. <em>Operational:</em> operators see blast radius before bytes vanish. <em>Violation breaks:</em> a typo in a <code>Prefix</code> deletes the wrong tree on first apply.</li><li id="p-5"><strong>Crash-only / replayable.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-5">P5</a>) No graceful-shutdown-only invariants; the WAL + checkpoints make any kill point recoverable; recovery is replay, not repair. <em>Tradeoff:</em> fsync on the critical path; replay logic to maintain. <em>Operational:</em> <code>kill -9</code> is a supported shutdown. <em>Violation breaks:</em> a crash mid-transition leaves orphaned copies / lost deletes with no recovery.</li><li id="p-6"><strong>Backpressure everywhere.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-6">P6</a>) Bounded channels/queues; the scanner blocks when the queue is full; executors pull at the backend&#39;s pace; per-tenant rate limits cap fan-out. <em>Tradeoff:</em> lower peak throughput than unbounded. <em>Operational:</em> <code>olmd</code> never OOMs and never overruns the meta-store/backend. <em>Violation breaks:</em> unbounded queue growth → OOM → loss of in-flight state.</li><li id="p-7"><strong>Append-only audit.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-7">P7</a>) Every decision + action + result is appended, never mutated; the log is the forensic + idempotency source of truth. <em>Tradeoff:</em> storage growth → compaction needed. <em>Operational:</em> &quot;prove this deletion was authorised&quot; is a log query. <em>Violation breaks:</em> destructive actions become unaccountable.</li><li id="p-8"><strong>Bounded resource usage.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-8">P8</a>) Fixed memory/FD/thread budgets (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/numbers/#sec-4">§4</a>); streaming, never buffering, the namespace. <em>Tradeoff:</em> must checkpoint + resume rather than hold state. <em>Operational:</em> predictable footprint at any scale. <em>Violation breaks:</em> a 10^10-object bucket OOMs a naive in-memory scan.</li><li id="p-9"><strong>Fail safe, not fail open.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-9">P9</a>) If anything is uncertain — clock jumped, policy ambiguous, version mismatch, backend error — <em>do nothing destructive</em> and alert. <em>Tradeoff:</em> delayed actions, more alerts. <em>Operational:</em> the worst case is &quot;expired late,&quot; never &quot;deleted wrong.&quot; <em>Violation breaks:</em> uncertainty → destruction.</li><li id="p-10"><strong>Single writer per bucket.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-10">P10</a>) A bucket-shard is owned by exactly one leader via a lease; no two <code>olmd</code> instances act on the same object concurrently. <em>Tradeoff:</em> leader election + fencing complexity; one bucket&#39;s throughput bounded by one node. <em>Operational:</em> no concurrent conflicting deletes/transitions. <em>Violation breaks:</em> split-brain double-execution.</li><li id="p-11"><strong>Separation of decision and execution.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-11">P11</a>) <code>olm-eval</code> decides (pure); <code>olm-exec</code> acts (effectful); they communicate only through the durable queue. <em>Tradeoff:</em> an extra serialisation hop. <em>Operational:</em> you can re-run decisions without acting, and replay actions without re-deciding. <em>Violation breaks:</em> untestable, unreplayable tangle (the MinIO/Ceph pitfall).</li><li id="p-12"><strong>Explicit, versioned policy epochs.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-12">P12</a>) A scan pins one <code>policy_epoch</code>; a mid-scan policy change takes effect next run. <em>Tradeoff:</em> up to one cadence of staleness. <em>Operational:</em> no half-old-half-new evaluation within a run. <em>Violation breaks:</em> nondeterministic, irreproducible runs.</li><li id="p-13"><strong>Verify after transition.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-13">P13</a>) After a copy/relocate, the executor verifies the new object (etag/size/storage-class) before deleting the source (end-to-end argument). <em>Tradeoff:</em> extra HEAD/read. <em>Operational:</em> never delete the source of a failed copy. <em>Violation breaks:</em> silent data loss on a partial copy.</li><li id="p-14"><strong>Least privilege + kill-switch.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-14">P14</a>) <code>olm-backend</code> is the only delete-capable surface; a global + per-bucket kill-switch halts destructive work instantly. <em>Tradeoff:</em> an extra check per action. <em>Operational:</em> an operator can stop a runaway deletion in one command. <em>Violation breaks:</em> no brake on a misbehaving policy.</li><li id="p-15"><strong>Conformance to a published spec, not folklore.</strong> (<a class="cite" href="/system-design-blueprints/systems/cloud-object-lifecycle-manager/architecture/#p-15">P15</a>) Behaviour is defined by differential tests against S3/GCS documented semantics, not by what we happen to implement. <em>Tradeoff:</em> maintain a spec oracle + fixtures. <em>Operational:</em> predictable, portable semantics. <em>Violation breaks:</em> surprising day-boundary / version edge-case behaviour.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

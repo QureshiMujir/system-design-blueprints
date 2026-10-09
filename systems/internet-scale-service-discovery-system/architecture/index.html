@@ -1,0 +1,461 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Internet-Scale Service Discovery System — Architecture · Engineering Blueprints</title><meta name="description" content="Internet-Scale Service Discovery System, hld: §3 overview + §8 domain model. - Build a from-scratch internet-scale service-discovery system: per-region authoritative registry (catalog of services/instances), lease-based liveness (TTL heartbeats), SWIM-style membership/health…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/">Internet-Scale Service Discovery System</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Internet-Scale Service Discovery System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~46 weeks</li> <li>1,966 lines</li> <li>blueprint #359</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/internet-scale-service-discovery-system/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Internet-Scale Service Discovery System — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Diagram (one region shown; federated across regions)</h3>
+<pre class="diagram"><code>   app ──► sdd-agent (local) :: resolve(name) · register/renew · watch        [every host]
+                 │  (cache tier 1: agent cache, TTL + negative + stale-if-error)
+                 ▼
+        ┌──────────────────────────────────────────────────────────────────────────────┐
+        │                          sdd  (a region server node)                           │
+        │                                                                                │
+        │   ┌───────────┐   ┌──────────────┐   ┌───────────────┐   ┌──────────────────┐  │
+        │   │  resolve  │◄──│   registry   │──►│  membership   │   │      cache       │  │
+        │   │ filter:   │   │ catalog store│   │  (SWIM)       │   │ tier2 regional   │  │
+        │   │ health/   │   │ lease mgr    │   │ probe/suspect │   │ TTL · negative   │  │
+        │   │ tag/locale│   │ TTL expiry   │   │ incarnation   │   │ stale-if-error   │  │
+        │   │ blocking Q│   │ change-stream│   │ alive/dead    │   │ anti-stampede    │  │
+        │   └─────┬─────┘   └──────┬───────┘   └───────┬───────┘   └──────────────────┘  │
+        │         │                │ events            │ health                          │
+        │         │                ▼                   ▼                                 │
+        │   ┌─────┴───────────────────────────────────────────────────────────────┐     │
+        │   │                              gossip                                   │     │
+        │   │  piggyback events · push-pull · fanout k · dissemination limit        │     │
+        │   └───────────────┬──────────────────────────────────┬────────────────────┘    │
+        │                   │ (gossip miss / convergence backstop)│                       │
+        │                   ▼                                     ▼                       │
+        │   ┌───────────────────────────┐         ┌─────────────────────────────────┐    │
+        │   │       antientropy         │         │       dns (authoritative)       │    │
+        │   │  Merkle digest · reconcile│         │  A/AAAA/SRV/TXT · DNS-SD PTR/SRV │◄── legacy DNS clients
+        │   └───────────────────────────┘         └─────────────────────────────────┘    │
+        │                                                                                │
+        │   ┌────────────────────────────────────────────────────────────────────────┐  │
+        │   │                        runtime (bootstrap, API, config)                  │  │
+        │   │  region/cluster join · HTTP/gRPC API · catalog Raft group (optional, P10)│  │
+        │   └────────────────────────────────────────────────────────────────────────┘  │
+        └─────────────────────────────────┬──────────────────────────────────────────────┘
+                                          │
+                                          ▼  federation (WAN)
+        ┌──────────────────────────────────────────────────────────────────────────────┐
+        │                                federation                                      │
+        │  WAN region link · sparse WAN gossip pool · selective/locality-scoped          │
+        │  replication · cross-region resolution · region catalog projection             │
+        └──────────────────────────────────┬─────────────────────────────────────────────┘
+                                           ▼  (other regions: region B, region C, …)
+
+   side: cabi (C/SDK ABI) · bench (propagation/resolution/gossip-BW) · conformance (single-region oracle, DST differential, partition/fault injection)</code></pre>
+<h3 id="sec-3-2">3.2 Box Narratives</h3>
+<ul>
+<li><strong><code>sdd-agent</code> (client agent).</strong> The local caching resolver every app talks to (the Consul-agent / Eureka-client model). Caches resolutions (cache tier 1, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#sec-3">§3</a>.x), serves them at sub-ms latency, renews the app&#39;s own registrations/leases, and holds <code>watch</code>/long-poll subscriptions for change notifications. Shields the region servers from per-request load; serves <strong>stale-if-error</strong> when the region is unreachable (AP, principle 6). The single most load-bearing component for resolution latency.</li>
+<li><strong><code>resolve</code> (query engine).</strong> Answers &quot;give me healthy instances of service X&quot; filtered by <strong>health</strong> (only <code>Passing</code>/<code>Warning</code> per policy), <strong>tag</strong>, <strong>locality</strong> (prefer same-AZ/region, the locality ladder), and <strong>weight</strong>. Supports <strong>blocking queries</strong> (long-poll: hold the request open until the result set changes or a timeout — the efficient watch primitive). Composes the registry&#39;s current state + health into an ordered candidate list. Does <em>not</em> load-balance (returns candidates; the caller picks).</li>
+<li><strong><code>registry</code> (catalog + lease manager).</strong> The per-region source of truth: the <strong>catalog</strong> (services → instances → address/port/metadata/tags) and the <strong>lease manager</strong> (each instance has a TTL lease it must renew; expiry → mark unhealthy/remove). Emits a <strong>change-stream</strong> (the substrate for gossip events and blocking-query notifications). Optionally serializes catalog <em>writes</em> through a per-region Raft group (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#p-10">P10</a>) while keeping health out of consensus (the split, principle 7).</li>
+<li><strong><code>membership</code> (SWIM).</strong> The failure-detection layer (#197 reused): each node periodically <strong>probes</strong> a random peer (ping/ack); on no ack, <strong>indirect-probes</strong> via <code>k</code> other peers; persistent failure → <strong>suspect</strong> then <strong>dead</strong>, with <strong>incarnation numbers</strong> so a node can refute a false suspicion (<code>alive</code> with a higher incarnation). Provides cluster membership <em>and</em> a fast liveness signal for instances co-located with a dead node. Bounded detection time (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4">§4</a>).</li>
+<li><strong><code>gossip</code> (dissemination).</strong> The epidemic engine (#72 reused): registry change events and membership/health updates are <strong>piggybacked</strong> on SWIM probes and on periodic <strong>push-pull</strong> rounds to random peers, with <strong>fanout <code>k</code></strong> and a <strong>dissemination limit</strong> (each event gossiped <code>O(log N)</code> times then retired). Spreads state across the region in <code>O(log N)</code> rounds. Lossy by design — anti-entropy is the backstop.</li>
+<li><strong><code>antientropy</code> (Merkle reconciliation).</strong> The convergence guarantee (#99/#71 reused): periodically, two nodes exchange a <strong>Merkle digest</strong> of their catalog/health state and reconcile only the differing subtrees (read-repair style). Catches anything gossip dropped, so no two nodes stay permanently divergent. The reason gossip can be lossy-but-correct.</li>
+<li><strong><code>dns</code> (authoritative server).</strong> The legacy-compatible interface (#65 wire-format reused, <em>server</em> side): answers <strong>A/AAAA</strong> (instance IPs), <strong>SRV</strong> (host+port+weight+priority), <strong>TXT</strong> (metadata), and <strong>DNS-SD</strong> (<code>PTR</code> enumerate → <code>SRV</code>+<code>TXT</code> resolve, RFC 6763). Lets any DNS-speaking client discover services with zero SDK. TTLs on responses tie into the cache strategy.</li>
+<li><strong><code>cache</code> (multi-tier TTL).</strong> The latency + load-shedding layer (#59 reused): <strong>tier 1</strong> = agent cache (per host), <strong>tier 2</strong> = regional cache (per server, shields the authoritative store + cross-region), authoritative = the registry. <strong>TTL</strong> per entry, <strong>negative caching</strong> (NXDOMAIN/empty), <strong>stale-if-error</strong> (serve expired data when the source is down — AP), and <strong>anti-stampede</strong> (single-flight / request coalescing so a popular key&#39;s TTL expiry doesn&#39;t storm the source).</li>
+<li><strong><code>federation</code> (WAN).</strong> The internet-scale layer: links regions over the WAN. A <strong>sparse WAN gossip pool</strong> (a few designated nodes per region, not all-to-all, the Consul model) exchanges <em>region-level</em> summaries; <strong>selective/locality-scoped replication</strong> (a region replicates only the services another region actually queries, or per a policy) keeps WAN traffic bounded; <strong>cross-region resolution</strong> lets a client ask for service X in region B; <strong>region catalog projection</strong> presents remote services locally. Each region stays <strong>independently authoritative</strong> — a WAN partition does not stop local discovery (principle 6, the AP heart).</li>
+<li><strong><code>runtime</code>.</strong> Node/region lifecycle: <strong>bootstrap</strong> (a node joins its region&#39;s gossip cluster via seed/join addresses, gets identity), the <strong>HTTP/gRPC API</strong> surface (register/deregister/renew/resolve/watch/catalog), config, and (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#p-10">P10</a>) the optional per-region catalog <strong>Raft group</strong>.</li>
+<li><strong><code>bench</code> / <code>conformance</code>.</strong> Propagation-time (register→discoverable), resolution-latency (cache hit/miss), and gossip-bandwidth/CPU harnesses (vs <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4">§4</a>); the <strong>single-region oracle</strong> (one authoritative store, no gossip — the trusted result); a <strong>deterministic-simulation (DST)</strong> differential (virtual time + injected partitions/loss/skew/reorder — convergence + staleness assertions); fault/partition injection.</li>
+</ul>
+<h3 id="sec-3-3">3.3 Boundaries</h3>
+<ul>
+<li><strong>Trust boundary:</strong> the network — clients (register/resolve), gossip peers (intra-region), and WAN peers (other regions). Inputs are validated/length-checked; a peer can be slow, dead, byzantine-lite (send a stale/forged update — defended by incarnation numbers + monotonicity, not full BFT). The DNS/HTTP/gRPC surface is the public attack surface.</li>
+<li><strong>Consistency boundary:</strong> <strong>health/liveness is eventually consistent</strong> (gossip + anti-entropy, AP); <strong>catalog writes may be per-region linearizable</strong> (optional Raft, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#p-10">P10</a>). Cross-region is <strong>always eventually consistent</strong> (federation never blocks local reads). This split is the central boundary (principle 7).</li>
+<li><strong>Concurrency boundary:</strong> per node — gossip/SWIM threads (timing-sensitive), the DNS server, the HTTP/gRPC server, watch/long-poll waiters, the cache, lease-expiry timers. No shared lock on the resolution hot path (principle 9).</li>
+<li><strong>Failure boundary:</strong> a region is the <strong>unit of independence</strong> — a region keeps serving under WAN partition; within a region, a node failure is handled by gossip+SWIM, not by stopping. The coordinator-free data plane (gossip) means no single point of failure for discovery (contrast a central registry).</li>
+</ul>
+<h3 id="sec-3-4">3.4 Data-flow walk — one cross-region registration → discovery (the headline path)</h3>
+<ol>
+<li>Instance <code>i</code> of service <code>payments</code> starts in region B; its <code>sdd-agent</code> calls <code>register(payments, addr, port, tags, locality=B/az2, ttl=15s)</code> → the local region-B <code>registry</code> writes the catalog record + a <code>Lease{ttl=15s}</code>, sets health <code>Passing</code> (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-2">I2</a>/<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-3">I3</a>).</li>
+<li>The registry emits a change event → <code>gossip</code> piggybacks it on SWIM probes + push-pull rounds → within <code>O(log N)</code> gossip rounds every region-B node has the record (propagation bound, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4">§4</a>; <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-8">I8</a>).</li>
+<li><code>antientropy</code> runs periodically; if any node missed the gossip event, the next Merkle reconciliation repairs it (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-9">I9</a>) — convergence guaranteed, not just probable.</li>
+<li>The instance&#39;s agent renews the lease every <code>ttl/3 ≈ 5s</code> (<code>renew</code>); each renewal resets expiry (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-3">I3</a>). SWIM independently probes the <em>node</em> hosting <code>i</code>; if that node dies, SWIM marks it dead → all its instances flagged unhealthy fast (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-6">I6</a>), without waiting for lease expiry.</li>
+<li>A client in region A resolves <code>payments</code> with <code>locality=A, allow_remote=true</code>. Region A&#39;s <code>resolve</code> first returns region-A healthy instances; finding none (service only in B), it consults the <strong>federation</strong> projection of region B (replicated selectively, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#sec-3">§3</a>.x) → returns region-B instances ordered by locality (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-12">I12</a>).</li>
+<li>The answer flows through the cache tiers (regional tier 2 → agent tier 1) with a TTL = <code>min(record_ttl, health_ttl)</code>; subsequent resolutions hit the agent cache at sub-ms (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-11">I11</a>). Negative results (no healthy instance) are negatively cached briefly.</li>
+<li>Instance <code>i</code> is later <strong>gracefully drained</strong> (<code>deregister</code>) → catalog record removed → gossiped → converges. Had it crashed instead, lease expiry (≤15s) + SWIM (≤<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4">§4</a> bound) would have removed it (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-3">I3</a>/<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-6">I6</a>) — the two liveness signals.</li>
+<li>Throughout, a <strong>WAN partition</strong> between A and B would <em>not</em> stop either region serving its local view; region A would serve its last-known (stale, bounded by <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4">§4</a>) projection of region B&#39;s <code>payments</code>, marked <code>stale</code> (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-10">I10</a>, principle 6). <code>Trace</code> records propagation time, gossip rounds, anti-entropy repairs, resolution latency, staleness.</li>
+</ol>
+<h3 id="sec-3-5">3.5 Per-node concurrency model (threads, timers, waiters)</h3>
+<ul>
+<li><strong>SWIM prober thread(s):</strong> periodic probe/ack + indirect probe on a fixed cadence (timing-sensitive — jitter must not falsely suspect; principle 8, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-6">I6</a>); piggybacks gossip.</li>
+<li><strong>Gossip thread(s):</strong> periodic push-pull to random peers; drains the dissemination queue; bounded fanout (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-8">I8</a>).</li>
+<li><strong>Anti-entropy thread:</strong> lower-frequency Merkle exchange + reconcile (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-9">I9</a>).</li>
+<li><strong>Lease-expiry timer wheel:</strong> a hierarchical timer wheel firing per-instance TTL expiry (O(1) amortized, scales to 10^6 leases; <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-3">I3</a>).</li>
+<li><strong>DNS server (UDP+TCP) + HTTP/gRPC server:</strong> async, serve from cache/registry; never block on gossip.</li>
+<li><strong>Watch/long-poll waiters:</strong> parked tasks woken by the registry change-stream (the blocking-query primitive; <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-5">I5</a>).</li>
+<li><strong>Federation/WAN thread:</strong> sparse WAN gossip + selective replication; isolated so WAN slowness never stalls local serving (principle 6).</li>
+<li><strong>Cache maintenance:</strong> TTL expiry, single-flight coalescing.</li>
+<li>Synchronization: the catalog is read-mostly (resolution) + write-rare (register/health) → an RCU/<code>arc-swap</code>-style read-optimized structure (principle 9); no global lock on resolution. Cross-thread ordering only via the change-stream + explicit versions, never hidden locks on the hot path.</li>
+</ul>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Naming, Records, Liveness, Gossip, Federation, Resolution</h2>
+<h3 id="sec-8-1">8.1 Naming hierarchy</h3>
+<ul>
+<li>A fully-qualified service name: <code>service[.tag].namespace.region.&lt;root&gt;</code> — e.g. <code>payments.prod.us-east.svc.discovery.</code> (DNS-compatible labels; <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-1">I1</a>). Components:<ul>
+<li><code>service</code> — the logical service (<code>payments</code>).</li>
+<li><code>namespace</code> — tenancy/isolation boundary (<code>prod</code>, <code>staging</code>).</li>
+<li><code>region</code> — the authoritative region (<code>us-east</code>).</li>
+<li>DNS-SD form: <code>_payments._tcp.prod.us-east.svc.discovery.</code> (RFC 6763 <code>_service._proto</code> prefix).</li>
+</ul>
+</li>
+<li>Resolution may omit <code>region</code> (→ &quot;any/locality-preferred region&quot;, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-12">I12</a>) or pin it (→ a specific region, cross-region allowed by policy).</li>
+<li>Tags subset a service (<code>payments</code> with tag <code>v2</code> → only v2 instances) — expressed as a query filter, not a separate name.</li>
+</ul>
+<h3 id="sec-8-2">8.2 Core records (the catalog)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Record</th>
+<th>Fields (lightweight)</th>
+<th>Consistency tier</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Service</code></td>
+<td>name, namespace, default-port, metadata</td>
+<td>catalog (CP-able, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#p-10">P10</a>)</td>
+</tr>
+<tr>
+<td><code>Instance</code></td>
+<td><code>InstanceId</code>, service, addr, port, locality, tags, metadata, weight</td>
+<td>catalog (CP-able)</td>
+</tr>
+<tr>
+<td><code>Lease</code></td>
+<td>instance, ttl, last_renew, expiry</td>
+<td>liveness (AP, gossip)</td>
+</tr>
+<tr>
+<td><code>Health</code></td>
+<td>instance, state{Passing/Warning/Critical}, check_output, incarnation, logical_ts</td>
+<td>liveness (AP, gossip)</td>
+</tr>
+<tr>
+<td><code>NodeMember</code></td>
+<td>node-id, addr, status{Alive/Suspect/Dead}, incarnation</td>
+<td>membership (AP, SWIM)</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>The <strong>split (principle 7):</strong> <code>Service</code>/<code>Instance</code> (the catalog — rare changes) may sit on a per-region linearizable tier; <code>Lease</code>/<code>Health</code>/<code>NodeMember</code> (constant changes) are always eventually consistent (gossip/SWIM). A resolution joins catalog + health at read time.</li>
+</ul>
+<h3 id="sec-8-3">8.3 Liveness — leases + SWIM (the two signals)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Signal</th>
+<th>Who asserts/detects</th>
+<th>Catches</th>
+<th>Timescale</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Lease (TTL renew)</strong></td>
+<td>the instance renews</td>
+<td>clean exit, stuck-but-present (not renewing), graceful drain</td>
+<td>TTL (5–90 s, default 15 s)</td>
+</tr>
+<tr>
+<td><strong>SWIM probe</strong></td>
+<td>peer nodes detect</td>
+<td>sudden node death, network-isolated node</td>
+<td>&lt; 3×probe_interval (&lt; 3 s)</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>Combined rule: an instance is <code>Passing</code> iff (lease not expired) <strong>and</strong> (its node is <code>Alive</code> in SWIM) <strong>and</strong> (its health check passes). Any failing → degrade (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-4">I4</a>). SWIM is fast for node death; lease is the catch-all; the health check is application-level.</li>
+<li><strong>Eureka self-preservation (a key AP safeguard):</strong> if a node loses heartbeats from a <em>large fraction</em> of instances at once (renewal rate drops below a threshold), assume <strong>network</strong>, not mass death — <em>stop</em> expiring leases until the rate recovers (avoids evicting a healthy fleet during a network blip). A bounded, AP-preserving override of <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-3">I3</a>.</li>
+</ul>
+<h3 id="sec-8-4">8.4 Gossip dissemination</h3>
+<ul>
+<li><strong>Model:</strong> each registry/health/membership change becomes an <strong>event</strong> <code>{key, value, incarnation, logical_ts}</code>. Events are (a) <strong>piggybacked</strong> on SWIM probe/ack messages and (b) spread by periodic <strong>push-pull</strong> rounds to <code>k</code> random peers.</li>
+<li><strong>Push / pull / push-pull:</strong> <em>push</em> = send my new events; <em>pull</em> = ask a peer for its events; <em>push-pull</em> = exchange digests then deltas (the default — converges fastest, Demers 1987).</li>
+<li><strong>Dissemination limit (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-8">I8</a>):</strong> each event is gossiped at most <code>~log N</code> times (a counter per event), then retired — bounds bandwidth; anti-entropy (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-9">I9</a>) catches anyone who missed it.</li>
+<li><strong>Apply rule (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-7">I7</a>/<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-11">I11</a>):</strong> a received event for <code>key</code> is applied iff <code>(incarnation, logical_ts)</code> is strictly greater than the local value&#39;s → monotonic, conflict-free, deterministic winner.</li>
+</ul>
+<h3 id="sec-8-5">8.5 Anti-entropy (Merkle reconciliation)</h3>
+<ul>
+<li><strong>Purpose (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-9">I9</a>):</strong> guarantee convergence despite gossip loss. Periodically, node A and node B exchange a <strong>Merkle tree</strong> over their <code>(key → version)</code> state; matching subtrees are skipped, differing subtrees recursed into; only the differing keys are exchanged (read-repair).</li>
+<li><strong>Tree (#71):</strong> leaves = <code>hash(key, incarnation, logical_ts)</code>; internal = <code>hash(children)</code>; root mismatch → walk down to the differing leaves. Bandwidth ∝ <em>diff size</em>, not state size (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4-4">§4.4</a>).</li>
+<li><strong>Frequency:</strong> lower than gossip (e.g. every 10–30 s); the convergence backstop, not the primary path.</li>
+</ul>
+<h3 id="sec-8-6">8.6 Federation / WAN</h3>
+<ul>
+<li><strong>WAN gossip pool:</strong> a <em>sparse</em> set (e.g. 3 designated nodes per region) join a cross-region gossip pool exchanging <strong>region-level</strong> summaries (the Consul model) — not every node talks WAN (bounds WAN traffic, principle 6/<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4-4">§4.4</a>).</li>
+<li><strong>Selective replication:</strong> a region replicates a remote service&#39;s instances only if (a) a local client has queried it (demand-driven) or (b) a replication policy includes it. Avoids replicating the whole world to every region.</li>
+<li><strong>Region projection:</strong> remote services appear locally as a read-only projection tagged with their origin region + a freshness/staleness age (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-10">I10</a>).</li>
+<li><strong>Cross-region resolution (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-12">I12</a>):</strong> resolve locally first; if empty or policy says <code>allow_remote</code>, consult region projections, ordered by the locality ladder.</li>
+<li><strong>Independence (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-13">I13</a>):</strong> the WAN path is off the local read critical path — a WAN partition degrades <em>remote</em> answers (served stale, flagged) but never blocks <em>local</em> discovery.</li>
+</ul>
+<h3 id="sec-8-7">8.7 Resolution / query engine</h3>
+<ul>
+<li>Input: <code>ResolveQuery{ name, tags, health_policy, locality, allow_remote, max_results, weight_mode }</code>.</li>
+<li>Steps: (1) canonicalize name (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-1">I1</a>); (2) gather candidate instances (local catalog ⨝ health); (3) <strong>filter</strong> by health policy (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-4">I4</a>) + tags; (4) <strong>order</strong> by locality ladder (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-12">I12</a>) then weight; (5) if empty and <code>allow_remote</code>, repeat over region projections (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-13">I13</a>); (6) cap to <code>max_results</code>; (7) cache the result with TTL (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-10">I10</a>).</li>
+<li><strong>Blocking query (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-5">I5</a>):</strong> the client sends a <code>last_seen_version</code>; the server holds the request until the result set&#39;s version exceeds it or the timeout fires → efficient change notification without polling.</li>
+<li>The engine returns <em>candidates</em>; it does <strong>not</strong> pick one (no load balancing) — the client/LB chooses (with retries across candidates, the AP recovery for a stale entry).</li>
+</ul>
+<h3 id="sec-8-8">8.8 Wire protocols (lightweight)</h3>
+<ul>
+<li><strong>Gossip frame:</strong> <code>[magic | version | type | from-node | seq | len | checksum | payload]</code>; types: <code>Probe</code>, <code>Ack</code>, <code>IndirectProbe</code>, <code>Push</code>, <code>Pull</code>, <code>PushPull</code>, <code>AeDigest</code>, <code>AeDelta</code>, <code>WanSummary</code>, <code>Bye</code>. UDP for SWIM/gossip (small, lossy-ok), TCP for anti-entropy/large deltas.</li>
+<li><strong>DNS:</strong> standard RFC 1035 message; we author A/AAAA/SRV/TXT/PTR answers; TTL per record from the cache strategy.</li>
+<li><strong>API:</strong> gRPC (HTTP/2) <code>Register/Deregister/Renew/Resolve/Watch/Catalog</code>; proto versioned (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-15">I15</a>).</li>
+<li><strong>Apply / merge:</strong> every state-bearing frame carries <code>(incarnation, logical_ts)</code> for the apply rule (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-7">I7</a>/<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-11">I11</a>).</li>
+</ul>
+<h3 id="sec-8-9">8.9 State machines</h3>
+<ul>
+<li><strong>Instance:</strong> <code>Registered(Passing) → {Warning | Critical} → {Passing (recover) | Deregistered (graceful) | Expired (lease) | Evicted (node dead)}</code>.</li>
+<li><strong>Node (SWIM):</strong> <code>Alive → Suspect → Dead</code>; <code>Suspect → Alive</code> on refutation (higher incarnation, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-11">I11</a>); <code>Dead</code> gossiped, then forgotten after a tombstone window.</li>
+<li><strong>Lease:</strong> <code>Active → (renew → Active) | (no renew within ttl → Expired)</code>.</li>
+<li><strong>Region link (federation):</strong> <code>Connected → {Degraded(stale) → Connected | Partitioned(serve-local-only) → Connected}</code>.</li>
+</ul>
+<h3 id="sec-8-10">8.10 Edge / failure-path examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Expected</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>re-register same <code>InstanceId</code></td>
+<td>idempotent; incarnation bumps; LWW (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-2">I2</a>/<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-11">I11</a>)</td>
+</tr>
+<tr>
+<td>instance crashes without dereg</td>
+<td>lease expiry (≤TTL) <strong>or</strong> SWIM node-dead (≤3 s) removes it (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-3">I3</a>/<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-6">I6</a>)</td>
+</tr>
+<tr>
+<td>node GC-pauses 1 s</td>
+<td>SWIM indirect probe + incarnation refute → not falsely killed (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-6">I6</a>/principle 8)</td>
+</tr>
+<tr>
+<td>two nodes concurrently update one instance&#39;s health</td>
+<td><code>(incarnation, ts)</code> total order → both converge to the same winner (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-11">I11</a>)</td>
+</tr>
+<tr>
+<td>gossip packet dropped</td>
+<td>next anti-entropy Merkle reconcile repairs it (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-9">I9</a>)</td>
+</tr>
+<tr>
+<td>WAN partition A↔B</td>
+<td>A serves local + stale-flagged B projection; B same; neither blocks (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-13">I13</a>)</td>
+</tr>
+<tr>
+<td>mass restart (registry storm)</td>
+<td>dissemination batching + rate-limited re-register; bounded (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4-4">§4.4</a>, principle 5)</td>
+</tr>
+<tr>
+<td>resolve a service with zero healthy instances</td>
+<td>empty result, negatively cached (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-17">I17</a>), <code>stale</code> not set</td>
+</tr>
+<tr>
+<td>clock skew (renew arrives &quot;early/late&quot;)</td>
+<td>renew-at-ttl/3 absorbs skew; expiry uses local monotonic clock (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-3">I3</a>)</td>
+</tr>
+<tr>
+<td>malformed DNS packet / gossip frame</td>
+<td>rejected at parse, no UB (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-16">I16</a>)</td>
+</tr>
+<tr>
+<td>flapping instance (Passing↔Critical rapidly)</td>
+<td>flap damping (hysteresis) before gossiping the change (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#p-2">P2</a>/<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#p-12">P12</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-11">8.11 Resolution sequence (cross-region, blocking query)</h3>
+<pre class="diagram"><code>client agent           region-A resolve         A region-cache       federation(WAN)        region-B (proj)
+  │ resolve(payments,      │                        │                     │                      │
+  │   locality=A,          │                        │                     │                      │
+  │   allow_remote,        │                        │                     │                      │
+  │   last_ver=V) ────────►│ canonicalize (I1)      │                     │                      │
+  │                        │ local catalog⨝health   │                     │                      │
+  │                        │   → empty (only in B)  │                     │                      │
+  │                        │ cache lookup ─────────►│ miss                │                      │
+  │                        │ allow_remote → proj ───┼────────────────────►│ region-B projection  │
+  │                        │                        │                     │  (replicated, stale  │
+  │                        │ ◄── B instances, age ──┼─────────────────────┤   age=1.2s, I10)     │
+  │                        │ order by locality (I12)│                     │                      │
+  │ ◄── candidates (stale, │ cache w/ TTL (I10) ───►│                     │                      │
+  │     age=1.2s) ─────────┤                        │                     │                      │
+  │ (LB picks; retries     │ blocking: if ver==V,    │                     │                      │
+  │  across candidates)    │  hold until change/timeout (I5)               │                      │</code></pre>
+<ul>
+<li>The WAN consult is off the <em>local</em> critical path (only on local-miss + allow_remote); a WAN partition → B-projection served stale-flagged or empty, never a hang (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-13">I13</a>).</li>
+</ul>
+<h3 id="sec-8-12">8.12 Convergence / consistency model (eventual + conflict resolution)</h3>
+<ul>
+<li><strong>Consistency class:</strong> the health/membership state is an <strong>eventually consistent, conflict-free</strong> replicated map keyed by <code>InstanceId</code>/<code>node-id</code>, values ordered by <code>(incarnation, logical_ts)</code> — a last-writer-wins register per key with a deterministic total order (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-11">I11</a>). This is a CRDT-flavored design (an LWW-register map): merges are commutative, associative, idempotent → any gossip/anti-entropy order converges to the same state.</li>
+<li><strong>Why not vector clocks (#95) for the value?</strong> Vector clocks detect <em>concurrent</em> updates so the application can merge them; here the desired semantic for &quot;instance health&quot; is simply <em>the most recent assertion wins</em> (a node&#39;s own incarnation is authoritative for its own state), so an incarnation+timestamp LWW register is sufficient and far cheaper (O(1) vs O(N) metadata). Vector clocks inform the reasoning and would be needed if we allowed <em>third-party</em> edits to an instance&#39;s state (we do not — each node owns its own + its instances&#39;).</li>
+<li><strong>Incarnation numbers (the SWIM mechanism):</strong> a node&#39;s <code>incarnation</code> increments whenever it must <strong>refute</strong> a suspicion (&quot;I&#39;m alive, incarnation N+1&quot;) — this lets a falsely-suspected node override the <code>Suspect</code> gossip deterministically (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-11">I11</a>/principle 8). Incarnations are the per-key version that makes LWW correct across the refute/suspect race.</li>
+<li><strong>Convergence guarantee (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-9">I9</a>):</strong> gossip gives <em>probabilistic</em> fast convergence; anti-entropy gives <em>deterministic</em> eventual convergence (Merkle reconcile transfers any missing/older keys). Together: bounded-time convergence (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4-1">§4.1</a>) with a hard backstop. No two correct nodes stay divergent past one anti-entropy interval.</li>
+<li><strong>What is NOT guaranteed:</strong> linearizability of health (it&#39;s AP — a read may return data another node has already superseded, within the staleness bound, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-10">I10</a>); monotonic-read consistency across <em>different</em> agents (each agent&#39;s cache may be at a different version — bounded, flagged). The catalog tier (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#p-10">P10</a>) optionally adds per-region linearizability for <em>catalog</em> writes only.</li>
+</ul>
+<h3 id="sec-8-13">8.13 Worked example — Consul-style multi-DC, demand-driven federation</h3>
+<ul>
+<li>Setup: regions <code>us-east</code>, <code>us-west</code>, <code>eu</code>. Service <code>payments</code> runs only in <code>us-east</code> (10 instances). A client in <code>us-west</code> resolves <code>payments</code> with <code>allow_remote=true</code>.</li>
+<li>First resolution: <code>us-west</code> has no local <code>payments</code>, no projection yet → federation queries the <code>us-east</code> WAN pool → fetches the 10 instances → caches a <strong>projection</strong> locally (tagged origin <code>us-east</code>, age 0) → returns them ordered (all remote, same locality tier).</li>
+<li>The projection now <strong>subscribes</strong> (demand-driven selective replication): <code>us-east</code>&#39;s WAN pool gossips <code>payments</code> health/membership changes to <code>us-west</code>&#39;s WAN pool → subsequent <code>us-west</code> resolutions are local-projection cache hits (sub-ms), kept fresh within the WAN propagation bound (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4-1">§4.1</a>).</li>
+<li>An instance in <code>us-east</code> goes Critical → gossiped within <code>us-east</code> (&lt; 2 s) → WAN-gossiped to <code>us-west</code> projection (&lt; +WAN-RTT+round) → <code>us-west</code> resolutions stop returning it (&lt; ~3–5 s total, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-10">I10</a> staleness bound).</li>
+<li>WAN partition <code>us-east ↔ us-west</code>: <code>us-west</code> keeps serving its last-known <code>payments</code> projection, <strong>flagged stale with a growing age</strong> (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-10">I10</a>/<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-13">I13</a>); when age exceeds a policy threshold the projection may be marked all-Critical (fail-safe) or kept (fail-stale) per config (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#p-9">P9</a>). <code>us-east</code> is entirely unaffected (serves locally). Neither region&#39;s discovery goes down for a WAN issue (principle 1/6).</li>
+<li>Contrast with a hypothetical CP design: a global linearizable catalog would have <em>refused</em> the <code>us-west</code> registration-or-read on the minority side of the partition → <code>us-west</code>&#39;s <code>payments</code> routing <strong>down</strong> until heal. The AP design degrades to <em>stale</em>, not <em>down</em> (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/blueprint/#sec-2-7">§2.7</a>).</li>
+</ul>
+<h3 id="sec-8-14">8.14 Worked example — registry storm (mass restart) and how it&#39;s shed</h3>
+<ul>
+<li>Trigger: a 10^4-instance region&#39;s hosts all restart (a rolling deploy gone wide, or a power event) → every instance&#39;s agent re-registers within seconds → <code>O(10^4)</code> catalog writes + health events in a burst.</li>
+<li>Naive failure: each event gossiped independently at fanout <code>k</code> → <code>O(10^4 · k · log N)</code> messages in seconds → gossip broadcast storm → CPU/NIC saturation → SWIM probes delayed → <em>false</em> failure detections → <em>more</em> churn → meltdown (the feedback loop).</li>
+<li>Mitigations (principle 5, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4-4">§4.4</a>):<ul>
+<li><strong>Dissemination batching:</strong> the gossip layer coalesces many pending events into one push-pull message (amortize per-message overhead) — <code>O(10^4)</code> events ride in <code>O(10^4 / batch)</code> messages.</li>
+<li><strong>Rate-limited / jittered re-registration:</strong> agents spread re-registration over a window (randomized backoff) so the burst is smeared, not instantaneous.</li>
+<li><strong>SWIM isolation:</strong> the failure detector runs on its own cadence (and self-preservation, <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/architecture/#sec-8-3">§8.3</a>, kicks in if the renewal rate craters — assume network, don&#39;t evict) → the storm does not cause cascading false deaths.</li>
+<li><strong>Anti-entropy convergence:</strong> even if many gossip events are dropped under load, the post-storm Merkle reconcile (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/reliability/#inv-9">I9</a>) converges everyone — correctness is preserved even when the fast path is overwhelmed.</li>
+</ul>
+</li>
+<li>Outcome: the storm is <strong>bounded and shed</strong> (batched, rate-limited, self-preserving), convergence is <strong>guaranteed</strong> (anti-entropy), and detection stays <strong>stable</strong> (SWIM isolation + self-preservation). The <a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4">§4</a> 50 k/s burst target is the design point for this scenario.</li>
+</ul>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Discovery is AP, not CP — choose availability under partition.</strong> Every region keeps answering with bounded-stale data rather than blocking to agree. <em>Violation:</em> a CP discovery core (etcd-only) → discovery availability = consensus availability → a partition takes the whole fleet&#39;s routing down (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/blueprint/#sec-2-7">§2.7</a>). Tradeoff: transient stale answers (bounded, recoverable) over outages.</li><li id="p-2"><strong>Bounded staleness, always reported — never unbounded, never silent.</strong> Stale answers carry an age/<code>stale</code> flag; the staleness bound (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4-2">§4.2</a>) is enforced (gossip + anti-entropy + TTL). <em>Violation:</em> unbounded or unlabeled staleness → clients trust dead data indefinitely → silent black-holing of traffic.</li><li id="p-3"><strong>Gossip for speed, anti-entropy for certainty.</strong> Gossip disseminates fast but lossily (<code>O(log N)</code>); periodic Merkle anti-entropy guarantees eventual convergence (catches drops). <em>Violation:</em> gossip-only → a dropped update leaves nodes permanently divergent; anti-entropy-only → propagation is minutes, not seconds.</li><li id="p-4"><strong>Two liveness signals: lease (instance asserts) + SWIM (peers detect) — combine them.</strong> Leases catch clean exits / stuck-but-present; SWIM catches sudden node death fast and bounds detection. <em>Violation:</em> leases-only → slow detection of crashed nodes (wait full TTL); SWIM-only → can&#39;t catch an instance that&#39;s up but unhealthy/not-renewing.</li><li id="p-5"><strong>Backpressure + bounding everywhere — survive the registry storm.</strong> Gossip fanout, dissemination limits, batching, rate-limited re-registration, bounded caches, single-flight. <em>Violation:</em> unbounded gossip on mass restart → broadcast storm → cluster meltdown; unbounded caches → OOM (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4-4">§4.4</a>).</li><li id="p-6"><strong>A region is independently authoritative; the WAN is best-effort.</strong> Local discovery never depends on a remote region or the WAN link being up. Federation replicates <em>selectively</em> and <em>asynchronously</em>. <em>Violation:</em> synchronous cross-region dependency → a WAN partition stops local discovery (the opposite of AP, principle 1).</li><li id="p-7"><strong>Split catalog (consistency-leaning) from health (eventual).</strong> Rarely-changing catalog metadata may be per-region linearizable (Raft); constantly-changing health is always eventual (gossip). <em>Violation:</em> all-CP → health changes need consensus → unscalable + blocks resolution; all-AP catalog → conflicting metadata (two ports for one instance) with no authority.</li><li id="p-8"><strong>Failure detection is bounded and false-positive-aware.</strong> Detection time &lt; a fixed bound (<a class="cite" href="/system-design-blueprints/systems/internet-scale-service-discovery-system/numbers/#sec-4-3">§4.3</a>); indirect probes + incarnation numbers minimize false positives. <em>Violation:</em> aggressive timeouts → healthy instances flap out of resolution (real traffic loss); lax timeouts → dead instances served for minutes.</li><li id="p-9"><strong>Resolution is read-mostly and lock-free on the hot path.</strong> The catalog is RCU/<code>arc-swap</code>-read-optimized; resolution never takes a global write lock. <em>Violation:</em> a lock on the resolution path → contention collapses QPS under load (the hot path is 50 k+ QPS/node).</li><li id="p-10"><strong>Cache aggressively with TTLs, negative caching, and stale-if-error.</strong> Multi-tier (agent → regional → authoritative) shields the source and serves AP under failure. <em>Violation:</em> no caching → every request hits the authoritative store → it melts; no stale-if-error → a source blip = a resolution outage (un-AP).</li><li id="p-11"><strong>Conflict resolution is deterministic (incarnation + LWW), not ad hoc.</strong> Concurrent updates to the same instance resolve by incarnation number then timestamp — total order, every node agrees. <em>Violation:</em> non-deterministic merge → nodes converge to <em>different</em> states (divergence that anti-entropy can&#39;t fix because they disagree on the winner).</li><li id="p-12"><strong>Stable wire compatibility across gossip, DNS, and the API.</strong> Gossip/WAN frames, DNS responses, and the gRPC schema are versioned; mixed-version nodes negotiate or refuse. <em>Violation:</em> silent protocol drift during a rolling upgrade → corruption / partition between versions.</li><li id="p-13"><strong>Observe every propagation, every convergence, every staleness.</strong> Emit propagation time, gossip rounds, anti-entropy repairs, resolution latency by tier, staleness age, false-positive rate. <em>Violation:</em> opaque convergence → &quot;why isn&#39;t service X visible in region B?&quot; is undebuggable.</li><li id="p-14"><strong>Correctness anchored to a single-region oracle + deterministic simulation.</strong> A single authoritative store (no gossip) is the reference; DST (virtual time + injected faults) verifies convergence/staleness deterministically. <em>Violation:</em> no oracle → eventual-consistency bugs (the worst kind) are unreproducible and undebuggable.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

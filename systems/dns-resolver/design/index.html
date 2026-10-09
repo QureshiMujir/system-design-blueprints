@@ -1,0 +1,313 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>DNS Resolver — Design · Engineering Blueprints</title><meta name="description" content="DNS Resolver, lld: core types, repo tree, file inventory. Build a correct, DNSSEC-validating, privacy-respecting recursive/caching DNS resolver in Rust: RFC 1035 wire-format parsing, iterative recursive resolution from the IANA root, positive and negative…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/networking-protocols/">Networking &amp; Protocols</a> </li><li> <a href="/system-design-blueprints/systems/dns-resolver/">DNS Resolver</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:13"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/networking-protocols/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Networking &amp; Protocols</span></a> </p> <h1>DNS Resolver</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~11 weeks</li> <li>2,511 lines</li> <li>blueprint #186</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/dns-resolver/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/dns-resolver/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/dns-resolver/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/dns-resolver/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/dns-resolver/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/dns-resolver/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/dns-resolver/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/dns-resolver/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/dns-resolver/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/dns-resolver/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:DNS Resolver — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/dns-resolver/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>pub struct Name { bytes: bytes::Bytes, label_count: u8 }   // canonical-lowercase, no pointers stored
+
+impl Name {
+    pub fn root() -&gt; Self;
+    pub fn from_ascii(s: &amp;str) -&gt; Result&lt;Self, NameError&gt;;
+    pub fn from_wire(buf: &amp;[u8]) -&gt; Result&lt;(Self, usize), NameError&gt;;
+    pub fn label_count(&amp;self) -&gt; u8;
+    pub fn is_root(&amp;self) -&gt; bool;
+    pub fn parent(&amp;self) -&gt; Option&lt;Name&gt;;
+    pub fn is_in_bailiwick_of(&amp;self, zone: &amp;Name) -&gt; bool;      // I1
+    pub fn cmp_canonical(&amp;self, other: &amp;Name) -&gt; std::cmp::Ordering;  // I9
+    pub fn encode(&amp;self, out: &amp;mut bytes::BytesMut);
+}</code></pre><pre class="code"><code>#[repr(u16)]
+pub enum RecordType {                    // IANA-assigned values; do not renumber
+    A = 1, NS = 2, CNAME = 5, SOA = 6, PTR = 12, MX = 15, TXT = 16, AAAA = 28,
+    SRV = 33, OPT = 41, DS = 43, RRSIG = 46, NSEC = 47, DNSKEY = 48, NSEC3 = 50,
+    SVCB = 64, HTTPS = 65, CAA = 257, Any = 255,
+}
+
+#[repr(u16)]
+pub enum Class { IN = 1, CH = 3, HS = 4, None = 254, Any = 255 }</code></pre><pre class="code"><code>pub enum RData {
+    A(std::net::Ipv4Addr), Aaaa(std::net::Ipv6Addr), Cname(Name), Ns(Name), Ptr(Name),
+    Mx { preference: u16, exchange: Name },
+    Soa { mname: Name, rname: Name, serial: u32, refresh: u32, retry: u32, expire: u32, minimum: u32 },
+    Txt(Vec&lt;bytes::Bytes&gt;), Srv { priority: u16, weight: u16, port: u16, target: Name },
+    Caa { flags: u8, tag: bytes::Bytes, value: bytes::Bytes },
+    Svcb(SvcbRecord), Https(SvcbRecord), Dnskey(DnskeyRecord), Ds(DsRecord),
+    Rrsig(RrsigRecord), Nsec(NsecRecord), Nsec3(Nsec3Record), Opt(OptRecord),
+    Unknown { rtype: u16, raw: bytes::Bytes },   // RFC 3597
+}</code></pre><pre class="code"><code>pub struct Header { pub id: u16, pub flags: HeaderFlags, pub qd_count: u16, pub an_count: u16, pub ns_count: u16, pub ar_count: u16 }
+
+bitflags::bitflags! {
+    pub struct HeaderFlags: u16 {
+        const QR=0x8000; const OPCODE_MASK=0x7800; const AA=0x0400; const TC=0x0200;
+        const RD=0x0100; const RA=0x0080; const AD=0x0020; const CD=0x0010; const RCODE_MASK=0x000F;
+    }
+}</code></pre><pre class="code"><code>pub struct Question { pub name: Name, pub qtype: RecordType, pub qclass: Class }
+pub struct ResourceRecord { pub name: Name, pub rtype: RecordType, pub class: Class, pub ttl: u32, pub rdata: RData }
+pub struct Message { pub header: Header, pub questions: Vec&lt;Question&gt;, pub answers: Vec&lt;ResourceRecord&gt;,
+                      pub authority: Vec&lt;ResourceRecord&gt;, pub additional: Vec&lt;ResourceRecord&gt;, pub edns: Option&lt;OptRecord&gt; }</code></pre><pre class="code"><code>#[repr(u8)]  pub enum Opcode { Query=0, IQuery=1, Status=2, Notify=4, Update=5 }
+#[repr(u16)] pub enum Rcode  { NoError=0, FormErr=1, ServFail=2, NxDomain=3, NotImp=4,
+                                Refused=5, YxDomain=6, YxRrSet=7, NxRrSet=8, NotAuth=9,
+                                NotZone=10, BadVers=16, BadCookie=23 }
+
+pub struct OptRecord { pub udp_payload_size: u16, pub extended_rcode: u8, pub version: u8,
+                        pub flags: OptFlags, pub options: Vec&lt;EdnsOption&gt; }   // flags carries DO bit
+
+pub enum EdnsOption {
+    Nsid(bytes::Bytes), Ecs { family: u16, source: u8, scope: u8, address: bytes::Bytes },
+    Cookie { client: [u8; 8], server: Option&lt;bytes::Bytes&gt; },
+    Padding(usize), ExtendedError { code: u16, text: bytes::Bytes },
+    Unknown { code: u16, data: bytes::Bytes },
+}</code></pre><pre class="code"><code>pub struct RrsetEntry { pub key: RrsetKey, pub rrs: Vec&lt;ResourceRecord&gt;, pub inserted_at: std::time::Instant,
+                         pub ttl: u32, pub trust: TrustLevel, pub validation: ValidationVerdict }
+pub struct NegativeEntry { pub key: RrsetKey, pub rcode: Rcode, pub ttl: u32,
+                            pub soa: Option&lt;ResourceRecord&gt;, pub validation: ValidationVerdict }
+pub struct RrsetKey { pub name: Name, pub rtype: RecordType, pub class: Class }
+
+#[repr(u8)]
+pub enum TrustLevel { AdditionalGlue=1, AdditionalAuthAA=2, Authority=3, AnswerNonAA=4, AnswerAA=5, SecureValidated=6 }</code></pre><pre class="code"><code>#[repr(u8)]
+pub enum ValidationVerdict { Secure, Insecure, Bogus, Indeterminate }   // RFC 4035 §4, I8
+
+pub struct ResolverConfig { pub mode: ResolverMode, pub upstreams: Vec&lt;Upstream&gt;,
+                            pub root_hints_path: std::path::PathBuf, pub trust_anchor_path: std::path::PathBuf,
+                            pub qname_min: bool, pub aggressive_nsec: bool, pub cookies: bool,
+                            pub serve_stale: ServeStalePolicy, pub cache_size_bytes: usize,
+                            pub timeout: std::time::Duration, pub retries: u8 }
+pub enum ResolverMode { Stub, Recursive }
+pub struct Upstream { pub addr: std::net::SocketAddr, pub transport: TransportKind, pub sni: Option&lt;String&gt; }
+
+pub struct Engine { cache: std::sync::Arc&lt;dns_cache::Cache&gt;, resolver: std::sync::Arc&lt;dns_resolver::Resolver&gt;,
+                     validator: std::sync::Arc&lt;dns_validator::Validator&gt;, transports: dns_transport::TransportSet,
+                     cfg: ResolverConfig }
+impl Engine {
+    pub fn new(cfg: ResolverConfig) -&gt; Result&lt;Self, EngineError&gt;;
+    pub async fn query(&amp;self, q: &amp;Question, opts: QueryOptions) -&gt; Result&lt;Message, EngineError&gt;;
+    pub async fn shutdown(&amp;self);
+}
+pub struct QueryOptions { pub cd: bool, pub do_bit: bool, pub recursion_desired: bool, pub deadline: Option&lt;std::time::Instant&gt; }</code></pre><pre class="code"><code>#[async_trait::async_trait]
+pub trait Transport: Send + Sync + &#39;static {
+    async fn query(&amp;self, msg: &amp;Message, deadline: std::time::Instant) -&gt; Result&lt;Message, TransportError&gt;;
+    fn kind(&amp;self) -&gt; TransportKind;
+}
+
+pub trait CacheStore: Send + Sync {
+    fn insert_rrset(&amp;self, e: RrsetEntry, accept: TrustLevel) -&gt; Result&lt;(), CacheError&gt;;
+    fn insert_negative(&amp;self, e: NegativeEntry) -&gt; Result&lt;(), CacheError&gt;;
+    fn lookup(&amp;self, k: &amp;RrsetKey) -&gt; Option&lt;std::sync::Arc&lt;RrsetEntry&gt;&gt;;
+    fn lookup_negative(&amp;self, k: &amp;RrsetKey) -&gt; Option&lt;std::sync::Arc&lt;NegativeEntry&gt;&gt;;
+    fn synthesise_nxdomain(&amp;self, qname: &amp;Name, qtype: RecordType) -&gt; Option&lt;NegativeEntry&gt;;
+    fn evict_expired(&amp;self) -&gt; usize;
+}
+
+pub trait Validator: Send + Sync {
+    fn validate(&amp;self, answer: &amp;[ResourceRecord], authority: &amp;[ResourceRecord], rrsigs: &amp;[RrsigRecord],
+                dnskeys: &amp;[DnskeyRecord], ds_chain: &amp;[DsRecord], trust_anchors: &amp;TrustAnchorSet,
+                now: std::time::SystemTime) -&gt; ValidationVerdict;
+}</code></pre> </section><section class="prose"><h2 id="sec-10">10. Repository Layout</h2>
+<ul>
+<li><code>DNS-Resolver/</code><ul>
+<li><code>README.md</code> — project overview, quickstart pointer.</li>
+<li><code>FINAL_BLUEPRINT.md</code> — this document.</li>
+<li><code>BUILD_PLAN.md</code> — phase-by-phase execution checklist mirroring <a class="cite" href="/system-design-blueprints/systems/dns-resolver/build/#sec-12">§12</a>–<a class="cite" href="/system-design-blueprints/systems/dns-resolver/build/#sec-22">§22</a>.</li>
+<li><code>CHANGELOG.md</code> — Keep-a-Changelog format.</li>
+<li><code>BLUEPRINT_LOG.md</code> — per-phase close-out log with dates.</li>
+<li><code>CONTRIBUTING.md</code>, <code>CODE_OF_CONDUCT.md</code>, <code>SECURITY.md</code> (PGP fingerprint placeholder).</li>
+<li><code>LICENSE</code> — SPDX header pointing at <code>LICENSES/</code>.</li>
+<li><code>LICENSES/</code> — <code>Apache-2.0.txt</code>, <code>MIT.txt</code>.</li>
+<li><code>.github/workflows/</code> — <code>ci.yml</code>, <code>conformance.yml</code>, <code>fuzz.yml</code>, <code>interop.yml</code>,
+<code>security.yml</code>, <code>release.yml</code> (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/trade-offs/#adr-27">ADR-27</a>).</li>
+<li><code>Makefile</code> — <code>bootstrap, build, test, lint, typecheck, compose-up, compose-down, release-check, clean</code>.</li>
+<li><code>Cargo.toml</code>, <code>Cargo.lock</code>, <code>rust-toolchain.toml</code>, <code>deny.toml</code> (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/trade-offs/#adr-17">ADR-17</a>).</li>
+<li><code>Dockerfile</code>, <code>docker-compose.yml</code> (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/trade-offs/#adr-28">ADR-28</a>).</li>
+<li><code>crates/</code><ul>
+<li><code>dns-wire/src/</code> — <code>lib.rs</code>; <code>name.rs</code> (Name, compression, bailiwick); <code>header.rs</code>;
+<code>question.rs</code>; <code>rr.rs</code>; <code>rdata/{a,aaaa,cname,mx,ns,ptr,soa,txt,srv,caa,svcb,dnskey, ds,rrsig,nsec,nsec3}.rs</code>; <code>opt.rs</code>; <code>opt_options/{padding,cookie,nsid,ecs, extended_error}.rs</code>; <code>codec.rs</code>; <code>canonical.rs</code>; <code>error.rs</code>.</li>
+<li><code>dns-cache/src/</code> — <code>lib.rs</code>; <code>store.rs</code> (CacheStore, RrsetEntry, NegativeEntry);
+<code>ttl.rs</code>; <code>lru.rs</code>; <code>aggressive_nsec.rs</code>; <code>pinning.rs</code>; <code>error.rs</code>.</li>
+<li><code>dns-resolver/src/</code> — <code>lib.rs</code>; <code>stub.rs</code>; <code>recursive.rs</code>; <code>nameserver_set.rs</code>;
+<code>glue.rs</code>; <code>priming.rs</code>; <code>hints.rs</code>; <code>qname_min.rs</code>; <code>policy.rs</code>; <code>error.rs</code>.</li>
+<li><code>dns-validator/src/</code> — <code>lib.rs</code>; <code>chain.rs</code>; <code>trust_anchor.rs</code>; <code>verify.rs</code>;
+<code>algorithms/{rsa_sha256,ecdsa_p256_sha256,ecdsa_p384_sha384,ed25519}.rs</code>; <code>nsec.rs</code>;
+<code>nsec3.rs</code>; <code>verdict.rs</code>; <code>error.rs</code>.</li>
+<li><code>dns-transport/src/</code> — <code>lib.rs</code>; <code>udp.rs</code>; <code>tcp.rs</code>; <code>dot.rs</code>; <code>doh.rs</code>; <code>doq.rs</code>;
+<code>pool.rs</code>; <code>happy_eyeballs.rs</code>; <code>error.rs</code>.</li>
+<li><code>dns-server/src/</code> — <code>lib.rs</code>; <code>listener.rs</code>; <code>dot_listener.rs</code>; <code>doh_listener.rs</code>;
+<code>doq_listener.rs</code>; <code>handler.rs</code>; <code>ratelimit.rs</code>; <code>error.rs</code>.</li>
+<li><code>dns-cli/src/</code> — <code>main.rs</code> (<code>mini-dig</code>); <code>commands/{query,trace,keychain, cookies}.rs</code>.</li>
+<li><code>dns-conformance/src/</code> — <code>main.rs</code>; <code>corpora/{wire,codec,resolver,validator, transport,interop}/</code>; <code>report.rs</code>.</li>
+<li><code>dns-fuzz/fuzz_targets/</code> — <code>wire_decode.rs</code>; <code>name_decompress.rs</code>;
+<code>rrsig_verify.rs</code>; <code>opt_parse.rs</code>.</li>
+<li><code>dns-bench/benches/</code> — <code>codec.rs</code>; <code>cache.rs</code>; <code>resolver.rs</code>; <code>validator.rs</code>.</li>
+</ul>
+</li>
+<li><code>conformance/</code> — <code>runner.sh</code>;
+<code>corpora/{wire,name,edns,dnssec,cache,resolver,validator,transport,interop}/</code>;
+<code>report_schema.json</code>.</li>
+<li><code>fuzz/seeds/</code> — shared corpus seeds consumed by <code>crates/dns-fuzz</code>.</li>
+<li><code>benchmarks/</code> — <code>codec.md</code>, <code>cache.md</code>, <code>resolver.md</code>, <code>validator.md</code>.</li>
+<li><code>docs/</code><ul>
+<li><code>adr/</code> — 29 files, <code>ADR-01.md</code> … <code>ADR-29.md</code>, one per <a class="cite" href="/system-design-blueprints/systems/dns-resolver/trade-offs/#sec-9">§9</a> row.</li>
+<li><code>runbooks/</code> — <code>triage.md</code>, <code>bogus.md</code>, <code>slow.md</code>.</li>
+<li><code>threat-model/overview.md</code>.</li>
+<li><code>performance/methodology.md</code>.</li>
+<li><code>failure-analysis/postmortem-template.md</code>.</li>
+<li><code>architecture/</code> — <code>overview.md</code>, <code>codec.md</code>, <code>cache.md</code>, <code>resolver.md</code>,
+<code>validator.md</code>, <code>qname-min.md</code>, <code>transports.md</code>, <code>trust-anchor.md</code>.</li>
+<li><code>glossary.md</code>.</li>
+</ul>
+</li>
+<li><code>examples/</code> — <code>stub.rs</code>, <code>recursive.rs</code>, <code>doh-client.rs</code>, <code>doq-client.rs</code>.</li>
+<li><code>templates/</code> — <code>adr.md</code>, <code>postmortem.md</code>, <code>interop-report.md</code>.</li>
+<li><code>scripts/</code> — <code>upload-to-github.sh</code>, <code>capture-corpus.sh</code>.</li>
+<li><code>tools/corpus-scraper/README.md</code>.</li>
+<li><code>notes/rfc-derivations/README.md</code>.</li>
+<li><code>papers/whitepaper/whitepaper-v1.0.md</code>.</li>
+<li><code>legal/</code> — <code>terms.md</code>, <code>privacy.md</code>.</li>
+<li><code>brand/voice.md</code>.</li>
+</ul>
+</li>
+</ul>
+<p>Names above are normative and reused identically in <a class="cite" href="/system-design-blueprints/systems/dns-resolver/design/#sec-11">§11</a> Core Schema &amp; Types, every phase&#39;s
+N.2, and <a class="cite" href="/system-design-blueprints/systems/dns-resolver/design/#sec-38">§38</a> Appendix A — File Inventory.</p>
+<hr>
+</section><section aria-labelledby="sec-38"> <h2 id="sec-38">File inventory <small class="muted">(Appendix A · 30 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>lib.rs</code></td><td>crate root, public re-exports</td></tr><tr><td><code>name.rs</code></td><td><code>Name</code>, label/pointer decode-encode, bailiwick (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-11-1">§11.1</a>)</td></tr><tr><td><code>header.rs</code></td><td><code>Header</code>, <code>HeaderFlags</code>, opcode/rcode wiring (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-11-4">§11.4</a>/11.5)</td></tr><tr><td><code>question.rs</code></td><td><code>Question</code></td></tr><tr><td><code>rr.rs</code></td><td><code>ResourceRecord</code>, <code>RData</code> dispatch</td></tr><tr><td><code>rdata/a.rs</code></td><td>A record codec</td></tr><tr><td><code>rdata/aaaa.rs</code></td><td>AAAA record codec</td></tr><tr><td><code>rdata/cname.rs</code></td><td>CNAME record codec</td></tr><tr><td><code>rdata/mx.rs</code></td><td>MX record codec</td></tr><tr><td><code>rdata/ns.rs</code></td><td>NS record codec</td></tr><tr><td><code>rdata/ptr.rs</code></td><td>PTR record codec</td></tr><tr><td><code>rdata/soa.rs</code></td><td>SOA record codec</td></tr><tr><td><code>rdata/txt.rs</code></td><td>TXT record codec (length-prefixed string sequence, <a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-13-6">§13.6</a>)</td></tr><tr><td><code>rdata/srv.rs</code></td><td>SRV record codec</td></tr><tr><td><code>rdata/caa.rs</code></td><td>CAA record codec</td></tr><tr><td><code>rdata/svcb.rs</code></td><td>SVCB/HTTPS shared codec (RFC 9460, <a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-14-2">§14.2</a>)</td></tr><tr><td><code>rdata/dnskey.rs</code></td><td>DNSKEY record codec (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-14-2">§14.2</a>)</td></tr><tr><td><code>rdata/ds.rs</code></td><td>DS record codec (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-14-2">§14.2</a>)</td></tr><tr><td><code>rdata/rrsig.rs</code></td><td>RRSIG record codec (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-14-2">§14.2</a>)</td></tr><tr><td><code>rdata/nsec.rs</code></td><td>NSEC record codec (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-14-2">§14.2</a>)</td></tr><tr><td><code>rdata/nsec3.rs</code></td><td>NSEC3 record codec (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-14-2">§14.2</a>)</td></tr><tr><td><code>opt.rs</code></td><td><code>OptRecord</code> (EDNS(0) OPT, <a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-11-5">§11.5</a>)</td></tr><tr><td><code>opt_options/padding.rs</code></td><td>RFC 7830 padding option</td></tr><tr><td><code>opt_options/cookie.rs</code></td><td>RFC 7873 DNS Cookie option</td></tr><tr><td><code>opt_options/nsid.rs</code></td><td>RFC 5001 NSID option</td></tr><tr><td><code>opt_options/ecs.rs</code></td><td>RFC 7871 ECS option, parse-only (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/trade-offs/#adr-13">ADR-13</a>)</td></tr><tr><td><code>opt_options/extended_error.rs</code></td><td>RFC 8914 Extended DNS Error option</td></tr><tr><td><code>codec.rs</code></td><td>top-level <code>Encoder</code>/<code>Decoder</code></td></tr><tr><td><code>canonical.rs</code></td><td>RFC 4034 <a class="cite" href="/system-design-blueprints/systems/dns-resolver/architecture/#sec-6">§6</a> canonical-form encoder (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/blueprint/#sec-14-2">§14.2</a>)</td></tr><tr><td><code>error.rs</code></td><td>typed <code>NameError</code>/<code>RrError</code> variants (<a class="cite" href="/system-design-blueprints/systems/dns-resolver/reliability/#inv-13">I13</a>)</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

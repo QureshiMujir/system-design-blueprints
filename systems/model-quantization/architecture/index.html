@@ -1,0 +1,353 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Model Quantization (INT8 / INT4) — Architecture · Engineering Blueprints</title><meta name="description" content="Model Quantization (INT8 / INT4), hld: §3 overview + §8 domain model. Build mq, a model-quantization toolchain that converts fp16/bf16 transformer checkpoints into INT8, INT4, NF4, and FP8 representations under a reproducible calibration + serialization + runtime…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/model-quantization/">Model Quantization (INT8 / INT4)</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>Model Quantization (INT8 / INT4)</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>10 phases</li> <li>~15 weeks</li> <li>2,468 lines</li> <li>blueprint #116</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/model-quantization/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/model-quantization/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/model-quantization/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/model-quantization/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/model-quantization/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/model-quantization/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/model-quantization/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/model-quantization/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/model-quantization/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/model-quantization/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Model Quantization (INT8 / INT4) — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                              fp16 / bf16 checkpoint (HF `transformers` format)
+                                              |
+                                              v
+                         +----------------------------------------+
+                         |  CALIBRATION LOOP (mq.calibrate)        |   trust boundary:
+                         |  forward-hook every nn.Linear           |   offline, operator-
+                         |  collect: min-max | percentile | MSE |  |   controlled corpus
+                         |  entropy | Gram matrix (X^T X, GPTQ)    |
+                         +--------------------+---------------------+
+                                              |  CalibrationStats
+                                              v
+                    +--------------------------------------------------------+
+                    |  QUANTIZE DISPATCH (mq.quantize)     concurrency:      |
+                    |                                       single-process,   |
+                    |  PTQ RTN   GPTQ      AWQ      SmoothQ  LLM.int8  QAT    |
+                    |  (§8,§12) (§8,§16) (§8,§17) (§8,§18)  (§8,§19) (§20)   |
+                    |                                                        |
+                    |  schemes: INT8 sym/asym | INT4 sym/asym | NF4 | FP8    |
+                    |  layouts: per-tensor | per-channel | per-group(k)      |
+                    +----------------------------+---------------------------+
+                                                 |  dict[name -&gt; QTensor]
+                                                 v
+                    +--------------------------------------------------------+
+                    |  SERIALIZE (mq.serialize + mq-gguf)  persistence       |
+                    |  pack sub-byte weights -&gt; gguf-compatible Q-file        |
+                    |  header + TLV metadata (calibration provenance)         |
+                    +----------------------------+---------------------------+
+                                                 |
+                                                 v
+                              Q-FILE  (weights + scales + zero-points + TLV)
+                                                 |
+                         +-----------------------+------------------------+
+                         |  protocol boundary: gguf wire format            |
+                         v                                                 v
+          +---------------------------+                    +---------------------------+
+          |  SIMULATION RUNTIME (CPU)  |                    |  PRODUCTION RUNTIME        |
+          |  mq.simulate.kernel        |                    |  mq-runtime + mq-cuda       |
+          |  fp32 dequant + matmul     |                    |  fused dequant-matmul       |
+          |  = accuracy oracle         |                    |  CUDA kernel, fp32 accum    |
+          |  (no GPU required)         |                    |  concurrency: std::thread   |
+          +--------------+-------------+                    |  pool + mpsc dispatch        |
+                         |                                    +--------------+-------------+
+                         +-----------------------+------------------------+
+                                                 |
+                                                 v
+                         +----------------------------------------+
+                         |  EVAL HARNESS (mq.eval)                 |
+                         |  perplexity (WikiText-2/C4) + MMLU/      |
+                         |  HellaSwag/ARC/TruthfulQA vs fp16 base   |
+                         +----------------------------------------+</code></pre>
+<p>Five properties hold throughout the document. <strong>First</strong>, the simulation runtime is the
+canonical accuracy oracle — the GPU kernel is the deployment surface, never the source of
+truth for an accuracy number (<a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-1">P1</a>). <strong>Second</strong>, the Q-file is the only contract between
+quantize and runtime — no PyO3, no shared memory, no pickle (<a class="cite" href="/system-design-blueprints/systems/model-quantization/trade-offs/#adr-1">ADR-01</a>). <strong>Third</strong>, schemes are
+data (a <code>QScheme</code> value) and methods are dispatch functions over that data — the runtime
+dequants on <code>(bits, layout)</code> without knowing which method produced the tensor (<a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-8">P8</a>). <strong>Fourth</strong>,
+calibration is reproducible: a <code>(checkpoint, corpus, scheme, seed)</code> tuple is hashed into the
+Q-file&#39;s TLV metadata and re-runs bit-identically (<a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-9">P9</a>, <a class="cite" href="/system-design-blueprints/systems/model-quantization/reliability/#inv-9">I9</a>). <strong>Fifth</strong>, every quantized matmul
+accumulates in fp32 regardless of input precision — an INT32 accumulator overflows the scales
+this system targets at long sequence lengths (<a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-7">P7</a>, <a class="cite" href="/system-design-blueprints/systems/model-quantization/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/model-quantization/trade-offs/#adr-7">ADR-07</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Affine Quantization Mapping</h3>
+<p>For a real-valued tensor <code>r</code>, an integer quantized value
+<code>q</code>, a scale <code>s ∈ ℝ⁺</code>, and a zero-point <code>z ∈ ℤ</code>:</p>
+<pre class="diagram"><code>Quantize:    q = clamp( round(r / s) + z, qmin, qmax )
+Dequantize:  r_hat = s * (q - z)</code></pre>
+<p><code>round</code> is round-to-nearest-even (IEEE 754 default, ties-to-even) — Overton Ch. 2 (<a class="cite" href="/system-design-blueprints/systems/model-quantization/study/#sec-5">§5</a>). The
+pair <code>(qmin, qmax)</code> is fixed by bit width and symmetry: INT8 symmetric <code>[-127, 127]</code> (<code>-128</code>
+reserved to keep the range mirror-symmetric); INT8 asymmetric <code>[0, 255]</code>; INT4 symmetric
+<code>[-8, 7]</code>; INT4 asymmetric <code>[0, 15]</code>.</p>
+<h3 id="sec-8-2">8.2 Symmetric vs Asymmetric</h3>
+<p>Symmetric fixes <code>z = 0</code>; <code>s = max(|r|) / qmax</code>. Cheapest
+kernel (no zero-point subtraction in the dequant), correct when <code>r</code>&#39;s distribution is
+approximately zero-mean (true of trained weights — Goodfellow et al. Ch. 4 discussion of
+weight-init statistics generalizes here). Asymmetric computes <code>s = (rmax - rmin) / (qmax - qmin)</code>, <code>z = round(qmin - rmin / s)</code>; recovers dynamic range for distributions that are not
+zero-mean (activations after a ReLU/GELU, or narrow-range INT4 weights). Locked at <a class="cite" href="/system-design-blueprints/systems/model-quantization/trade-offs/#adr-4">ADR-04</a>:
+weights symmetric, INT4 layouts asymmetric per Q4_K.</p>
+<h3 id="sec-8-3">8.3 Per-Tensor / Per-Channel / Per-Group</h3>
+<p>The granularity of <code>(s, z)</code>: one pair for the
+whole tensor (per-tensor — coarsest, cheapest, least accurate); one pair per output channel
+(per-channel — one extra scale per row, matches Jacob et al. 2018 <a class="cite" href="/system-design-blueprints/systems/model-quantization/blueprint/#sec-2">§2</a>&#39;s per-channel-weight
+recommendation); one pair per contiguous run of <code>group_size</code> elements along the reduction axis
+(per-group — the finest granularity this system ships, <code>group_size ∈ {32, 64, 128, 256}</code>,
+<a class="cite" href="/system-design-blueprints/systems/model-quantization/trade-offs/#adr-3">ADR-03</a>).</p>
+<h3 id="sec-8-4">8.4 PTQ Calibration Methods</h3>
+<p>Applied in <a class="cite" href="/system-design-blueprints/systems/model-quantization/build/#sec-13">§13</a>. Given a tensor&#39;s observed values across a calibration
+corpus:</p>
+<ul>
+<li><strong>min-max</strong>: <code>s = max(|r|) / qmax</code> (or <code>(rmax-rmin)/(qmax-qmin)</code> asymmetric) — cheapest,
+most outlier-sensitive.</li>
+<li><strong>percentile</strong>: clip at the Pth percentile (default 99.99) before computing <code>s</code> — trades a
+small deterministic clipping error for robustness to a single extreme outlier sample.</li>
+<li><strong>MSE-based</strong>: grid-search a clipping threshold <code>t ∈ (0, max(|r|)]</code> minimizing
+<code>Σ (r_i - dequant(quantize(r_i, t)))²</code> (Banner et al. 2019&#39;s analytical form, or a numeric
+grid search) — most accurate, most expensive.</li>
+<li><strong>entropy-based</strong>: choose the clipping threshold minimizing KL-divergence between the
+original and quantized histograms (the ONNX Runtime / TensorRT calibrator method) — a
+distributional alternative to MSE, often cheaper to compute from a running histogram.</li>
+</ul>
+<h3 id="sec-8-5">8.5 PTQ vs QAT</h3>
+<p>PTQ (<a class="cite" href="/system-design-blueprints/systems/model-quantization/build/#sec-12">§12</a>–<a class="cite" href="/system-design-blueprints/systems/model-quantization/build/#sec-19">§19</a>) quantizes a trained model once, offline, with no gradient
+step — cheap, the literature default, ships first (<a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-12">P12</a>). QAT (<a class="cite" href="/system-design-blueprints/systems/model-quantization/build/#sec-20">§20</a>) inserts a fake-quantize op
+in the forward pass during fine-tuning; the backward pass needs a gradient for <code>round()</code>,
+which has zero gradient almost everywhere. The <strong>straight-through estimator (STE)</strong> approximates
+<code>∂round(x)/∂x ≈ 1</code> inside <code>[qmin, qmax]</code> and <code>0</code> outside (clip range) — a biased but usable
+gradient. <strong>Learned Step-Size Quantization (LSQ,</strong> Esser et al. 2020**)** goes further: the
+scale <code>s</code> itself is a trainable parameter with a gradient scaled by <code>1/√(qmax·N)</code> (N = number
+of elements) to keep its update magnitude comparable to the weight updates — this is what
+makes QAT recover more accuracy than PTQ at the same bit width, at the cost of a training loop.</p>
+<h3 id="sec-8-6">8.6 GPTQ (Hessian-Based Error Compensation)</h3>
+<p>Applied in <a class="cite" href="/system-design-blueprints/systems/model-quantization/build/#sec-16">§16</a>. Treats quantization as a
+layer-wise reconstruction problem: given input activations <code>X</code> and weight <code>W</code>, minimize
+<code>||XW^T - XQ^T||²</code> where <code>Q</code> is the quantized <code>W</code>. The Hessian of this objective is
+<code>H = 2 X^T X / N</code>. Quantizing column <code>j</code> and propagating its rounding error <code>e_j</code> to
+not-yet-quantized columns via <code>H⁻¹</code> (Cholesky-cached, <a class="cite" href="/system-design-blueprints/systems/model-quantization/blueprint/#sec-16-2">§16.2</a>) is the Optimal Brain Quantization
+step generalized from LeCun et al.&#39;s Optimal Brain Surgeon.</p>
+<h3 id="sec-8-7">8.7 AWQ (Activation-Aware Scaling)</h3>
+<p>Applied in <a class="cite" href="/system-design-blueprints/systems/model-quantization/build/#sec-17">§17</a>. A different question: which weight <em>channels</em>
+does the quantization error matter most for? Answer: the ones multiplied by high-magnitude
+activations. Scale those channels up by <code>s = actmax^α</code> before quantizing (protecting their
+precision), and divide the corresponding activations by <code>s</code> at inference (exactly compensating,
+folded into the preceding layer&#39;s parameters at zero runtime cost) — no Hessian required.</p>
+<h3 id="sec-8-8">8.8 Dequantization</h3>
+<p>The inverse affine map (<a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#sec-8-1">§8.1</a>) applied at runtime, fused into the
+matmul prologue (<a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-6">P6</a>): read a packed byte, unpack to the integer grid index, apply <code>s</code>/<code>z</code> (or
+an NF4/FP8 grid lookup), multiply against the activation, accumulate in fp32 (<a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-7">P7</a>, <a class="cite" href="/system-design-blueprints/systems/model-quantization/reliability/#inv-3">I3</a>).</p>
+<h3 id="sec-8-9">8.9 Mixed Precision</h3>
+<p>A <code>QSchema</code> (<a class="cite" href="/system-design-blueprints/systems/model-quantization/blueprint/#sec-11-5">§11.5</a>) assigns a <code>QScheme</code> per layer name — e.g. INT4
+group-128 for <code>attention.qkv</code>, INT8 per-channel for <code>attention.out</code>, fp16 (no entry) for the
+embedding and <code>lm_head</code>. The runtime dispatch table keys on <code>(bits, layout)</code> per tensor, so a
+single model can mix schemes without a global toggle (<a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-13">P13</a>).</p>
+<h3 id="sec-8-10">8.10 Worked Example (INT8 Per-Tensor Symmetric)</h3>
+<p>Weight row <code>r = [-0.72, 0.14, 0.53, -0.05, 0.31, -0.61]</code>. <code>abs_max = 0.72</code>, <code>s = 0.72 / 127 = 0.0056693</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th><code>r_i</code></th>
+<th><code>r_i / s</code></th>
+<th><code>q_i</code> (rounded, clamped)</th>
+<th><code>dequant = q_i · s</code></th>
+<th>error</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>-0.72</td>
+<td>-127.00</td>
+<td>-127</td>
+<td>-0.71960</td>
+<td>0.00040</td>
+</tr>
+<tr>
+<td>0.14</td>
+<td>24.70</td>
+<td>25</td>
+<td>0.14173</td>
+<td>-0.00173</td>
+</tr>
+<tr>
+<td>0.53</td>
+<td>93.49</td>
+<td>93</td>
+<td>0.52724</td>
+<td>0.00276</td>
+</tr>
+<tr>
+<td>-0.05</td>
+<td>-8.82</td>
+<td>-9</td>
+<td>-0.05102</td>
+<td>0.00102</td>
+</tr>
+<tr>
+<td>0.31</td>
+<td>54.68</td>
+<td>55</td>
+<td>0.31181</td>
+<td>-0.00181</td>
+</tr>
+<tr>
+<td>-0.61</td>
+<td>-107.60</td>
+<td>-108</td>
+<td>-0.61228</td>
+<td>0.00228</td>
+</tr>
+</tbody></table></div>
+<p>Max absolute error 0.00276, consistent with the <code>s/2 = 0.00283</code> half-step rounding bound (<a class="cite" href="/system-design-blueprints/systems/model-quantization/reliability/#inv-3">I3</a>
+discussion, <a class="cite" href="/system-design-blueprints/systems/model-quantization/numbers/#sec-32">§32</a> M-derivation).</p>
+<h3 id="sec-8-11">8.11 Malformed-Input Example</h3>
+<p>A weight tensor with <code>in_features = 4097</code> and
+<code>group_size = 128</code>: <code>4097 % 128 = 1 ≠ 0</code> — <a class="cite" href="/system-design-blueprints/systems/model-quantization/reliability/#inv-2">I2</a> fires; the quantizer raises a validation error
+naming the offending layer and the required pad amount (31 zero-columns) rather than silently
+truncating the last partial group, which would corrupt the reconstructed matmul&#39;s output
+dimension.</p>
+<h3 id="sec-8-12">8.12 Failure-Path Example</h3>
+<p>GPTQ&#39;s Cholesky decomposition of the damped Hessian fails
+(<code>torch.linalg.cholesky</code> raises <code>torch.linalg.LinAlgError</code>) on an ill-conditioned layer:
+detection is the exception itself; recovery escalates <code>damp_percent</code> from 0.01 → 0.05 → 0.1
+(three retries), and if all three fail, the layer falls back to plain per-group round-to-
+-nearest (RTN) quantization with a logged <code>gptq_fallback_total{layer}</code> telemetry event — the
+job does not abort, but the fallback is visible in the accuracy report (<a class="cite" href="/system-design-blueprints/systems/model-quantization/blueprint/#sec-16-6">§16.6</a>, <a class="cite" href="/system-design-blueprints/systems/model-quantization/reliability/#fm-4">FM-4</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-1">P1</a> — Simulation-first.</strong> Every kernel has an fp32 CPU simulation that matches the GPU kernel bit-for-bit on the rounded output. Tradeoff: the simulation is slower per-token than the GPU kernel. Operational implication: accuracy numbers are always reproducible on a laptop. Violate it and accuracy becomes hardware-dependent and unauditable.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-2">P2</a> — Accuracy-budgeted.</strong> Every method ships a documented perplexity-delta budget against a fixed eval slice (<a class="cite" href="/system-design-blueprints/systems/model-quantization/numbers/#sec-4">§4</a>). Tradeoff: a method that cannot hit its budget does not land, even if it is faster or smaller. Violate it and the conformance suite silently ships an accuracy regression.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-3">P3</a> — Weight-only by default.</strong> Activations stay fp16/bf16 unless a scheme explicitly quantizes them (SmoothQuant, LLM.int8()). Tradeoff: leaves throughput on the table vs W8A8. Violate it and every scheme inherits activation-outlier fragility by default.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-4">P4</a> — Outlier-aware.</strong> Every scheme either avoids activation quantization or treats outliers explicitly. Tradeoff: outlier-aware schemes cost extra calibration passes. Violate it and per-tensor INT8 silently destroys accuracy at scale (the LLM.int8() finding).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-5">P5</a> — Format-portable.</strong> The Q-file is gguf-compatible; extensions live in a forward-compatible TLV. Tradeoff: constrains block layouts to what gguf readers tolerate. Violate it and the ecosystem interop (llama.cpp) breaks silently.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-6">P6</a> — Kernel-fused dequant.</strong> The runtime never materializes a dequantized weight tensor in HBM; dequant fuses into the matmul prologue. Tradeoff: more complex kernel code than a two-pass dequant-then-matmul. Violate it and the memory-bandwidth win — the entire point of quantizing — evaporates.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-7">P7</a> — fp32 accumulator everywhere.</strong> Every quantized matmul accumulates in fp32. Tradeoff: 5–10% slower than an INT32 accumulator on some Tensor Core paths. Violate it and long sequences overflow the accumulator (<a class="cite" href="/system-design-blueprints/systems/model-quantization/trade-offs/#adr-7">ADR-07</a>).</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-8">P8</a> — Scheme-pluggable.</strong> A scheme is <code>(bits, layout, symmetry, group_size, grid)</code>; the runtime dispatches on <code>(bits, layout)</code> only. Tradeoff: adding a scheme means adding a kernel for a new <code>(bits, layout)</code> pair, not just a Python function. Violate it and method-specific runtime branches proliferate.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-9">P9</a> — Calibration-reproducible.</strong> A <code>(checkpoint, corpus, scheme, seed)</code> tuple produces a bit-identical Q-file. Tradeoff: forces deterministic batch order and RNG seeding through the whole calibration path. Violate it and accuracy comparisons across runs are meaningless.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-10">P10</a> — Eval-comparable.</strong> Every quantized model is scored by the same harness on the same slice. Tradeoff: the harness must run on CPU-only fp32 simulation to stay reproducible across machines (<a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-1">P1</a>). Violate it and cross-method comparisons are apples-to-oranges.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-11">P11</a> — gguf-compatible layouts.</strong> INT4 layouts match Q4_0 (per-32-block, symmetric) and Q4_K (per-256-superblock, asymmetric) exactly. Tradeoff: cannot invent a more storage-efficient layout without breaking interop. Violate it and llama.cpp cannot read our output.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-12">P12</a> — QAT is opt-in, PTQ is default.</strong> PTQ ships first; QAT (Phase 8) is the escape hatch when PTQ cannot hit the accuracy budget. Tradeoff: QAT requires a training loop and GPU time PTQ does not. Violate it and every deployment pays QAT&#39;s cost even when PTQ suffices.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-13">P13</a> — Mixed precision is a first-class per-layer assignment</strong>, not a global toggle. Tradeoff: the calibration config grows one row per overridden layer. Violate it and layers with disproportionate accuracy sensitivity (embeddings, <code>lm_head</code>, first/last transformer blocks) get the same treatment as the bulk.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/model-quantization/architecture/#p-14">P14</a> — The Hessian/statistics computation and the packing computation are separate concerns.</strong> A quantizer (GPTQ, AWQ) computes a dequantized fp32 reconstruction; the packer (<a class="cite" href="/system-design-blueprints/systems/model-quantization/blueprint/#sec-11-6">§11.6</a>) converts that reconstruction to the on-disk block layout. Tradeoff: an extra round-trip through fp32 per column. Violate it and every new method must reimplement bit-packing, duplicating the highest-defect-density code in the toolchain.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

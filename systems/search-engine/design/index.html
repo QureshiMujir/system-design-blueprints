@@ -1,0 +1,439 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Search Engine — Design · Engineering Blueprints</title><meta name="description" content="Search Engine, lld: core types, repo tree, file inventory. Build a Lucene-class inverted-index search engine, single-shard core plus a thin scatter-gather coordinator, in Rust: document ingestion → multi-language analysis → compressed on-disk posting lists…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/search-information-retrieval/">Search &amp; Information Retrieval</a> </li><li> <a href="/system-design-blueprints/systems/search-engine/">Search Engine</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:340"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/search-information-retrieval/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Search &amp; Information Retrieval</span></a> </p> <h1>Search Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux</li> <li>11 phases</li> <li>~10 weeks</li> <li>2,704 lines</li> <li>blueprint #80</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-warn" title="First working version (v0 slice) done; 6 of 11 phases built">Build: 6/11 phases · v0 done</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/search-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/search-engine/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/search-engine/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/search-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/search-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/search-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/search-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/search-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/search-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/search-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Search Engine — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/search-engine/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>pub type DocId = u32;          // 4B-document ceiling per shard
+pub type TermId = u32;
+pub type FieldId = u16;
+pub type SegmentId = u32;
+pub const NULL_DOC: DocId = u32::MAX;
+pub const NULL_TERM: TermId = u32::MAX;</code></pre><pre class="code"><code>pub enum FieldType {
+    Text { analyser: String, index_options: IndexOptions, store: bool, positions: bool, offsets: bool },
+    Keyword { store: bool, doc_values: bool },
+    Integer { doc_values: bool, indexed: bool },
+    Float   { doc_values: bool, indexed: bool },
+    Date    { doc_values: bool, indexed: bool, format: DateFormat },
+    Boolean { doc_values: bool, indexed: bool },
+    DenseVector { dim: u32, distance: VectorDistance },
+    Geo     { doc_values: bool, indexed: bool },
+}
+pub enum IndexOptions { Docs, DocsFreqs, DocsFreqsPositions, DocsFreqsPositionsOffsets }
+pub struct Field { pub id: FieldId, pub name: String, pub typ: FieldType }
+pub struct Schema { fields: Vec&lt;Field&gt;, by_name: HashMap&lt;String, FieldId&gt; }</code></pre><pre class="code"><code>pub struct Document { pub external_id: String, pub fields: Vec&lt;(FieldId, FieldValue)&gt; }
+pub enum FieldValue {
+    Text(String), Keyword(String), Integer(i64), Float(f64), Date(i64),
+    Boolean(bool), DenseVector(Vec&lt;f32&gt;), Geo(f64, f64),
+}</code></pre><pre class="code"><code>pub const BLOCK_SIZE: usize = 128;
+pub struct Posting { pub doc_id: DocId, pub term_freq: u32, pub positions: Option&lt;Vec&lt;u32&gt;&gt;,
+                      pub offsets: Option&lt;Vec&lt;(u32, u32)&gt;&gt; }
+pub struct PostingBlock { pub doc_count: u32, pub doc_id_codec: BlockCodec, pub tf_codec: BlockCodec,
+                          pub doc_id_bytes: Vec&lt;u8&gt;, pub tf_bytes: Vec&lt;u8&gt;,
+                          pub block_max_doc_id: DocId, pub block_max_score: f32, pub crc32c: u32 }
+pub enum BlockCodec { Varbyte, For { bit_width: u8 }, Pfor { bit_width: u8 },
+                      SimdBp128 { bit_width: u8 }, EliasFano }</code></pre><pre class="code"><code>pub trait PostingListReader: Send {
+    fn doc_count(&amp;self) -&gt; u64;
+    fn doc(&amp;self) -&gt; DocId;
+    fn freq(&amp;self) -&gt; u32;
+    fn next(&amp;mut self) -&gt; Option&lt;DocId&gt;;
+    fn advance(&amp;mut self, target: DocId) -&gt; Option&lt;DocId&gt;;
+    fn positions(&amp;mut self) -&gt; Option&lt;&amp;[u32]&gt;;
+    fn block_max_doc_id(&amp;self) -&gt; DocId;
+    fn block_max_score(&amp;self) -&gt; f32;
+    fn cost(&amp;self) -&gt; u64;
+}</code></pre><pre class="code"><code>pub trait Scorer: Send { fn score(&amp;self, doc: DocId) -&gt; f32; fn max_score(&amp;self) -&gt; f32;
+                          fn block_max_score(&amp;self) -&gt; f32; }
+pub struct BM25Scorer   { /* k1, b, idf, avgdl, doc-length doc-values handle */ }
+pub struct BM25FScorer  { /* per-field k1, b, weights */ }
+pub struct ConstantScorer { value: f32 }</code></pre><pre class="code"><code>pub enum Query {
+    Term { field: FieldId, term: String }, Phrase { field: FieldId, terms: Vec&lt;String&gt;, slop: u32 },
+    Boolean { must: Vec&lt;Query&gt;, should: Vec&lt;Query&gt;, must_not: Vec&lt;Query&gt;, minimum_should_match: u32 },
+    Fuzzy { field: FieldId, term: String, max_edits: u8, prefix_length: u8 },
+    Range { field: FieldId, lower: Bound&lt;RangeValue&gt;, upper: Bound&lt;RangeValue&gt; },
+    Wildcard { field: FieldId, pattern: String }, Regexp { field: FieldId, pattern: String },
+    MatchAll, MatchNone, DenseVector { field: FieldId, query_vector: Vec&lt;f32&gt;, k: u32 },
+    Boost { query: Box&lt;Query&gt;, factor: f32 }, ConstantScore { query: Box&lt;Query&gt;, score: f32 },
+    DisjunctionMax { queries: Vec&lt;Query&gt;, tie_breaker: f32 },
+}
+pub enum RangeValue { Integer(i64), Float(f64), Date(i64), Keyword(String) }</code></pre><pre class="code"><code>pub struct SearchRequest { pub query: Query, pub top_k: u32, pub from: u32,
+    pub fields_to_return: Vec&lt;FieldId&gt;, pub aggregations: Vec&lt;AggregationRequest&gt;,
+    pub highlight: Option&lt;HighlightRequest&gt;, pub timeout_ms: u32, pub track_total_hits: bool,
+    pub min_score: Option&lt;f32&gt; }
+pub struct SearchHit { pub doc_id: DocId, pub external_id: String, pub score: f32,
+    pub fields: Vec&lt;(FieldId, FieldValue)&gt;, pub highlights: Vec&lt;(FieldId, Vec&lt;String&gt;)&gt; }
+pub struct SearchResponse { pub hits: Vec&lt;SearchHit&gt;, pub total: u64, pub took_ms: u32,
+    pub timed_out: bool, pub aggregations: Vec&lt;AggregationResult&gt;, pub max_score: f32 }</code></pre><pre class="code"><code>pub struct SegmentMeta { pub id: SegmentId, pub generation: u64, pub doc_count: u32,
+    pub deleted_count: u32, pub size_bytes: u64, pub created_at: i64, pub last_merged_at: i64,
+    pub fields: Vec&lt;FieldId&gt;, pub min_doc_id: DocId, pub max_doc_id: DocId }
+pub trait IndexWriter: Send {
+    fn add_document(&amp;mut self, doc: Document) -&gt; Result&lt;DocId&gt;;
+    fn delete_by_id(&amp;mut self, external_id: &amp;str) -&gt; Result&lt;()&gt;;
+    fn delete_by_query(&amp;mut self, q: &amp;Query) -&gt; Result&lt;u32&gt;;
+    fn commit(&amp;mut self) -&gt; Result&lt;u64&gt;;
+    fn flush(&amp;mut self) -&gt; Result&lt;SegmentMeta&gt;;
+    fn merge(&amp;mut self, segments: &amp;[SegmentId]) -&gt; Result&lt;SegmentMeta&gt;;
+}
+pub trait IndexReader: Send + Sync {
+    fn segments(&amp;self) -&gt; &amp;[SegmentMeta]; fn doc_count(&amp;self) -&gt; u64; fn deleted_count(&amp;self) -&gt; u64;
+    fn schema(&amp;self) -&gt; &amp;Schema; fn snapshot(&amp;self) -&gt; SnapshotHandle;
+}</code></pre><pre class="code"><code>pub enum SearchError {
+    Schema(String), QueryParse { col: u32, msg: String }, Corruption(SegmentId, u64),
+    Io(std::io::Error), Timeout(u32), PhaseDeferred(&amp;&#39;static str),
+}</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>Search-Engine/
+├── README.md                       # project overview, quickstart
+├── FINAL_BLUEPRINT.md              # this document
+├── BUILD_PLAN.md                   # phase-by-phase execution tracker
+├── BLUEPRINT_LOG.md                # amendment log for this blueprint
+├── CHANGELOG.md                    # Keep-a-Changelog format
+├── CONTRIBUTING.md                 # contribution workflow
+├── CODE_OF_CONDUCT.md              # community standard
+├── SECURITY.md                     # vuln disclosure + PGP fingerprint
+├── LICENSE                         # Apache-2.0 (ADR-13)
+├── Makefile                        # bootstrap/build/test/lint/conformance targets
+├── Cargo.toml                      # workspace manifest
+├── Cargo.lock                      # pinned dependency graph
+├── rust-toolchain.toml             # pinned rustc + MSRV
+├── Dockerfile                      # multi-stage build: build + runtime
+├── docker-compose.yml              # searchd + Prometheus + Grafana
+├── .dockerignore
+├── .gitignore
+├── pyproject.toml                  # PyO3 bindings build config
+├── .github/
+│   └── workflows/
+│       ├── ci.yml                  # build + unit tests
+│       ├── conformance.yml         # §22 conformance suite on every push
+│       ├── codecs.yml              # codec round-trip fixtures
+│       ├── lucene-parity.yml       # nightly Lucene-baseline comparison
+│       ├── security.yml            # cargo-audit + fuzz smoke
+│       └── release.yml             # tag → build → sign → publish</code></pre><pre class="diagram"><code>Search-Engine/
+├── crates/
+│   ├── core/                       # §11 — DocId/TermId/FieldId, Schema, Document, errors
+│   │   └── src/{lib.rs,doc_id.rs,term_id.rs,field.rs,schema.rs,arena.rs,error.rs,version.rs}
+│   ├── analyser/                   # Phase 1, §13 — tokenizer/normaliser/stemmer pipeline
+│   │   └── src/{tokenizer/,normaliser/,stemmer/,stopwords.rs,decompound.rs,
+│   │            language_detect.rs,pipeline.rs}
+│   ├── codec/                      # Phase 3, §15 — block codecs
+│   │   └── src/{varbyte.rs,for_block.rs,pfor_block.rs,simd_bp128.rs,elias_fano.rs,
+│   │            delta.rs,crc32c.rs}
+│   ├── postings/                   # Phase 2, §14 — posting list writer/reader/skip-list
+│   │   └── src/{posting_list.rs,block.rs,skip_list.rs,positions.rs,reader.rs,writer.rs}
+│   ├── dictionary/                 # Phase 2, §14 — FST term dictionary
+│   │   └── src/{fst.rs,builder.rs,reader.rs,prefix_iter.rs}
+│   ├── segment/                    # Phase 6, §18 — immutable segments + merge
+│   │   └── src/{writer.rs,reader.rs,merger.rs,policy.rs,tombstone.rs,docvalues.rs}
+│   ├── delta/                      # Phase 6, §18 — in-memory delta + WAL
+│   │   └── src/{memtable.rs,wal.rs,flush.rs}
+│   ├── query/                      # Phase 4, §16 — lexer/parser/AST/rewriter
+│   │   └── src/{lexer.rs,parser.rs,ast.rs,rewriter.rs,analyser_apply.rs,escape.rs}
+│   ├── search/                     # Phase 5, §17 — iterators, scorers, WAND/BMW, top-k
+│   │   └── src/{scorer/,exec/,topk.rs,collector.rs}
+│   ├── aggregations/                # Phase 7, §19 — term/histogram/percentile aggs
+│   │   └── src/{terms.rs,histogram.rs,date_histogram.rs,percentile.rs,bucket.rs}
+│   ├── highlight/                  # Phase 7, §19 — unified + plain highlighters
+│   │   └── src/{snippet.rs,unified.rs,plain.rs}
+│   ├── coordinator/                # Phase 9, §21 — router, scatter-gather, replication
+│   │   └── src/{router.rs,scatter.rs,gather.rs,failure.rs,replication.rs}
+│   ├── hybrid/                     # Phase 8, §20 — RRF/weighted-sum fusion, dense adapter
+│   │   └── src/{rrf.rs,weighted_sum.rs,dense_adapter.rs,neural_rerank.rs}
+│   ├── server/                     # Phase 9, §21 — HTTP/gRPC boundary
+│   │   └── src/{http.rs,grpc.rs,auth.rs,metrics.rs,tracing.rs}
+│   ├── cli/                        # Phase 0, §12 — `searchctl` operator CLI
+│   │   └── src/main.rs
+│   └── conformance/                # §22 — conformance CLI runner
+│       └── src/main.rs</code></pre><pre class="diagram"><code>Search-Engine/
+├── python/
+│   ├── search_engine/{__init__.py,_bindings.rs,api.py,notebook.py}
+│   └── tests/
+├── conformance/
+│   ├── README.md                   # how to run + interpret buckets
+│   ├── corpora/
+│   │   ├── tokenizer/              # standard/CJK/Indic/stemmer fixtures (§13.5)
+│   │   ├── codecs/                 # FOR/PFOR/varbyte/simd-bp128 round-trip vectors (§15.7)
+│   │   ├── postings/               # parity vs. Lucene/Tantivy fixtures (§14.7)
+│   │   ├── query/                  # 512-query AST parity fixtures (§16.5)
+│   │   ├── scorer/                 # BM25/BM25F reference vectors (§17.5)
+│   │   ├── e2e/msmarco/            # MS-MARCO 100k-doc / 1k-query subset (§27)
+│   │   ├── trec/                   # TREC topic + qrels excerpt (§27)
+│   │   └── lucene_golden/          # recorded Lucene run, postings + baselines
+│   └── report_schema.json          # §22 report JSON schema
+├── benchmarks/
+│   ├── README.md
+│   ├── codec_throughput.rs         # ints/sec by (codec, bit_width)
+│   ├── posting_intersection.rs     # conjunction/disjunction cost
+│   ├── bm25_topk.rs                # BMW vs. naive disjunction
+│   ├── e2e_qps.rs                  # end-to-end QPS at fixed corpus size
+│   └── index_throughput.rs         # docs/sec sustained indexing
+├── fuzz/
+│   ├── fuzz_targets/{segment_loader_fuzz.rs,query_parser_fuzz.rs,codec_fuzz.rs}
+│   └── corpus/                     # seed corpus per target</code></pre><pre class="diagram"><code>Search-Engine/
+├── docs/
+│   ├── adr/                        # one file per §9 ADR row
+│   ├── architecture/                # diagrams backing §3
+│   ├── runbooks/{triage.md,slow-queries.md,ingestion-lag.md,shard-rebalance.md}
+│   ├── threat-model/                # backing detail for §23
+│   ├── performance/                  # backing detail for §29
+│   ├── failure-analysis/             # backing detail for §24
+│   ├── analyser-reference.md
+│   ├── codec-reference.md
+│   ├── posting-list-format.md        # normative version of §8.2
+│   ├── segment-format.md             # normative version of §8.3
+│   ├── merge-policy.md
+│   ├── query-grammar.md              # normative version of §8.1
+│   ├── scoring.md
+│   ├── compliance/{soc2-mapping.md,gdpr-mapping.md}
+│   └── api/{openapi.yaml,search.proto}</code></pre><pre class="diagram"><code>Search-Engine/
+├── examples/
+│   ├── ingest-wikipedia.rs
+│   ├── chat-search.py
+│   └── hybrid-rerank.rs
+├── templates/
+│   ├── adr.md
+│   ├── postmortem.md
+│   ├── rfc.md
+│   └── codec-spec.md
+├── scripts/
+│   ├── bootstrap.sh                 # dev-machine setup
+│   ├── run-conformance.sh
+│   └── record-baseline.sh           # regenerate Lucene golden vectors
+├── tools/
+│   ├── lucene_runner/               # small Java program, nightly parity job (§27)
+│   └── corpus-gen/                  # synthetic corpus generator for load tests
+├── notes/
+│   └── codec-derivations/            # scratch derivations for §33 arithmetic
+├── papers/
+│   └── whitepaper/whitepaper-v1.0.md
+├── legal/
+│   ├── terms.md
+│   ├── privacy.md
+│   └── dpa.md
+├── brand/
+│   ├── voice.md
+│   └── typography.md
+├── ops/
+│   ├── helm/
+│   ├── terraform/
+│   └── k8s/
+└── third_party/                     # vendored test corpora only; no compiled deps</code></pre> </section><section class="prose"><h2 id="sec-38">38. Appendix A — File Inventory</h2>
+<p>Every leaf file from the Repository Layout (<a class="cite" href="/system-design-blueprints/systems/search-engine/design/#sec-10">§10</a>), one line each. Names match <a class="cite" href="/system-design-blueprints/systems/search-engine/design/#sec-10">§10</a>, <a class="cite" href="/system-design-blueprints/systems/search-engine/design/#sec-11">§11</a>, and every
+phase exactly.</p>
+<p><strong>Root governance:</strong> <code>README.md</code> project overview/quickstart · <code>FINAL_BLUEPRINT.md</code> this document ·
+<code>BUILD_PLAN.md</code> phase execution tracker · <code>BLUEPRINT_LOG.md</code> amendment log · <code>CHANGELOG.md</code>
+Keep-a-Changelog history · <code>CONTRIBUTING.md</code> contribution workflow · <code>CODE_OF_CONDUCT.md</code> community
+standard · <code>SECURITY.md</code> vuln disclosure + PGP fingerprint · <code>LICENSE</code> Apache-2.0 text ·
+<code>Makefile</code> bootstrap/build/test/lint/conformance targets · <code>Cargo.toml</code> workspace manifest ·
+<code>Cargo.lock</code> pinned dependency graph · <code>rust-toolchain.toml</code> pinned rustc + MSRV · <code>Dockerfile</code>
+multi-stage build+runtime image · <code>docker-compose.yml</code> local dev sidecars · <code>.dockerignore</code> /
+<code>.gitignore</code> build hygiene · <code>pyproject.toml</code> PyO3 bindings build config.</p>
+<p><strong><code>.github/workflows/</code>:</strong> <code>ci.yml</code> build+unit tests · <code>conformance.yml</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-27">§27</a> conformance gate ·
+<code>codecs.yml</code> codec fixture subset · <code>lucene-parity.yml</code> nightly Lucene-baseline comparison ·
+<code>security.yml</code> cargo-audit + fuzz smoke · <code>release.yml</code> tag→build→sign→publish.</p>
+<p><strong><code>crates/core/src/</code>:</strong> <code>lib.rs</code> crate root · <code>doc_id.rs</code> <code>DocId</code> (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-11-1">§11.1</a>) · <code>term_id.rs</code> <code>TermId</code>
+(<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-11-1">§11.1</a>) · <code>field.rs</code> <code>Field</code>/<code>FieldType</code> (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-11-2">§11.2</a>) · <code>schema.rs</code> <code>Schema</code> (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-11-2">§11.2</a>) · <code>arena.rs</code>
+per-query memory arena (<a class="cite" href="/system-design-blueprints/systems/search-engine/architecture/#p-11">P11</a>) · <code>error.rs</code> <code>SearchError</code> (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-11-10">§11.10</a>) · <code>version.rs</code> schema/manifest
+version constants (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-26">§26</a>).</p>
+<p><strong><code>crates/analyser/src/</code>:</strong> <code>tokenizer/{standard,cjk,indic,ngram,edge_ngram}.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-13-2">§13.2</a> tokenizers ·
+<code>normaliser/{icu,lowercase,ascii_folding}.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-13-2">§13.2</a> char/token filters · <code>stemmer/{porter,snowball, hunspell}.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-13-2">§13.2</a> stemmer families · <code>stopwords.rs</code> stopword lists · <code>decompound.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-13-2">§13.2</a>
+decompounder · <code>language_detect.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-13-2">§13.2</a> language detection · <code>pipeline.rs</code> pipeline composition.</p>
+<p><strong><code>crates/codec/src/</code>:</strong> <code>varbyte.rs</code>/<code>for_block.rs</code>/<code>pfor_block.rs</code>/<code>simd_bp128.rs</code>/
+<code>elias_fano.rs</code> the five block codecs (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-15-2">§15.2</a>) · <code>delta.rs</code> delta-encoding helper · <code>crc32c.rs</code>
+block checksum (<a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#inv-3">I3</a>).</p>
+<p><strong><code>crates/postings/src/</code>:</strong> <code>posting_list.rs</code>/<code>block.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/architecture/#sec-8-2">§8.2</a> layout · <code>skip_list.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-14-2">§14.2</a> ·
+<code>positions.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-14-2">§14.2</a> positions stream · <code>reader.rs</code>/<code>writer.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-11-5">§11.5</a>, <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-14-3">§14.3</a>.</p>
+<p><strong><code>crates/dictionary/src/</code>:</strong> <code>fst.rs</code> FST core · <code>builder.rs</code> sorted-input FST construction (<a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#inv-7">I7</a>) ·
+<code>reader.rs</code> lookup/traversal · <code>prefix_iter.rs</code> prefix iteration for wildcard (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-17-8">§17.8</a>).</p>
+<p><strong><code>crates/segment/src/</code>:</strong> <code>writer.rs</code>/<code>reader.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-18-2">§18.2</a> · <code>merger.rs</code> merge execution ·
+<code>policy.rs</code> <code>TieredMergePolicy</code> (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-18-2">§18.2</a>) · <code>tombstone.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#inv-12">I12</a> · <code>docvalues.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/architecture/#sec-8-3">§8.3</a>.</p>
+<p><strong><code>crates/delta/src/</code>:</strong> <code>memtable.rs</code> in-memory posting accumulation · <code>wal.rs</code> write-ahead log
+(<a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#inv-10">I10</a>, <a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#inv-11">I11</a>) · <code>flush.rs</code> memtable→segment flush.</p>
+<p><strong><code>crates/query/src/</code>:</strong> <code>lexer.rs</code>/<code>parser.rs</code>/<code>ast.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-16-2">§16.2</a>, <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-11-7">§11.7</a> · <code>rewriter.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-16-2">§16.2</a>, <a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#inv-2">I2</a> ·
+<code>analyser_apply.rs</code> per-field analyser application · <code>escape.rs</code> escape-sequence handling.</p>
+<p><strong><code>crates/search/src/</code>:</strong> <code>scorer/{tfidf,bm25,bm25f,constant}.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-11-6">§11.6</a>, <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-17-2">§17.2</a> · <code>exec/ {conjunction,disjunction,phrase,proximity,fuzzy,range,wildcard,wand,maxscore}.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-17-2">§17.2</a> iterators ·
+<code>topk.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-17-2">§17.2</a> collector · <code>collector.rs</code> aggregation/top-k orchestration.</p>
+<p><strong><code>crates/aggregations/src/</code>:</strong> <code>terms.rs</code>/<code>histogram.rs</code>/<code>date_histogram.rs</code>/<code>percentile.rs</code>
+<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-19-2">§19.2</a> aggregators · <code>bucket.rs</code> shared bucket types.</p>
+<p><strong><code>crates/highlight/src/</code>:</strong> <code>snippet.rs</code> shared snippet types · <code>unified.rs</code>/<code>plain.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-19-2">§19.2</a>
+highlighters.</p>
+<p><strong><code>crates/coordinator/src/</code>:</strong> <code>router.rs</code> shard selection · <code>scatter.rs</code>/<code>gather.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-21-2">§21.2</a> fan-out</p>
+<ul>
+<li>merge · <code>failure.rs</code> partial-failure handling (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-21-4">§21.4</a>) · <code>replication.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-21-2">§21.2</a> primary/replica.</li>
+</ul>
+<p><strong><code>crates/hybrid/src/</code>:</strong> <code>rrf.rs</code>/<code>weighted_sum.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-20-2">§20.2</a> fusion · <code>dense_adapter.rs</code>
+<code>DenseRetriever</code> client (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-20-2">§20.2</a>) · <code>neural_rerank.rs</code> <code>Reranker</code> client (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-20-2">§20.2</a>).</p>
+<p><strong><code>crates/server/src/</code>:</strong> <code>http.rs</code>/<code>grpc.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-21-2">§21.2</a> endpoints · <code>auth.rs</code> request authentication ·
+<code>metrics.rs</code>/<code>tracing.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-22-2">§22.2</a> instrumentation.</p>
+<p><strong><code>crates/cli/src/main.rs</code>:</strong> <code>searchctl</code> operator CLI (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-12-2">§12.2</a>). <strong><code>crates/conformance/src/ main.rs</code>:</strong> conformance CLI runner (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-27">§27</a>).</p>
+<p><strong><code>python/</code>:</strong> <code>search_engine/__init__.py</code> package init · <code>_bindings.rs</code> PyO3 bindings ·
+<code>api.py</code> Python-facing API · <code>notebook.py</code> notebook ergonomics helpers.</p>
+<p><strong><code>conformance/</code>:</strong> <code>README.md</code> bucket documentation · <code>corpora/tokenizer/</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-13-5">§13.5</a> fixtures ·
+<code>corpora/codecs/</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-15-5">§15.5</a> fixtures · <code>corpora/postings/</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-14-5">§14.5</a> fixtures · <code>corpora/query/</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-16-5">§16.5</a>
+fixtures · <code>corpora/scorer/</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-17-5">§17.5</a> fixtures · <code>corpora/e2e/msmarco/</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-27">§27</a> MS-MARCO subset ·
+<code>corpora/trec/</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-27">§27</a> TREC excerpt · <code>corpora/lucene_golden/</code> recorded Lucene baselines ·
+<code>report_schema.json</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-27">§27</a> report schema.</p>
+<p><strong><code>benchmarks/</code>:</strong> <code>README.md</code> how to run + interpret results · <code>codec_throughput.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-15-3">§15.3</a> ·
+<code>posting_intersection.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-14-4">§14.4</a> · <code>bm25_topk.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-17-4">§17.4</a> · <code>e2e_qps.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/numbers/#sec-29">§29</a> <a class="cite" href="/system-design-blueprints/systems/search-engine/numbers/#m-4">M4</a> ·
+<code>index_throughput.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/numbers/#sec-29">§29</a> <a class="cite" href="/system-design-blueprints/systems/search-engine/numbers/#m-1">M1</a>.</p>
+<p><strong><code>fuzz/</code>:</strong> <code>fuzz_targets/{segment_loader_fuzz,query_parser_fuzz,codec_fuzz}.rs</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-27">§27</a>, <a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#t-1">T1</a>/<a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#t-2">T2</a>/<a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#t-10">T10</a> ·
+<code>corpus/</code> seed corpora per target.</p>
+<p><strong><code>docs/</code>:</strong> <code>adr/</code> one file per <a class="cite" href="/system-design-blueprints/systems/search-engine/trade-offs/#sec-9">§9</a> row · <code>architecture/</code> diagrams backing <a class="cite" href="/system-design-blueprints/systems/search-engine/architecture/#sec-3">§3</a> ·
+<code>runbooks/{triage,slow-queries,ingestion-lag,shard-rebalance}.md</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-25">§25</a> · <code>threat-model/</code> backing
+detail for <a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#sec-23">§23</a> · <code>performance/</code> backing detail for <a class="cite" href="/system-design-blueprints/systems/search-engine/numbers/#sec-29">§29</a> · <code>failure-analysis/</code> backing detail for
+<a class="cite" href="/system-design-blueprints/systems/search-engine/reliability/#sec-24">§24</a> · <code>analyser-reference.md</code>/<code>codec-reference.md</code> reference docs · <code>posting-list-format.md</code>
+normative <a class="cite" href="/system-design-blueprints/systems/search-engine/architecture/#sec-8-2">§8.2</a> · <code>segment-format.md</code> normative <a class="cite" href="/system-design-blueprints/systems/search-engine/architecture/#sec-8-3">§8.3</a> · <code>merge-policy.md</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-18-2">§18.2</a> detail ·
+<code>query-grammar.md</code> normative <a class="cite" href="/system-design-blueprints/systems/search-engine/architecture/#sec-8-1">§8.1</a> · <code>scoring.md</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-17-2">§17.2</a> detail · <code>compliance/{soc2-mapping, gdpr-mapping}.md</code> compliance mappings · <code>api/{openapi.yaml,search.proto}</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-21-1">§21.1</a> API contracts.</p>
+<p><strong><code>examples/</code>:</strong> <code>ingest-wikipedia.rs</code>/<code>chat-search.py</code>/<code>hybrid-rerank.rs</code> worked usage examples.</p>
+<p><strong><code>templates/</code>:</strong> <code>adr.md</code>/<code>postmortem.md</code>/<code>rfc.md</code>/<code>codec-spec.md</code> authoring templates.</p>
+<p><strong><code>scripts/</code>:</strong> <code>bootstrap.sh</code> dev-machine setup · <code>run-conformance.sh</code> <a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-27">§27</a> runner wrapper ·
+<code>record-baseline.sh</code> regenerates Lucene golden vectors.</p>
+<p><strong><code>tools/</code>:</strong> <code>lucene_runner/</code> nightly Lucene-parity Java program (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-27">§27</a>) · <code>corpus-gen/</code>
+synthetic corpus generator for load tests.</p>
+<p><strong><code>notes/codec-derivations/</code>:</strong> scratch arithmetic backing <a class="cite" href="/system-design-blueprints/systems/search-engine/numbers/#sec-33">§33</a>.</p>
+<p><strong><code>papers/whitepaper/whitepaper-v1.0.md</code>:</strong> public-facing engine whitepaper.</p>
+<p><strong><code>legal/</code>:</strong> <code>terms.md</code>/<code>privacy.md</code>/<code>dpa.md</code> legal templates.</p>
+<p><strong><code>brand/</code>:</strong> <code>voice.md</code>/<code>typography.md</code> brand guidance.</p>
+<p><strong><code>ops/{helm,terraform,k8s}/</code>:</strong> deployment-topology infrastructure-as-code (<a class="cite" href="/system-design-blueprints/systems/search-engine/blueprint/#sec-25">§25</a>).</p>
+<p><strong><code>third_party/</code>:</strong> vendored test corpora only; no compiled dependencies.</p>
+<hr>
+</section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

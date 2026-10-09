@@ -1,0 +1,307 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>File System — Design · Engineering Blueprints</title><meta name="description" content="File System, lld: core types, repo tree, file inventory. Build cordfs, a POSIX-conformant, crash-consistent, journaled on-disk file system exposed through FUSE on Linux and macOS, in Rust. The system provides: a versioned on-disk layout (superblock…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/file-system/">File System</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>File System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~11 weeks</li> <li>2,588 lines</li> <li>blueprint #34</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/file-system/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/file-system/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/file-system/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/file-system/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/file-system/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/file-system/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/file-system/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/file-system/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/file-system/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/file-system/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:File System — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/file-system/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>struct Superblock {                  // 0x204 bytes, block 0. Persistent, CRC-checked.
+  magic: u32, format_version: u16, feature_compat/incompat/ro_compat: u16/u32/u32,
+  block_size_log2: u8, blocks_total/free: u64, inodes_total/free: u64,
+  block_groups: u32, blocks_per_group/inodes_per_group: u32,
+  journal_first_block/journal_block_count: u64, journal_seq: u64,
+  root_inode: u64, mount_count/mount_count_max: u32,
+  last_mount/write/check_time: i64 (ns), state: u16, errors_behaviour: u16,
+  uuid: [u8;16], label: [u8;16], creator_os: u32, _reserved: [u8;0x158],
+  checksum: u32,
+}                                     // Mutation: mkfs (write-once fields) + mount
+                                      // (mount_count, times, journal_seq) via journal.
+struct Inode {                       // 0x100 bytes (16/4KiB block). Persistent, CRC-checked.
+  mode: u16, uid/gid: u32, link_count: u16, flags: u32,
+  size_bytes/blocks_used: u64, atime/mtime/ctime/crtime_ns: i64,
+  generation: u32, xattr_block: u64,
+  extent_root: ExtentHeader, extents_inline: [Extent; 4],
+  _reserved: [u8;0x60], checksum: u32,
+}                                     // Mutation: any VFS op via Transaction (I1).
+                                      // Concurrency: guarded by per-inode RwLock (I8).
+struct ExtentHeader { magic: u16, entries: u16, max: u16, depth: u16 }   // 8 B
+struct Extent { logical_block: u32, length: u16 (hi bit=unwritten),
+                physical_hi: u16, physical_lo: u32 }                     // 12 B
+struct ExtentIndex { logical_block: u32, child_block_lo: u32,
+                     child_block_hi: u16, _unused: u16 }                 // 12 B
+struct DirEntryHeader { inode: u64, rec_len: u16, name_len: u8,
+                        file_type: u8 }                                  // 12 B + name
+struct JournalDescriptor { magic: u32, sequence: u64, block_count: u32,
+                           mode: u8, checksum: u32 }   // + block_count × JournalBlockTag
+struct JournalBlockTag { target_block: u64, flags: u32 }
+struct JournalCommit { magic: u32, sequence: u64, timestamp_ns: i64, checksum: u32 }</code></pre><pre class="code"><code>enum Error {                          // cordfs-core; P12 — typed, no strings.
+  Corrupt(&amp;&#39;static str), Io(std::io::Error), NoSpace, ReadOnly, JournalFull,
+  Invalidated(u64 /*ino*/), NameTooLong(usize), NotADirectory, IsADirectory,
+  NotEmpty, SymlinkLoop, PhaseDeferred(&amp;&#39;static str),
+}                                     // Serialization: none — process-local only.
+
+trait BlockDevice: Send + Sync {      // cordfs-block. Ownership: one per mount.
+  fn read_block(&amp;self, n: u64, buf: &amp;mut [u8]) -&gt; Result&lt;()&gt;;
+  fn write_block(&amp;self, n: u64, buf: &amp;[u8]) -&gt; Result&lt;()&gt;;
+  fn flush(&amp;self) -&gt; Result&lt;()&gt;;      // fdatasync
+  fn size_in_blocks(&amp;self) -&gt; u64;
+}                                     // Concurrency: internally synchronized (Phase 1).
+
+trait Journal: Send + Sync {          // cordfs-journal. Ownership: one per mount.
+  fn begin(&amp;self) -&gt; Result&lt;Transaction&gt;;
+  fn dirty(&amp;self, txn: &amp;mut Transaction, block: u64, after: &amp;[u8]) -&gt; Result&lt;()&gt;;
+  fn commit(&amp;self, txn: Transaction) -&gt; Result&lt;()&gt;;   // I1, I6
+  fn checkpoint(&amp;self) -&gt; Result&lt;()&gt;;
+  fn replay(&amp;mut self) -&gt; Result&lt;u64&gt;; // returns last committed seq (I6, I11)
+}
+
+trait Filesystem: Send + Sync {       // cordfs-core, mounted by cordfs-fuse (§19).
+  fn lookup(&amp;self, parent: Ino, name: &amp;OsStr) -&gt; Result&lt;Attr&gt;;
+  fn getattr(&amp;self, ino: Ino) -&gt; Result&lt;Attr&gt;;
+  fn setattr(&amp;self, ino: Ino, set: AttrSet) -&gt; Result&lt;Attr&gt;;
+  fn readlink(&amp;self, ino: Ino) -&gt; Result&lt;OsString&gt;;
+  fn open(&amp;self, ino: Ino, flags: i32) -&gt; Result&lt;Fh&gt;;
+  fn read(&amp;self, fh: Fh, off: u64, size: u32) -&gt; Result&lt;Vec&lt;u8&gt;&gt;;
+  fn write(&amp;self, fh: Fh, off: u64, data: &amp;[u8]) -&gt; Result&lt;u32&gt;;
+  fn flush(&amp;self, fh: Fh) -&gt; Result&lt;()&gt;;
+  fn release(&amp;self, fh: Fh) -&gt; Result&lt;()&gt;;
+  fn fsync(&amp;self, fh: Fh, datasync: bool) -&gt; Result&lt;()&gt;;
+  fn opendir(&amp;self, ino: Ino, flags: i32) -&gt; Result&lt;Fh&gt;;
+  fn readdir(&amp;self, fh: Fh, off: u64) -&gt; Result&lt;Vec&lt;DirEntry&gt;&gt;;
+  fn mkdir(&amp;self, parent: Ino, name: &amp;OsStr, mode: u32) -&gt; Result&lt;Attr&gt;;
+  fn rmdir(&amp;self, parent: Ino, name: &amp;OsStr) -&gt; Result&lt;()&gt;;
+  fn create(&amp;self, parent: Ino, name: &amp;OsStr, mode: u32, flags: i32) -&gt; Result&lt;(Attr, Fh)&gt;;
+  fn unlink(&amp;self, parent: Ino, name: &amp;OsStr) -&gt; Result&lt;()&gt;;
+  fn link(&amp;self, ino: Ino, new_parent: Ino, new_name: &amp;OsStr) -&gt; Result&lt;Attr&gt;;
+  fn symlink(&amp;self, parent: Ino, name: &amp;OsStr, target: &amp;OsStr) -&gt; Result&lt;Attr&gt;;
+  fn rename(&amp;self, op: Ino, on: &amp;OsStr, np: Ino, nn: &amp;OsStr) -&gt; Result&lt;()&gt;;
+  fn statfs(&amp;self, ino: Ino) -&gt; Result&lt;StatFs&gt;;
+  fn setxattr(&amp;self, ino: Ino, name: &amp;OsStr, v: &amp;[u8], flags: i32) -&gt; Result&lt;()&gt;;
+  fn getxattr(&amp;self, ino: Ino, name: &amp;OsStr) -&gt; Result&lt;Vec&lt;u8&gt;&gt;;
+  fn access(&amp;self, ino: Ino, mask: i32) -&gt; Result&lt;()&gt;;
+}                                      // Concurrency: each method acquires the
+                                       // relevant inode lock(s) internally (I8).</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>File-System/
+├── README.md                    (project overview, quick-start mount instructions)
+├── FINAL_BLUEPRINT.md            (this document, locked)
+├── BUILD_PLAN.md                 (build-time tracking; PhaseDeferred registry mirror)
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+├── SECURITY.md
+├── CHANGELOG.md
+├── BLUEPRINT_LOG.md
+├── Cargo.toml                    (workspace root, pins the 8 crates below)
+├── Cargo.lock
+├── rust-toolchain.toml           (pins Rust 1.78+)
+├── Makefile                      (bootstrap/build/test/lint/conformance/bench/crash-suite)
+├── Dockerfile                    (multi-stage; runtime = debian:bookworm-slim + fuse3)
+├── docker-compose.yml            (mounts a sparse image at /mnt/cordfs)
+├── .dockerignore
+├── .gitignore
+├── crates/
+│   ├── cordfs-format/             (on-disk types; no I/O — §11)
+│   │   ├── src/{lib,superblock,inode,extent,dirent,htree,bitmap,journal,checksum,magic}.rs
+│   │   └── tests/{golden,round_trip}.rs
+│   ├── cordfs-block/              (device + buffer cache + fault injector — Phase 1)
+│   │   └── src/{lib,device,cache,fault}.rs
+│   ├── cordfs-journal/            (WAL — Phase 6)
+│   │   └── src/{lib,transaction,ring,replay,mode}.rs
+│   ├── cordfs-core/                (fs semantics — Phases 4, 5, 9)
+│   │   └── src/{lib,alloc,inode,extent,dir,path,permissions,xattr,compress,error}.rs
+│   ├── cordfs-fuse/                (FUSE driver binary — Phase 7)
+│   │   └── src/{main,ops,handle,attr}.rs
+│   ├── cordfs-mkfs/                (mkfs.cordfs — Phase 3)
+│   │   └── src/main.rs
+│   ├── cordfs-fsck/                (fsck.cordfs, 5-pass — Phase 8)
+│   │   └── src/{main,pass1,pass2,pass3,pass4,pass5}.rs
+│   ├── cordfs-debug/               (debug-cordfs inspector — Phase 8/9)
+│   │   └── src/main.rs
+│   └── cordfs-bench/               (perf harness + deterministic simulator — §7, §28)
+│       └── src/main.rs</code></pre><pre class="diagram"><code>File-System/ (continued)
+├── conformance/                   (§26 — make conformance gate)
+│   ├── runner/src/main.rs         (emits conformance.report.json)
+│   ├── crash/                     (fault-injection fixtures, §22)
+│   ├── format/                    (golden on-disk images)
+│   ├── posix/                     (open/read/write/stat suite)
+│   ├── xfstests-glue/             (include.txt / exclude.txt with blueprint refs)
+│   └── fixtures/                  (named N.5 conformance fixtures, all phases)
+├── fuzz/                           (cargo-fuzz targets: format parser, journal replay)
+├── docs/
+│   ├── adr/                       (one file per ADR-## row, §9)
+│   ├── runbooks/                  (named operator runbooks, §24)
+│   ├── threat-model/              (expands §22)
+│   ├── performance/               (expands §28)
+│   └── failure-analysis/          (expands §23)
+├── benchmarks/
+│   ├── results/                   (criterion + fio output, YAML)
+│   └── corpus/
+├── examples/
+│   ├── mount-image/               (mount a 1 GiB sparse file)
+│   ├── crash-replay/               (replay a recorded crash trace)
+│   └── compress-extent/            (toggle LZ4 on a directory)
+├── templates/
+│   ├── adr-template.md
+│   ├── postmortem-template.md
+│   └── rfc-template.md
+├── scripts/
+│   └── upload-to-github.sh
+├── tools/
+│   └── xfstests-runner.sh
+├── notes/
+│   └── design-journal/
+├── papers/
+│   └── whitepaper/                (M14, §38)
+├── legal/
+│   ├── terms.md
+│   └── ip-policy.md
+├── brand/
+│   └── voice.md
+├── LICENSES/
+│   ├── Apache-2.0.txt
+│   └── MIT.txt
+└── .github/workflows/
+    ├── ci.yml                     (build+test+lint matrix, Linux x86_64 + macOS arm64)
+    ├── conformance.yml
+    ├── crash-suite.yml
+    ├── security.yml
+    └── release.yml</code></pre> </section><section aria-labelledby="sec-37"> <h2 id="sec-37">File inventory <small class="muted">(Appendix A · 51 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File/Directory</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>README.md</code></td><td>Project overview, quick-start mount instructions</td></tr><tr><td><code>FINAL_BLUEPRINT.md</code></td><td>This document, locked specification</td></tr><tr><td><code>BUILD_PLAN.md</code></td><td>Build-time tracking; mirrors the Deferred Features Register</td></tr><tr><td><code>CONTRIBUTING.md</code></td><td>Contribution process</td></tr><tr><td><code>CODE_OF_CONDUCT.md</code></td><td>Community conduct policy</td></tr><tr><td><code>SECURITY.md</code></td><td>Vulnerability disclosure process</td></tr><tr><td><code>CHANGELOG.md</code></td><td>Per-release change log</td></tr><tr><td><code>BLUEPRINT_LOG.md</code></td><td>Weekly build-progress log, seeded in Phase 0</td></tr><tr><td><code>Cargo.toml</code></td><td>Workspace root pinning all 8 crates</td></tr><tr><td><code>Cargo.lock</code></td><td>Locked dependency graph (reproducible builds, <a class="cite" href="/system-design-blueprints/systems/file-system/blueprint/#sec-27">§27</a>)</td></tr><tr><td><code>rust-toolchain.toml</code></td><td>Pins Rust 1.78+</td></tr><tr><td><code>Makefile</code></td><td>bootstrap/build/test/lint/conformance/bench/crash-suite targets</td></tr><tr><td><code>Dockerfile</code></td><td>Multi-stage build; runtime <code>debian:bookworm-slim</code> + <code>fuse3</code></td></tr><tr><td><code>docker-compose.yml</code></td><td>One-command mount of a sparse test image</td></tr><tr><td><code>.dockerignore</code> / <code>.gitignore</code></td><td>Build hygiene</td></tr><tr><td><code>crates/cordfs-format/src/*.rs</code></td><td>On-disk types, validation, checksums (<a class="cite" href="/system-design-blueprints/systems/file-system/design/#sec-11">§11</a>, <a class="cite" href="/system-design-blueprints/systems/file-system/build/#sec-14">§14</a>)</td></tr><tr><td><code>crates/cordfs-format/tests/{golden,round_trip}.rs</code></td><td>Golden-image and round-trip tests (<a class="cite" href="/system-design-blueprints/systems/file-system/blueprint/#sec-14-5">§14.5</a>)</td></tr><tr><td><code>crates/cordfs-block/src/{lib,device,cache,fault}.rs</code></td><td>Device abstraction, buffer cache, fault injector (<a class="cite" href="/system-design-blueprints/systems/file-system/build/#sec-13">§13</a>)</td></tr><tr><td><code>crates/cordfs-journal/src/{lib,transaction,ring,replay,mode}.rs</code></td><td>Write-ahead log implementation (<a class="cite" href="/system-design-blueprints/systems/file-system/build/#sec-18">§18</a>)</td></tr><tr><td><code>crates/cordfs-core/src/{lib,alloc,inode,extent,dir,path,permissions,xattr,compress,error}.rs</code></td><td>Filesystem semantics (<a class="cite" href="/system-design-blueprints/systems/file-system/build/#sec-16">§16</a>, <a class="cite" href="/system-design-blueprints/systems/file-system/build/#sec-17">§17</a>, <a class="cite" href="/system-design-blueprints/systems/file-system/build/#sec-21">§21</a>)</td></tr><tr><td><code>crates/cordfs-fuse/src/{main,ops,handle,attr}.rs</code></td><td>FUSE driver binary and trait impl (<a class="cite" href="/system-design-blueprints/systems/file-system/build/#sec-19">§19</a>)</td></tr><tr><td><code>crates/cordfs-mkfs/src/main.rs</code></td><td><code>mkfs.cordfs</code> formatter (<a class="cite" href="/system-design-blueprints/systems/file-system/build/#sec-15">§15</a>)</td></tr><tr><td><code>crates/cordfs-fsck/src/{main,pass1,pass2,pass3,pass4,pass5}.rs</code></td><td><code>fsck.cordfs</code> five-pass checker (<a class="cite" href="/system-design-blueprints/systems/file-system/build/#sec-20">§20</a>)</td></tr><tr><td><code>crates/cordfs-debug/src/main.rs</code></td><td><code>debug-cordfs</code> inspector</td></tr><tr><td><code>crates/cordfs-bench/src/main.rs</code></td><td>Perf harness + deterministic invariant simulator (<a class="cite" href="/system-design-blueprints/systems/file-system/reliability/#sec-7">§7</a>, <a class="cite" href="/system-design-blueprints/systems/file-system/numbers/#sec-28">§28</a>)</td></tr><tr><td><code>conformance/runner/src/main.rs</code></td><td>Emits <code>conformance.report.json</code> (<a class="cite" href="/system-design-blueprints/systems/file-system/blueprint/#sec-26">§26</a>)</td></tr><tr><td><code>conformance/crash/</code></td><td>Fault-injection fixtures (<a class="cite" href="/system-design-blueprints/systems/file-system/blueprint/#sec-26">§26</a> workload matrix)</td></tr><tr><td><code>conformance/format/</code></td><td>Golden on-disk images</td></tr><tr><td><code>conformance/posix/</code></td><td>POSIX operation suite</td></tr><tr><td><code>conformance/xfstests-glue/{include,exclude}.txt</code></td><td><code>xfstests</code> subset config with blueprint refs</td></tr><tr><td><code>conformance/fixtures/</code></td><td>Named N.5 conformance fixtures, all phases</td></tr><tr><td><code>fuzz/</code></td><td><code>cargo-fuzz</code> targets: format parser, journal replay (<a class="cite" href="/system-design-blueprints/systems/file-system/blueprint/#sec-26">§26</a>, M12)</td></tr><tr><td><code>docs/adr/</code></td><td>One file per ADR-## row (<a class="cite" href="/system-design-blueprints/systems/file-system/trade-offs/#sec-9">§9</a>)</td></tr><tr><td><code>docs/runbooks/</code></td><td>Named operator runbooks (<a class="cite" href="/system-design-blueprints/systems/file-system/blueprint/#sec-24">§24</a>)</td></tr><tr><td><code>docs/threat-model/</code></td><td>Expands <a class="cite" href="/system-design-blueprints/systems/file-system/reliability/#sec-22">§22</a></td></tr><tr><td><code>docs/performance/</code></td><td>Expands <a class="cite" href="/system-design-blueprints/systems/file-system/numbers/#sec-28">§28</a></td></tr><tr><td><code>docs/failure-analysis/</code></td><td>Expands <a class="cite" href="/system-design-blueprints/systems/file-system/reliability/#sec-23">§23</a></td></tr><tr><td><code>benchmarks/results/</code></td><td><code>criterion</code>/<code>fio</code> output, YAML (<a class="cite" href="/system-design-blueprints/systems/file-system/numbers/#sec-28">§28</a>)</td></tr><tr><td><code>benchmarks/corpus/</code></td><td>Benchmark input corpus</td></tr><tr><td><code>examples/mount-image/</code></td><td>One-command mount of a 1 GiB sparse file</td></tr><tr><td><code>examples/crash-replay/</code></td><td>Replay a recorded crash trace</td></tr><tr><td><code>examples/compress-extent/</code></td><td>Toggle LZ4 on a directory</td></tr><tr><td><code>templates/{adr,postmortem,rfc}-template.md</code></td><td>Authoring templates</td></tr><tr><td><code>scripts/upload-to-github.sh</code></td><td>Release publishing script</td></tr><tr><td><code>tools/xfstests-runner.sh</code></td><td><code>xfstests</code> invocation wrapper</td></tr><tr><td><code>notes/design-journal/</code></td><td>Free-form design notes</td></tr><tr><td><code>papers/whitepaper/</code></td><td>M14 whitepaper (<a class="cite" href="/system-design-blueprints/systems/file-system/build/#sec-38">§38</a>)</td></tr><tr><td><code>legal/{terms,ip-policy}.md</code></td><td>Legal templates</td></tr><tr><td><code>brand/voice.md</code></td><td>Documentation voice/style guide</td></tr><tr><td><code>LICENSES/{Apache-2.0,MIT}.txt</code></td><td>Dual license texts</td></tr><tr><td><code>.github/workflows/{ci,conformance,crash-suite,security,release}.yml</code></td><td>CI/CD pipelines (<a class="cite" href="/system-design-blueprints/systems/file-system/blueprint/#sec-27">§27</a>)</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

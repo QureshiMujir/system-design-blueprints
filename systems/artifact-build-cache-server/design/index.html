@@ -1,0 +1,453 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Artifact / Build Cache Server — Design · Engineering Blueprints</title><meta name="description" content="Artifact / Build Cache Server, lld: core types, repo tree, file inventory. a from-scratch remote build cache server implementing the Bazel-compatible Remote Execution API (REAPI) subset — specifically the caching services only (no remote execution). Two logical stores: 1.…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/artifact-build-cache-server/">Artifact / Build Cache Server</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Artifact / Build Cache Server</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~23 weeks</li> <li>2,599 lines</li> <li>blueprint #272</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/artifact-build-cache-server/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/artifact-build-cache-server/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Artifact / Build Cache Server — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/artifact-build-cache-server/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>// digest.rs
+pub struct Digest { pub hash: String, pub size_bytes: i64 }
+// Ownership: Clone, PartialEq, Eq, Hash; no interior mutability.
+// Persistence: proto-serialized on wire; stored as (hash_bytes[32], i64) in BlobMeta.
+// Invariant: hash is lowercase hex; size_bytes &gt;= 0 for stored blobs.
+impl Digest {
+    pub fn zero_sha256() -&gt; Self;             // e3b0c44... / 0
+    pub fn from_hex(hash: &amp;str, size: i64) -&gt; Result&lt;Self, AbcError&gt;;
+    pub fn to_resource_path(&amp;self) -&gt; String; // &quot;{hash}/{size}&quot;
+}
+
+pub enum DigestFunction { Sha256, Sha512, Blake3 }
+impl DigestFunction {
+    pub fn hash_len_hex(&amp;self) -&gt; usize;     // 64, 128, 64
+    pub fn from_proto(v: i32) -&gt; Result&lt;Self, AbcError&gt;;
+}
+
+pub struct InstanceName(pub String);
+impl InstanceName {
+    pub fn default() -&gt; Self;               // &quot;&quot;
+    pub fn validate(&amp;self) -&gt; Result&lt;(), AbcError&gt;;
+}</code></pre><pre class="code"><code>// directory.rs
+pub struct FileNode     { pub name: String, pub digest: Digest, pub is_executable: bool }
+pub struct DirectoryNode{ pub name: String, pub digest: Digest }
+pub struct SymlinkNode  { pub name: String, pub target: String }
+pub struct Directory    {
+    pub files:       Vec&lt;FileNode&gt;,
+    pub directories: Vec&lt;DirectoryNode&gt;,
+    pub symlinks:    Vec&lt;SymlinkNode&gt;,
+}
+impl Directory {
+    pub fn validate(&amp;self) -&gt; Result&lt;(), AbcError&gt;;  // sorted + no dup names + no slash in name
+    pub fn serialized_digest(&amp;self, f: DigestFunction) -&gt; Result&lt;Digest, AbcError&gt;;
+}</code></pre><pre class="code"><code>// action.rs
+pub struct EnvVar   { pub name: String, pub value: String }
+pub struct Command  { pub arguments: Vec&lt;String&gt;, pub environment_variables: Vec&lt;EnvVar&gt;,
+                      pub output_paths: Vec&lt;String&gt; }
+pub struct Action   { pub command_digest: Digest, pub input_root_digest: Digest,
+                      pub timeout: std::time::Duration, pub do_not_cache: bool }</code></pre><pre class="code"><code>// result.rs
+pub struct OutputFile      { pub path: String, pub digest: Digest, pub is_executable: bool }
+pub struct OutputDirectory { pub path: String, pub tree_digest: Digest }
+pub struct ExecMeta        { pub worker: String, pub queued_at: Timestamp, pub exec_completed_at: Timestamp }
+pub struct ActionResult    {
+    pub output_files:        Vec&lt;OutputFile&gt;,
+    pub output_directories:  Vec&lt;OutputDirectory&gt;,
+    pub exit_code:           i32,
+    pub stdout_digest:       Option&lt;Digest&gt;,
+    pub stderr_digest:       Option&lt;Digest&gt;,
+    pub execution_metadata:  ExecMeta,
+}
+impl ActionResult {
+    pub fn all_output_digests(&amp;self) -&gt; Vec&lt;&amp;Digest&gt;;  // all blobs that must be in CAS
+}</code></pre><pre class="code"><code>// error.rs
+pub enum AbcError {
+    NotFound(Digest),
+    DigestMismatch { expected: Digest, got: Digest },
+    SizeMismatch   { expected: i64, got: i64 },
+    Incomplete      { action_digest: Digest, missing: Vec&lt;Digest&gt; },
+    InvalidResourceName(String),
+    Unauthenticated,
+    PermissionDenied { instance: String },
+    OutOfSpace { available: u64, needed: u64 },
+    Io(std::io::Error),
+    Proto(prost::DecodeError),
+}
+impl AbcError {
+    pub fn to_grpc_status(&amp;self) -&gt; tonic::Status;
+    pub fn to_http_status(&amp;self) -&gt; http::StatusCode;
+}</code></pre><pre class="code"><code>// compressor.rs
+pub enum Compressor { Identity, Zstd }
+impl Compressor {
+    pub fn from_proto(v: i32) -&gt; Result&lt;Self, AbcError&gt;;
+    pub fn to_resource_segment(&amp;self) -&gt; &amp;&#39;static str; // &quot;blobs&quot; or &quot;compressed-blobs/zstd&quot;
+}</code></pre><pre class="code"><code>// traits.rs
+pub trait BlobStore: Send + Sync {
+    fn put(&amp;self, d: &amp;Digest, r: &amp;mut dyn Read) -&gt; Result&lt;(), AbcError&gt;;
+    fn get(&amp;self, d: &amp;Digest) -&gt; Result&lt;Box&lt;dyn Read + Send&gt;, AbcError&gt;;
+    fn contains(&amp;self, d: &amp;Digest) -&gt; bool;
+    fn find_missing(&amp;self, digests: &amp;[Digest]) -&gt; Vec&lt;Digest&gt;;
+    fn delete(&amp;self, d: &amp;Digest) -&gt; Result&lt;(), AbcError&gt;;
+    fn usage_bytes(&amp;self) -&gt; u64;
+}
+
+// index.rs
+pub struct BlobMeta {
+    pub digest:     Digest,
+    pub size:       i64,
+    pub atime:      std::time::SystemTime,
+    pub refcount:   u32,
+    pub compressor: Compressor,
+    pub tier:       Tier,
+}
+
+pub enum Tier { Memory, Disk, Remote }
+
+pub struct Watermark { pub high: u64, pub low: u64 }  // bytes
+
+// tiered.rs  — routes put/get across tiers; handles promotion/demotion
+pub struct TieredStore { memory: Arc&lt;MemoryTier&gt;, disk: Arc&lt;DiskTier&gt;, remote: Option&lt;Arc&lt;dyn RemoteTier&gt;&gt; }
+impl TieredStore {
+    pub fn new(cfg: &amp;StoreConfig) -&gt; Self;
+    pub fn promote(&amp;self, d: &amp;Digest, from: Tier) -&gt; Result&lt;(), AbcError&gt;;
+}</code></pre><pre class="code"><code>// gc.rs
+pub struct GcSweeper {
+    store:     Arc&lt;TieredStore&gt;,
+    ac:        Arc&lt;AcCache&gt;,
+    watermark: Watermark,
+    interval:  Duration,
+}
+impl GcSweeper {
+    pub fn run(self) -&gt; tokio::task::JoinHandle&lt;()&gt;;  // background loop
+    pub fn trigger_now(&amp;self);
+    pub fn evict_lru_until(&amp;self, target_bytes: u64) -&gt; Result&lt;u64, AbcError&gt;;  // returns freed bytes
+}</code></pre><pre class="code"><code>// resource_name.rs
+pub struct ParsedResourceName {
+    pub instance:    InstanceName,
+    pub upload_uuid: Option&lt;Uuid&gt;,
+    pub compressor:  Compressor,
+    pub digest:      Digest,
+}
+pub fn parse_resource_name(s: &amp;str, fn_: DigestFunction) -&gt; Result&lt;ParsedResourceName, AbcError&gt;;
+
+// capabilities.rs
+pub struct ServerCapabilities {
+    pub digest_functions:            Vec&lt;DigestFunction&gt;,
+    pub supported_compressors:       Vec&lt;Compressor&gt;,
+    pub max_batch_total_size_bytes:  i64,
+    pub symlink_absolute_path_strategy: SymlinkStrategy,
+}</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>abc/                                 # workspace root
+├── Cargo.toml                       # [workspace] members; resolver = &quot;2&quot;
+├── Cargo.lock                       # locked deps (checked in)
+├── Makefile                         # phony targets: build, test, lint, fmt, fuzz, bench, docker, release
+├── Dockerfile                       # multi-stage: builder (rust:1.78) → distroless final
+├── docker-compose.yml               # abcd + Prometheus + Jaeger + Grafana dev stack
+├── README.md                        # project overview, quickstart, architecture pointer
+├── CONTRIBUTING.md                  # contribution guidelines, DCO, PR checklist
+├── CODE_OF_CONDUCT.md               # Contributor Covenant 2.1
+├── SECURITY.md                      # disclosure policy, contact, CVE process
+├── CHANGELOG.md                     # semver changelog
+├── BLUEPRINT_LOG.md                   # phase completion entries
+├── BUILD_PLAN.md                    # active implementation state
+├── LICENSE                          # Apache-2.0
+├── .cargo/
+│   └── config.toml                  # target aliases; linker settings; RUSTFLAGS
+├── .github/
+│   └── workflows/
+│       ├── ci.yml                   # build + test on push/PR (stable, MSRV, beta)
+│       ├── fuzz.yml                 # scheduled 1-hour fuzz run (nightly)
+│       ├── release.yml              # tag-triggered: build, sign, SBOM, publish
+│       └── audit.yml                # weekly cargo-audit + cargo-deny</code></pre><pre class="diagram"><code>├── crates/
+│   ├── abc-core/                    # domain types: Digest, Directory, ActionResult, AbcError
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs               # crate root; pub mod re-exports
+│   │       ├── digest.rs            # Digest, DigestFunction, hex encode/decode
+│   │       ├── directory.rs         # Directory, FileNode, DirectoryNode, SymlinkNode
+│   │       ├── action.rs            # Command, Action, EnvVar, OutputFile, OutputDirectory
+│   │       ├── result.rs            # ActionResult, ExecMeta
+│   │       ├── compressor.rs        # Compressor enum
+│   │       └── error.rs             # AbcError enum; From&lt;io::Error&gt;
+│   ├── abc-digest/                  # streaming hash + verification
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── sha256.rs            # Sha256Hasher: streaming + finalize → Digest
+│   │       ├── sha512.rs            # Sha512Hasher
+│   │       ├── blake3.rs            # Blake3Hasher
+│   │       ├── verifier.rs          # VerifyingReader/Writer: stream-and-verify
+│   │       └── negotiation.rs       # DigestFunction selection from Capabilities
+│   ├── abc-cas/                     # CAS orchestration
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── cas.rs               # CasService: put, get, contains, find_missing
+│   │       ├── tree.rs              # GetTree: BFS walk, page_token logic
+│   │       └── streaming.rs         # large-blob chunked streaming adapter
+│   ├── abc-ac/                      # Action Cache
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── cache.rs             # AcCache: get, update, completeness check
+│   │       └── policy.rs            # do_not_cache, cache_priority</code></pre><pre class="diagram"><code>│   ├── abc-store/                   # storage tiers + metadata index
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── traits.rs            # BlobStore trait
+│   │       ├── memory.rs            # MemoryTier: DashMap + LRU list
+│   │       ├── disk.rs              # DiskTier: sharded dirs, write-temp, atomic-rename
+│   │       ├── remote.rs            # RemoteTier: object-store trait (Phase 12)
+│   │       ├── index.rs             # MetadataIndex: BlobMeta, size/atime/refcount
+│   │       └── tiered.rs            # TieredStore: memory→disk→remote routing
+│   ├── abc-zstd/                    # compression layer
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── compress.rs          # streaming zstd compress
+│   │       ├── decompress.rs        # streaming zstd decompress
+│   │       └── resource.rs          # compressed-blobs resource name framing
+│   ├── abc-gc/                      # garbage collector
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── gc.rs                # GcSweeper: LRU eviction + mark-sweep
+│   │       ├── reachability.rs      # AC→CAS reachability walk
+│   │       └── watermark.rs         # Watermark {high, low}; usage computation
+│   ├── abc-grpc/                    # REAPI gRPC services
+│   │   ├── Cargo.toml
+│   │   ├── build.rs                 # tonic-build: compile .proto files
+│   │   ├── proto/
+│   │   │   ├── remote_execution.proto  # REAPI v2 (vendored + stripped to cache subset)
+│   │   │   └── bytestream.proto        # Google ByteStream API
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── server.rs            # tonic Server builder; TLS config
+│   │       ├── bytestream.rs        # ByteStream service impl
+│   │       ├── cas_service.rs       # ContentAddressableStorage service impl
+│   │       ├── ac_service.rs        # ActionCache service impl
+│   │       ├── capabilities.rs      # Capabilities service impl
+│   │       ├── resource_name.rs     # resource name parser (EBNF §8.4)
+│   │       ├── auth.rs              # auth middleware: token + mTLS
+│   │       └── status.rs            # AbcError → gRPC Status mapping</code></pre><pre class="diagram"><code>│   ├── abc-http/                    # HTTP cache protocol
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── router.rs            # axum router: /ac/{hash} /cas/{hash}
+│   │       ├── handlers.rs          # GET/PUT/HEAD handlers
+│   │       └── auth.rs              # token / mTLS middleware
+│   └── abc-cli/                     # abcd server binary + abc client
+│       ├── Cargo.toml
+│       └── src/
+│           ├── main.rs              # clap top-level; subcommand dispatch
+│           ├── serve.rs             # abcd serve: bind gRPC + HTTP, init stores
+│           ├── stats.rs             # abc stats: prometheus scrape + pretty-print
+│           ├── gc.rs                # abc gc: trigger GC; report freed bytes
+│           ├── verify.rs            # abc verify: re-hash all on-disk blobs
+│           ├── import_export.rs     # abc import/export: bulk blob transfer
+│           └── bench.rs             # abc bench: micro-benchmark hit/write throughput
+├── conformance/                     # REAPI conformance test suite
+│   ├── README.md
+│   ├── fixtures/                    # golden input/output fixtures (binary + JSON)
+│   │   ├── digest_zero.json
+│   │   ├── directory_tree_valid.bin
+│   │   ├── directory_tree_malformed.bin
+│   │   ├── bytestream_upload_valid.bin
+│   │   └── ac_stale_output.bin
+│   └── tests/
+│       ├── cas_conformance.rs       # FindMissing/Batch* against spec
+│       ├── ac_conformance.rs        # completeness invariant tests
+│       ├── bytestream_conformance.rs# resumable upload / committed_size
+│       ├── capabilities_conformance.rs
+│       └── chaos.rs                 # crash/GC/connection-drop chaos scenarios (§25)
+├── fuzz/                            # cargo-fuzz targets
+│   ├── Cargo.toml
+│   ├── fuzz_targets/
+│   │   ├── fuzz_digest_parse.rs     # arbitrary hex string → parse_digest
+│   │   ├── fuzz_resource_name.rs    # arbitrary string → parse_resource_name
+│   │   ├── fuzz_directory_proto.rs  # arbitrary bytes → decode Directory proto
+│   │   ├── fuzz_bytestream_write.rs # arbitrary chunks → ByteStream Write
+│   │   └── fuzz_ac_update.rs        # arbitrary ActionResult → completeness check
+│   └── corpus/
+│       └── ...                      # seed corpus for each target</code></pre><pre class="diagram"><code>├── benchmarks/
+│   ├── Cargo.toml
+│   ├── benches/
+│   │   ├── cas_put_get.rs           # criterion: put + get throughput vs blob size
+│   │   ├── digest_throughput.rs     # SHA-256 streaming GB/s
+│   │   ├── gc_sweep.rs              # GC cycle time vs entry count
+│   │   └── batch_rpc.rs             # BatchUpdateBlobs throughput
+│   └── results/                     # checked-in baseline results (JSON)
+├── examples/
+│   ├── bazel_remote_cache.md        # .bazelrc snippet to use abcd
+│   ├── docker_compose_dev.md        # full dev stack walkthrough
+│   └── http_cache_curl.sh           # curl examples for HTTP cache protocol
+├── docs/
+│   ├── architecture.md              # pointer to §3 + ASCII diagram
+│   ├── threat-model.md              # pointer to §Threat Model
+│   ├── adr/
+│   │   ├── 0001-language-rust.md
+│   │   ├── 0002-grpc-tonic.md
+│   │   └── ...                      # one file per ADR row
+│   ├── runbooks/
+│   │   ├── gc-runbook.md
+│   │   ├── disk-full-runbook.md
+│   │   ├── corrupt-blob-runbook.md
+│   │   └── cache-miss-storm-runbook.md
+│   ├── performance/
+│   │   ├── profiling-guide.md
+│   │   └── flamegraph-workflow.md
+│   └── failure-analysis/
+│       ├── crash-mid-upload.md
+│       └── index-corruption.md
+├── scripts/
+│   ├── gen_proto.sh                 # regenerate prost/tonic bindings
+│   ├── run_conformance.sh           # run full conformance suite vs live server
+│   ├── load_test.sh                 # locust / k6 load test wrapper
+│   └── release_checklist.sh         # pre-release gate checks
+├── tools/
+│   ├── digest_calc/                 # standalone CLI: compute digest of file
+│   └── fixture_gen/                 # generate conformance fixture binaries
+├── notes/
+│   └── design-notes.md             # scratch pad for open questions
+├── papers/                          # local copies of referenced papers
+├── legal/
+│   └── third-party-licenses.txt    # FOSSA/cargo-about output
+└── brand/
+    └── logo.svg                     # project logo asset</code></pre> </section><section aria-labelledby="sec-file-inventory"> <h2 id="sec-file-inventory">File inventory <small class="muted">(Appendix A · 133 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>Cargo.toml</code></td><td>Workspace root; member list; resolver=2; shared dependency versions</td></tr><tr><td><code>Cargo.lock</code></td><td>Locked dependency tree; checked in for reproducibility</td></tr><tr><td><code>Makefile</code></td><td>Phony targets: build, test, lint, fmt, fuzz, bench, docker, release, conformance</td></tr><tr><td><code>Dockerfile</code></td><td>Multi-stage: rust:1.78-slim builder → distroless:cc final</td></tr><tr><td><code>docker-compose.yml</code></td><td>Dev stack: abcd + Prometheus + Grafana + Jaeger</td></tr><tr><td><code>README.md</code></td><td>Project overview; quickstart; architecture pointer</td></tr><tr><td><code>CONTRIBUTING.md</code></td><td>PR checklist; DCO; code style</td></tr><tr><td><code>CODE_OF_CONDUCT.md</code></td><td>Contributor Covenant 2.1</td></tr><tr><td><code>SECURITY.md</code></td><td>Vulnerability disclosure; CVE process; contact</td></tr><tr><td><code>CHANGELOG.md</code></td><td>Semver changelog; one entry per release</td></tr><tr><td><code>BLUEPRINT_LOG.md</code></td><td>Phase completion log; links to merged PRs</td></tr><tr><td><code>BUILD_PLAN.md</code></td><td>Active implementation state; next step</td></tr><tr><td><code>LICENSE</code></td><td>Apache-2.0</td></tr><tr><td><code>.cargo/config.toml</code></td><td>Target aliases; linker overrides; RUSTFLAGS</td></tr><tr><td><code>.github/workflows/ci.yml</code></td><td>Build + test matrix (stable, MSRV, beta) on push/PR</td></tr><tr><td><code>.github/workflows/fuzz.yml</code></td><td>Nightly 1-hour fuzz run per target</td></tr><tr><td><code>.github/workflows/release.yml</code></td><td>Tag-triggered: build, sign, SBOM, publish</td></tr><tr><td><code>.github/workflows/audit.yml</code></td><td>Weekly cargo-audit + cargo-deny</td></tr><tr><td><code>crates/abc-core/Cargo.toml</code></td><td>abc-core crate manifest: no intra-workspace deps</td></tr><tr><td><code>crates/abc-core/src/lib.rs</code></td><td>Crate root; re-exports all domain types</td></tr><tr><td><code>crates/abc-core/src/digest.rs</code></td><td>Digest, DigestFunction, InstanceName, hex encoding</td></tr><tr><td><code>crates/abc-core/src/directory.rs</code></td><td>Directory, FileNode, DirectoryNode, SymlinkNode</td></tr><tr><td><code>crates/abc-core/src/action.rs</code></td><td>Command, Action, EnvVar</td></tr><tr><td><code>crates/abc-core/src/result.rs</code></td><td>ActionResult, OutputFile, OutputDirectory, ExecMeta</td></tr><tr><td><code>crates/abc-core/src/compressor.rs</code></td><td>Compressor enum</td></tr><tr><td><code>crates/abc-core/src/error.rs</code></td><td>AbcError; to_grpc_status; to_http_status</td></tr><tr><td><code>crates/abc-digest/Cargo.toml</code></td><td>abc-digest crate manifest: sha2, blake3 deps</td></tr><tr><td><code>crates/abc-digest/src/lib.rs</code></td><td>Crate root; re-exports Sha256Hasher, Sha512Hasher, Blake3Hasher, verifier, negotiation</td></tr><tr><td><code>crates/abc-digest/src/sha256.rs</code></td><td>Sha256Hasher streaming</td></tr><tr><td><code>crates/abc-digest/src/sha512.rs</code></td><td>Sha512Hasher streaming</td></tr><tr><td><code>crates/abc-digest/src/blake3.rs</code></td><td>Blake3Hasher streaming</td></tr><tr><td><code>crates/abc-digest/src/verifier.rs</code></td><td>VerifyingWriter, VerifyingReader</td></tr><tr><td><code>crates/abc-digest/src/negotiation.rs</code></td><td>DigestFunction selection from Capabilities</td></tr><tr><td><code>crates/abc-cas/Cargo.toml</code></td><td>abc-cas crate manifest: depends on abc-core, abc-digest, abc-store</td></tr><tr><td><code>crates/abc-cas/src/lib.rs</code></td><td>Crate root; re-exports CasService, tree, streaming</td></tr><tr><td><code>crates/abc-cas/src/cas.rs</code></td><td>CasService: put, get, contains, find_missing</td></tr><tr><td><code>crates/abc-cas/src/tree.rs</code></td><td>upload_tree, get_tree_page, verify_tree</td></tr><tr><td><code>crates/abc-cas/src/streaming.rs</code></td><td>Large-blob chunked streaming adapter</td></tr><tr><td><code>crates/abc-ac/Cargo.toml</code></td><td>abc-ac crate manifest: depends on abc-core, abc-cas</td></tr><tr><td><code>crates/abc-ac/src/lib.rs</code></td><td>Crate root; re-exports AcCache, policy</td></tr><tr><td><code>crates/abc-ac/src/cache.rs</code></td><td>AcCache: get, update, completeness check</td></tr><tr><td><code>crates/abc-ac/src/policy.rs</code></td><td>do_not_cache, CachePriority, ResultsCachePolicy</td></tr><tr><td><code>crates/abc-store/Cargo.toml</code></td><td>abc-store crate manifest: dashmap, postcard deps</td></tr><tr><td><code>crates/abc-store/src/lib.rs</code></td><td>Crate root; re-exports BlobStore, tiers, index</td></tr><tr><td><code>crates/abc-store/src/traits.rs</code></td><td>BlobStore trait</td></tr><tr><td><code>crates/abc-store/src/memory.rs</code></td><td>MemoryTier: DashMap + LRU list</td></tr><tr><td><code>crates/abc-store/src/disk.rs</code></td><td>DiskTier: sharded layout, atomic rename, cleanup_temps</td></tr><tr><td><code>crates/abc-store/src/remote.rs</code></td><td>RemoteTier trait; S3 stub (PhaseDeferred <a class="cite" href="/system-design-blueprints/systems/artifact-build-cache-server/build/#sec-24">§24</a>)</td></tr><tr><td><code>crates/abc-store/src/index.rs</code></td><td>MetadataIndex: BlobMeta, refcount, flush/load</td></tr><tr><td><code>crates/abc-store/src/tiered.rs</code></td><td>TieredStore: memory→disk→remote routing</td></tr><tr><td><code>crates/abc-zstd/Cargo.toml</code></td><td>abc-zstd crate manifest: zstd crate dep</td></tr><tr><td><code>crates/abc-zstd/src/lib.rs</code></td><td>Crate root; re-exports compress, decompress, resource</td></tr><tr><td><code>crates/abc-zstd/src/compress.rs</code></td><td>Streaming zstd compress</td></tr><tr><td><code>crates/abc-zstd/src/decompress.rs</code></td><td>Streaming zstd decompress</td></tr><tr><td><code>crates/abc-zstd/src/resource.rs</code></td><td>compressed-blobs resource name framing</td></tr><tr><td><code>crates/abc-gc/Cargo.toml</code></td><td>abc-gc crate manifest: depends on abc-store, abc-ac</td></tr><tr><td><code>crates/abc-gc/src/lib.rs</code></td><td>Crate root; re-exports GcSweeper, reachability, watermark</td></tr><tr><td><code>crates/abc-gc/src/gc.rs</code></td><td>GcSweeper: LRU eviction + mark-sweep loop</td></tr><tr><td><code>crates/abc-gc/src/reachability.rs</code></td><td>AC→CAS reachability walk (mark phase)</td></tr><tr><td><code>crates/abc-gc/src/watermark.rs</code></td><td>Watermark {high, low}; usage comparison</td></tr><tr><td><code>crates/abc-grpc/Cargo.toml</code></td><td>abc-grpc crate manifest: tonic, prost, build-dependencies on tonic-build</td></tr><tr><td><code>crates/abc-grpc/build.rs</code></td><td>tonic-build: compile .proto files</td></tr><tr><td><code>crates/abc-grpc/proto/remote_execution.proto</code></td><td>REAPI v2 (cache subset, vendored)</td></tr><tr><td><code>crates/abc-grpc/proto/bytestream.proto</code></td><td>Google ByteStream API</td></tr><tr><td><code>crates/abc-grpc/src/lib.rs</code></td><td>Crate root; re-exports server, service impls</td></tr><tr><td><code>crates/abc-grpc/src/server.rs</code></td><td>tonic Server builder; TLS config</td></tr><tr><td><code>crates/abc-grpc/src/bytestream.rs</code></td><td>ByteStream service: Write, Read, QueryWriteStatus</td></tr><tr><td><code>crates/abc-grpc/src/cas_service.rs</code></td><td>CAS service: FindMissing, Batch*, GetTree</td></tr><tr><td><code>crates/abc-grpc/src/ac_service.rs</code></td><td>ActionCache service: Get, Update</td></tr><tr><td><code>crates/abc-grpc/src/capabilities.rs</code></td><td>Capabilities service: GetCapabilities</td></tr><tr><td><code>crates/abc-grpc/src/resource_name.rs</code></td><td>EBNF resource name parser</td></tr><tr><td><code>crates/abc-grpc/src/auth.rs</code></td><td>Auth middleware: token + mTLS</td></tr><tr><td><code>crates/abc-grpc/src/status.rs</code></td><td>AbcError → gRPC Status mapping</td></tr><tr><td><code>crates/abc-http/Cargo.toml</code></td><td>abc-http crate manifest: axum, rustls deps</td></tr><tr><td><code>crates/abc-http/src/lib.rs</code></td><td>Crate root; re-exports router, handlers, auth</td></tr><tr><td><code>crates/abc-http/src/router.rs</code></td><td>axum router: /ac/:hash /cas/:hash</td></tr><tr><td><code>crates/abc-http/src/handlers.rs</code></td><td>GET/PUT/HEAD handlers</td></tr><tr><td><code>crates/abc-http/src/auth.rs</code></td><td>Token/mTLS middleware for HTTP</td></tr><tr><td><code>crates/abc-cli/Cargo.toml</code></td><td>abc-cli crate manifest: clap, depends on all abc-* crates</td></tr><tr><td><code>crates/abc-cli/src/main.rs</code></td><td>clap top-level; subcommand dispatch</td></tr><tr><td><code>crates/abc-cli/src/serve.rs</code></td><td>abcd serve: bind gRPC + HTTP, init stores</td></tr><tr><td><code>crates/abc-cli/src/stats.rs</code></td><td>abc stats: scrape + pretty-print metrics</td></tr><tr><td><code>crates/abc-cli/src/gc.rs</code></td><td>abc gc: trigger GC; report freed bytes</td></tr><tr><td><code>crates/abc-cli/src/verify.rs</code></td><td>abc verify: re-hash all on-disk blobs</td></tr><tr><td><code>crates/abc-cli/src/import_export.rs</code></td><td>abc import/export: bulk blob transfer</td></tr><tr><td><code>crates/abc-cli/src/bench.rs</code></td><td>abc bench: hit/write throughput micro-benchmark</td></tr><tr><td><code>conformance/tests/cas_conformance.rs</code></td><td>FindMissing/Batch* against REAPI spec</td></tr><tr><td><code>conformance/tests/ac_conformance.rs</code></td><td>Completeness invariant; do_not_cache; stale tests</td></tr><tr><td><code>conformance/tests/bytestream_conformance.rs</code></td><td>Resumable upload; offset read; concurrent streams</td></tr><tr><td><code>conformance/tests/capabilities_conformance.rs</code></td><td>Digest functions; compressors; batch size</td></tr><tr><td><code>conformance/tests/chaos.rs</code></td><td>Crash/GC/connection-drop chaos scenarios</td></tr><tr><td><code>conformance/fixtures/digest_zero.json</code></td><td>Empty-blob SHA-256 digest fixture</td></tr><tr><td><code>conformance/fixtures/directory_tree_valid.bin</code></td><td>3-level valid Merkle tree</td></tr><tr><td><code>conformance/fixtures/directory_tree_malformed.bin</code></td><td>Unsorted names; expect INVALID_ARGUMENT</td></tr><tr><td><code>conformance/fixtures/bytestream_upload_valid.bin</code></td><td>1 MB blob; expected digest</td></tr><tr><td><code>conformance/fixtures/ac_stale_output.bin</code></td><td>AR with missing CAS blob</td></tr><tr><td><code>fuzz/Cargo.toml</code></td><td>fuzz crate manifest: libfuzzer-sys, arbitrary deps</td></tr><tr><td><code>fuzz/fuzz_targets/fuzz_digest_parse.rs</code></td><td>Fuzz Digest::from_hex</td></tr><tr><td><code>fuzz/fuzz_targets/fuzz_resource_name.rs</code></td><td>Fuzz resource name parser</td></tr><tr><td><code>fuzz/fuzz_targets/fuzz_directory_proto.rs</code></td><td>Fuzz Directory proto decode</td></tr><tr><td><code>fuzz/fuzz_targets/fuzz_bytestream_write.rs</code></td><td>Fuzz ByteStream Write handler</td></tr><tr><td><code>fuzz/fuzz_targets/fuzz_ac_update.rs</code></td><td>Fuzz AC update with arbitrary AR</td></tr><tr><td><code>benchmarks/Cargo.toml</code></td><td>benchmarks crate manifest: criterion dep</td></tr><tr><td><code>benchmarks/benches/cas_put_get.rs</code></td><td>criterion: CAS throughput vs blob size</td></tr><tr><td><code>benchmarks/benches/digest_throughput.rs</code></td><td>SHA-256 GB/s streaming</td></tr><tr><td><code>benchmarks/benches/gc_sweep.rs</code></td><td>GC cycle time vs entry count</td></tr><tr><td><code>benchmarks/benches/batch_rpc.rs</code></td><td>BatchUpdateBlobs throughput</td></tr><tr><td><code>benchmarks/results/</code></td><td>Checked-in baseline JSON results</td></tr><tr><td><code>docs/architecture.md</code></td><td>ASCII diagram + per-box descriptions</td></tr><tr><td><code>docs/threat-model.md</code></td><td>Full threat model</td></tr><tr><td><code>docs/adr/0001-language-rust.md</code></td><td>ADR: Rust choice rationale (ADR-01)</td></tr><tr><td><code>docs/adr/0002-grpc-tonic.md</code></td><td>ADR: tonic gRPC framework rationale (ADR-03); one file per ADR row, <code>...</code> in <a class="cite" href="/system-design-blueprints/systems/artifact-build-cache-server/design/#sec-10">§10</a> elides A04–A28</td></tr><tr><td><code>docs/runbooks/gc-runbook.md</code></td><td>GC operational runbook</td></tr><tr><td><code>docs/runbooks/disk-full-runbook.md</code></td><td>Disk full response steps</td></tr><tr><td><code>docs/runbooks/corrupt-blob-runbook.md</code></td><td>Corrupt blob detection + repair</td></tr><tr><td><code>docs/runbooks/cache-miss-storm-runbook.md</code></td><td>Cache miss storm diagnosis</td></tr><tr><td><code>docs/performance/profiling-guide.md</code></td><td>perf/strace/heaptrack workflow overview</td></tr><tr><td><code>docs/performance/flamegraph-workflow.md</code></td><td>Step-by-step <code>cargo flamegraph</code> capture + read procedure</td></tr><tr><td><code>docs/failure-analysis/crash-mid-upload.md</code></td><td>Crash recovery analysis</td></tr><tr><td><code>docs/failure-analysis/index-corruption.md</code></td><td>Index corruption recovery</td></tr><tr><td><code>scripts/gen_proto.sh</code></td><td>Regenerate prost/tonic bindings</td></tr><tr><td><code>scripts/run_conformance.sh</code></td><td>Run full conformance suite vs live server</td></tr><tr><td><code>scripts/load_test.sh</code></td><td>k6 load test wrapper</td></tr><tr><td><code>scripts/release_checklist.sh</code></td><td>Pre-release gate checks + benchmark comparison</td></tr><tr><td><code>tools/digest_calc/</code></td><td>Standalone CLI: compute Digest of file</td></tr><tr><td><code>tools/fixture_gen/</code></td><td>Generate conformance fixture binaries</td></tr><tr><td><code>examples/bazel_remote_cache.md</code></td><td>.bazelrc snippet; integration walkthrough</td></tr><tr><td><code>examples/docker_compose_dev.md</code></td><td>Full dev stack walkthrough</td></tr><tr><td><code>examples/http_cache_curl.sh</code></td><td>curl examples for HTTP cache protocol</td></tr><tr><td><code>notes/design-notes.md</code></td><td>Open questions scratch pad</td></tr><tr><td><code>papers/</code></td><td>Local copies of referenced papers</td></tr><tr><td><code>legal/third-party-licenses.txt</code></td><td>FOSSA/cargo-about output</td></tr><tr><td><code>brand/logo.svg</code></td><td>Project logo</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

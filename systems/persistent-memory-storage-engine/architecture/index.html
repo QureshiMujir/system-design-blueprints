@@ -1,0 +1,545 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Persistent Memory Storage Engine from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Persistent Memory Storage Engine from Scratch, hld: §3 overview + §8 domain model. Build a byte-addressable persistent-memory storage engine — a from-scratch reimplementation of the core of Intel PMDK (libpmem + libpmemobj): a crash-consistent persistent heap on DAX-mapped…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/persistent-memory-storage-engine/">Persistent Memory Storage Engine from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Persistent Memory Storage Engine from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~28 weeks</li> <li>1,962 lines</li> <li>blueprint #320</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/persistent-memory-storage-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/persistent-memory-storage-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/persistent-memory-storage-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/persistent-memory-storage-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/persistent-memory-storage-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/persistent-memory-storage-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/persistent-memory-storage-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/persistent-memory-storage-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/persistent-memory-storage-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/persistent-memory-storage-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Persistent Memory Storage Engine from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                                 pmemstore — Persistent Memory Storage Engine
+ ┌──────────────────────────────────────────────────────────────────────────────────────────┐
+ │  APPLICATION  (embeds libpmemstore.so / .a)            CLI: pmemstore-ctl                   │
+ └───────────────┬───────────────────────────────────────────────────┬──────────────────────┘
+                 │ typed API: open/tx/alloc/PersistentPtr&lt;T&gt;          │ create|open|check|info|inject
+                 v                                                    v
+ ┌──────────────────────────────────────── PUBLIC API LAYER (pmemstore-api) ───────────────────┐
+ │  Pool open/create  •  Tx { begin, add_range, commit, abort }  •  alloc/free  •  root()       │
+ └───┬─────────────────────────┬────────────────────────┬───────────────────────┬──────────────┘
+     │                         │                        │                       │
+     v                         v                        v                       v
+ ┌────────────┐        ┌────────────────┐      ┌──────────────────┐     ┌──────────────────┐
+ │ pmemstore- │        │  pmemstore-tx  │      │ pmemstore-alloc  │     │  pmemstore-ds    │
+ │   ptr      │◄──────►│  undo log      │◄────►│  runs / bitmaps  │◄───►│  B+tree, hashmap │
+ │ PMEMoid /  │ deref  │  redo log      │ tx   │  free lists      │ tx  │  (crash-consist) │
+ │ Persistent │        │  Tx state mach │      │  alloc/free meta │     └──────────────────┘
+ │ Ptr&lt;T&gt;     │        └───────┬────────┘      └─────────┬────────┘
+ └─────┬──────┘                │                         │
+       │ base+off              │ log records             │ metadata stores
+       v                       v                         v
+ ┌──────────────────────────────────── DURABILITY ENGINE (pmemstore-core) ──────────────────────┐
+ │   persistence primitives:  pflush(addr,len) → CLWB|CLFLUSHOPT|CLFLUSH                          │
+ │                            pdrain()         → SFENCE                                            │
+ │                            pmemcpy_nt()     → MOVNT + SFENCE                                    │
+ │   durability-domain detector: ADR vs eADR  (ACPI NFIT / sysfs / runtime probe)                 │
+ │   ═════════════════════════ DURABILITY DOMAIN BOUNDARY ═══════════════════════════════════════│
+ │   (ADR: WPQ in domain, caches NOT durable → MUST flush) (eADR: caches in domain → flush no-op) │
+ └───────────────────────────────────────────┬───────────────────────────────────────────────────┘
+                                              │ load/store (NO page cache — DAX direct)
+                                              v
+ ┌──────────────────────────────────── ON-MEDIA LAYOUT (pmemstore-layout) ───────────────────────┐
+ │  [ Superblock ][ Pool Header ][ Recovery/Log Region ][ Allocator Metadata ][ Heap (objects) ]  │
+ │   magic,uuid,    fmt ver,        undo+redo arenas,      run headers,          root obj + user  │
+ │   csum, flags    root_off,       valid bit + csum       bitmaps, free lists   persistent objs  │
+ └───────────────────────────────────────────┬───────────────────────────────────────────────────┘
+                                              │ mmap(MAP_SYNC|MAP_SHARED_VALIDATE)
+                                              v
+ ┌──────────────────────────────── DAX SUBSTRATE (kernel, not us) ───────────────────────────────┐
+ │   /dev/daxN.M  (devdax)   |   fsdax file on ext4/xfs -o dax   |   pmemstore-emu (DRAM, CI)      │
+ │   discovered via ACPI NFIT;  NUMA-local;  256B media access granularity;  asymmetric latency    │
+ └────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  RECOVERY PATH (pmemstore-recover) runs at open():  detect-unclean → replay redo → rollback undo
+       → rebuild volatile alloc index → consistency check → (optional) leak scan from root.
+  CRASH INJECTION (pmemstore-inject):  intercept pflush/pdrain → record store log → enumerate
+       crash points → drop/reorder un-drained stores → re-open → assert invariants.</code></pre>
+<p><strong>Per-box dense description.</strong></p>
+<ul>
+<li><strong>Application / CLI.</strong> Consumers link the lib and use typed <code>PersistentPtr&lt;T&gt;</code> + <code>Tx</code>. CLI drives lifecycle + diagnostics + crash injection. No durability logic in callers — they only declare <em>what</em> must be atomic via <code>tx.add_range</code>.</li>
+<li><strong>Public API layer.</strong> Stable surface (<a class="cite" href="/system-design-blueprints/systems/persistent-memory-storage-engine/design/#sec-11">§11</a> types). Translates user intent into allocator + tx + ptr calls. Enforces: every mutation inside a tx must be <code>add_range</code>&#39;d (undo) or written via redo-log helpers before commit; allocations are tx-scoped.</li>
+<li><strong>pmemstore-ptr.</strong> <code>PMEMoid{pool_uuid_lo,off}</code>; deref = <code>pool.base + off</code> validated against pool bounds. Pool base <strong>varies per mmap</strong> → never store raw addresses on media. Root object anchors reachability (GC-style, #32). <code>PersistentPtr&lt;T&gt;</code> = typed offset wrapper, <code>unsafe fn as_ref(pool)</code>.</li>
+<li><strong>pmemstore-tx.</strong> Undo log (copy old bytes before in-place mutation; rollback on recovery) + redo log (stage new bytes; apply on commit; roll-forward on recovery). Per-tx state machine (<a class="cite" href="/system-design-blueprints/systems/persistent-memory-storage-engine/architecture/#sec-8">§8</a>). Commit point = one failure-atomic 8-byte flag store + fence. Micro-logging at cache-line granularity.</li>
+<li><strong>pmemstore-alloc.</strong> Crash-consistent malloc/free. Runs (size-class chunks) + bitmaps + segregated free lists (#29 lineage). Alloc/free <strong>state transitions are transactional</strong> → no persistent leak. Metadata rebuildable: volatile free-list index reconstructed from durable bitmaps on open.</li>
+<li><strong>pmemstore-ds.</strong> Persistent B+tree (ordered map) + persistent hash map (point lookup). Selective persistence: volatile fields (e.g. cached child pointers) vs persistent fields explicitly separated. Every structural mutation wrapped in a tx.</li>
+<li><strong>Durability engine (pmemstore-core).</strong> The crux. <code>pflush</code> selects CLWB/CLFLUSHOPT/CLFLUSH by CPUID; <code>pdrain</code>=SFENCE; <code>pmemcpy_nt</code>=non-temporal stores + SFENCE (bypass cache for large copies). Durability-domain detector decides whether flush is mandatory (ADR) or a no-op-but-fence-still-orders (eADR). <strong>This box is the durability-domain boundary.</strong></li>
+<li><strong>On-media layout.</strong> Fixed regions: Superblock (identity+csum+flags incl. clean-shutdown bit), Pool Header (fmt ver, root offset), Recovery/Log region (undo+redo arenas, each entry self-describing with valid bit + csum), Allocator metadata (run headers, bitmaps, free lists), Heap (root + user objects). All offsets relative to pool base.</li>
+<li><strong>DAX substrate.</strong> Kernel-provided. devdax (<code>/dev/daxN.M</code>, raw char device, no fs) or fsdax (file on <code>-o dax</code> ext4/xfs). Discovery via ACPI NFIT. 256B media granularity, NUMA-local, asymmetric R/W latency. <code>pmemstore-emu</code> simulates it on DRAM (tmpfs) for CI with a configurable reorder model.</li>
+<li><strong>Recovery path.</strong> At <code>open()</code>: read clean-shutdown bit; if unclean → replay redo, rollback undo (both idempotent), rebuild volatile alloc index from bitmaps, run consistency check, optionally leak-scan from root. Deterministic + idempotent (<a class="cite" href="/system-design-blueprints/systems/persistent-memory-storage-engine/reliability/#sec-7">§7</a> INV-12).</li>
+<li><strong>Crash injection.</strong> Test harness intercepts <code>pflush</code>/<code>pdrain</code>, logs every store and its drain status, enumerates crash points, drops/reorders not-yet-drained stores, re-opens, asserts invariants. The conformance heart (Phase 9, Testing &amp; Verification Strategy).</li>
+</ul>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-persistence-model">Persistence model</h3>
+<ul>
+<li><strong>DAX-mapped pmem.</strong> Pool = <code>mmap(len, PROT_READ|PROT_WRITE, MAP_SHARED_VALIDATE|MAP_SYNC, fd, 0)</code> over devdax char dev or fsdax file. <strong>No page cache</strong>: stores go CPU→cache→(flush)→domain. <code>MAP_SYNC</code> guarantees fs metadata for the file is durable so faults don&#39;t lose the mapping.</li>
+<li><strong>Durability domain.</strong> ADR: power-loss energy flushes the <strong>memory-controller Write Pending Queue (WPQ)</strong>, <em>not</em> CPU caches → software MUST flush caches. eADR: caches are in the domain → flush is a no-op, but <strong>fence still orders</strong> stores.</li>
+<li><strong>Persistence sequence (per durable write):</strong> <code>store → CLWB(line) [skip if eADR] → SFENCE</code>. Bulk: <code>MOVNT (non-temporal, bypasses cache) → SFENCE</code>.</li>
+</ul>
+<h3 id="sec-8-data-path-stages-where-a-store-lives-and-what-survives-power-loss">Data-path stages — where a store lives, and what survives power loss</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Holds the value?</th>
+<th>Survives powerfail under ADR?</th>
+<th>Survives under eADR?</th>
+<th>How to advance</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Store buffer (per-core)</td>
+<td>yes, transient</td>
+<td>no</td>
+<td>no</td>
+<td>retire / fence</td>
+</tr>
+<tr>
+<td>L1/L2/L3 cache line</td>
+<td>yes</td>
+<td><strong>no</strong></td>
+<td><strong>yes</strong></td>
+<td>CLWB/CLFLUSHOPT (ADR)</td>
+</tr>
+<tr>
+<td>Write-combining buffer (NT)</td>
+<td>yes, coalesced</td>
+<td>no</td>
+<td>no</td>
+<td>SFENCE flushes WC</td>
+</tr>
+<tr>
+<td>Memory-controller WPQ</td>
+<td>yes</td>
+<td><strong>yes</strong></td>
+<td>yes</td>
+<td>reached after flush</td>
+</tr>
+<tr>
+<td>PMEM media</td>
+<td>yes</td>
+<td>yes</td>
+<td>yes</td>
+<td>terminal (durable)</td>
+</tr>
+</tbody></table></div>
+<p>Implication: under ADR the durable frontier is the WPQ → caches must be explicitly drained into it; under eADR the frontier is the cache → flush is redundant but <code>SFENCE</code> still required to order WC/store-buffer drains. The engine emits the same <code>pflush</code>+<code>pdrain</code> calls in both modes; <code>pflush</code> is the only thing that no-ops on eADR (INV-9).</p>
+<h3 id="sec-8-adr-vs-eadr-behavioral-contract">ADR vs eADR — behavioral contract</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>ADR</th>
+<th>eADR</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Caches in durability domain</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>pflush</code> (CLWB) required for durability</td>
+<td><strong>yes</strong></td>
+<td>no (no-op)</td>
+</tr>
+<tr>
+<td><code>pdrain</code> (SFENCE) required for ordering</td>
+<td>yes</td>
+<td><strong>yes</strong></td>
+</tr>
+<tr>
+<td>Commit-marker discipline</td>
+<td>flush+fence</td>
+<td>fence only</td>
+</tr>
+<tr>
+<td>Misconfig risk</td>
+<td>none (conservative)</td>
+<td>assuming eADR on ADR → silent loss (<a class="cite" href="/system-design-blueprints/systems/persistent-memory-storage-engine/architecture/#p-4">P4</a>)</td>
+</tr>
+<tr>
+<td>Detection source</td>
+<td>NFIT persistence-domain bit / sysfs</td>
+<td>same</td>
+</tr>
+<tr>
+<td>Default if unknown</td>
+<td>assume ADR (flush)</td>
+<td>never assumed</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-persistence-sequence-diagram-single-failure-atomic-update">Persistence sequence diagram (single failure-atomic update)</h3>
+<div class="filetree" role="tree"><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">app          tx              core(pflush/pdrain)      media-domain</span></span></li><li class="ft-dir"><details open><summary><span class="ft-name">│  set v     │                    │                       │</span></summary><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">├───────────►│  *p = v (8B)       │                       │</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">│            ├───────────────────►│ CLWB(line@p)          │</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">│            │                    ├──────────────────────►│ (line → WPQ)</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">│            ├───────────────────►│ SFENCE (drain order)  │</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">│            │                    ├──────────────────────►│ now DURABLE</span></span></li></ul></details></li><li class="ft-file"><span class="ft-row"><span class="ft-name">│  ◄─────────┤  ok                │                       │</span></span></li></ul></div>
+<p>Crash anywhere before SFENCE returns ⇒ value may be absent. Crash after ⇒ value durable. This is the atom on which every higher construct (tx marker, bitmap bit, head swing) is built.</p>
+<h3 id="sec-8-failure-atomic-8-byte-store-flush-fence">Failure-atomic 8-byte store + flush/fence</h3>
+<p>The atomic durable 8-byte set is three ordered actions, not a function to implement: (1) <code>*p = v</code> — a single aligned 8-byte store, hardware-atomic against powerfail; (2) <code>pflush(p, 8)</code> — <code>CLWB</code>, or a no-op under eADR; (3) <code>pdrain()</code> — <code>SFENCE</code>, after which the value is durable and ordered. Anything wider (e.g. a 16B <code>{ptr,len}</code> pair) is NOT powerfail-atomic and must go through a log (Phase 4/5).</p>
+<h3 id="sec-8-persistent-object-layout-heap-object-header">Persistent object layout (heap object header)</h3>
+<pre class="diagram"><code>struct ObjHdr {           // 16 B, 16-aligned
+  u32 size_class;         // allocator run class
+  u32 flags;              // {LIVE, IN_TX, HUGE}
+  u64 type_tag;           // user/DS type discriminator (for recovery typing)
+}                         // payload follows, total size = run slot size</code></pre>
+<h3 id="sec-8-persistent-pointer-pmemoid">Persistent pointer (PMEMoid)</h3>
+<pre class="diagram"><code>struct PMEMoid {          // 16 B
+  u64 pool_uuid_lo;       // identifies pool (guards cross-pool deref)
+  u64 off;                // byte offset from pool base
+}
+// deref:  if oid.pool_uuid_lo != pool.uuid_lo -&gt; ERR ; addr = pool.base + oid.off (bounds-checked)
+// NULL    = {0,0}</code></pre>
+<p><code>PersistentPtr&lt;T&gt;</code> = typed newtype over <code>off</code> (single-pool fast path); <code>as_ref(&amp;Pool)</code> is <code>unsafe</code>, bounds-checked.</p>
+<h3 id="sec-8-transaction-log-record-schemas">Transaction log record schemas</h3>
+<pre class="diagram"><code>// UNDO record (capture old bytes, mutate in place, drop log on commit)
+struct UndoRec { u32 csum; u16 valid; u16 rsvd; u64 seq; u64 off; u32 len; /*payload[len] old bytes*/ }
+// REDO record (stage new bytes, apply on commit)
+struct RedoRec { u32 csum; u16 valid; u16 rsvd; u64 seq; u64 off; u32 len; /*payload[len] new bytes*/ }
+// COMMIT marker = single 8B store: { u32 magic, u32 seq_low } at fixed slot</code></pre>
+<ul>
+<li><strong>Undo discipline</strong>: log old → <code>pflush/pdrain</code> log → in-place store → on commit, invalidate log. Recovery: roll back any tx whose commit marker absent.</li>
+<li><strong>Redo discipline</strong>: log new → <code>pflush/pdrain</code> log → set commit marker (atomic) → apply to home locations → invalidate log. Recovery: if commit marker present, roll forward (idempotent re-apply); else discard.</li>
+<li><strong>Cache-line micro-logging</strong>: align log records; one fence batches multiple flushes (<a class="cite" href="/system-design-blueprints/systems/persistent-memory-storage-engine/trade-offs/#sec-9">§9</a> ADR-008).</li>
+</ul>
+<h4 id="sec-8-undo-commit-protocol-ordered-steps-crash-effect">Undo commit protocol — ordered steps &amp; crash effect</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Action</th>
+<th>Crash here ⇒ recovery state</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>U1</td>
+<td>append UndoRec(old bytes); flush+drain record</td>
+<td>tx absent (rollback no-op)</td>
+</tr>
+<tr>
+<td>U2</td>
+<td>in-place store new bytes to home</td>
+<td>rollback restores old (record durable)</td>
+</tr>
+<tr>
+<td>U3</td>
+<td>flush+drain home ranges</td>
+<td>rollback restores old (still safe)</td>
+</tr>
+<tr>
+<td>U4</td>
+<td>store 8B commit marker; flush+drain</td>
+<td>marker present ⇒ committed; absent ⇒ rollback</td>
+</tr>
+<tr>
+<td>U5</td>
+<td>invalidate undo arena (clear valid bits)</td>
+<td>committed; re-running clear is idempotent</td>
+</tr>
+</tbody></table></div>
+<h4 id="sec-8-redo-commit-protocol-ordered-steps-crash-effect">Redo commit protocol — ordered steps &amp; crash effect</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Action</th>
+<th>Crash here ⇒ recovery state</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>R1</td>
+<td>append RedoRec(new bytes); flush+drain</td>
+<td>tx absent (discard)</td>
+</tr>
+<tr>
+<td>R2</td>
+<td>store 8B commit marker; flush+drain</td>
+<td>marker absent ⇒ discard log (home untouched)</td>
+</tr>
+<tr>
+<td>R3</td>
+<td>apply RedoRecs to home; flush+drain</td>
+<td>marker present ⇒ <strong>re-apply all</strong> (idempotent)</td>
+</tr>
+<tr>
+<td>R4</td>
+<td>invalidate redo arena</td>
+<td>committed; clear idempotent</td>
+</tr>
+</tbody></table></div>
+<p>Key asymmetry: undo touches home <em>before</em> the marker (rollback path); redo touches home <em>after</em> the marker (roll-forward path). Both converge on the single 8B marker as the linearization point (<a class="cite" href="/system-design-blueprints/systems/persistent-memory-storage-engine/architecture/#p-2">P2</a>, INV-2).</p>
+<h3 id="sec-8-worked-example-failure-atomic-counter-increment-via-redo-new-value-idempotent">Worked example — failure-atomic counter increment via redo (new-value, idempotent)</h3>
+<p>The caller sequence is <code>tx.begin()</code> → <code>tx.redo_write(&amp;root.counter, 0, le_bytes(old+1))</code> (stage the absolute new value, not a delta) → <code>tx.commit()</code>, which internally runs R1 (record durable) → R2 (marker) → R3 (apply counter=old+1) → R4 (clear). Crash effects: a crash during R1–R2 leaves the marker absent, so the counter is unchanged (old) on reopen; a crash mid-R3 leaves the marker present, so recovery re-applies the record and writes counter=old+1 again — harmless because the value is absolute, so re-applying it is idempotent. Contrast: had the record instead logged a delta (+1), the same double-apply would yield old+2 — silent corruption (Phase 5 pitfall b, MM6).</p>
+<h3 id="sec-8-allocator-metadata">Allocator metadata</h3>
+<pre class="diagram"><code>struct RunHdr  { u32 size_class; u32 nslots; u64 bitmap_off; u64 next_run_off; }  // durable
+// bitmap: 1 bit/slot, 1=allocated. Durable source of truth (INV-6).
+// free list: VOLATILE, rebuilt from bitmaps on open.</code></pre>
+<h3 id="sec-8-slot-lifecycle-state-machine-the-persistent-leak-double-free-model">Slot lifecycle state machine (the persistent-leak / double-free model)</h3>
+<pre class="diagram"><code>  FREE ──reserve(volatile)──► RESERVED ──tx sets bit + caller links──► LIVE
+   ▲                              │ tx aborts / crash before marker        │
+   │                              └────────────────────────────────────────┘ (bit never set ⇒ back to FREE)
+   │                                                                         │ tx clears bit + caller unlinks
+   └─────────────────────────── FREE ◄──────────────────────────────────────┘</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Slot state</th>
+<th>bitmap bit</th>
+<th>reachable from root?</th>
+<th>crash here ⇒ recovery</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>FREE</td>
+<td>0</td>
+<td>no</td>
+<td>stays FREE (correct)</td>
+</tr>
+<tr>
+<td>RESERVED (volatile only)</td>
+<td>0</td>
+<td>no</td>
+<td>bit never durable ⇒ FREE ⇒ <strong>no leak</strong></td>
+</tr>
+<tr>
+<td>LIVE</td>
+<td>1</td>
+<td>yes</td>
+<td>stays LIVE</td>
+</tr>
+<tr>
+<td>bit=1, not reachable (leak)</td>
+<td>1</td>
+<td><strong>no</strong></td>
+<td>INV-5 leak scan reclaims</td>
+</tr>
+<tr>
+<td>bit=0, still referenced (double-free risk)</td>
+<td>0</td>
+<td>yes</td>
+<td>INV-5 detects, quarantine, fail closed</td>
+</tr>
+<tr>
+<td>The two illegal terminal states (bit/reachability disagree) are exactly what the recovery leak-scan (mark from root, <a class="cite" href="/system-design-blueprints/systems/persistent-memory-storage-engine/architecture/#p-9">P9</a>) diffs against the durable bitmap. Transactional alloc/free (<a class="cite" href="/system-design-blueprints/systems/persistent-memory-storage-engine/architecture/#p-6">P6</a>) makes the legal transitions atomic so illegal states only arise from media corruption, never from normal powerfail.</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-failure-atomic-transaction-state-machine">Failure-atomic transaction state machine</h3>
+<pre class="diagram"><code>        begin
+  IDLE ───────► ACTIVE ──add_range/redo──► ACTIVE
+                  │                            │ commit
+                  │ abort                      v
+                  │                        COMMITTING ──(commit marker durable)──► COMMITTED
+                  v                            │ crash                              │ cleanup logs
+               ABORTING ──(rollback undo)──► ABORTED                                v
+                  ▲                                                              IDLE
+                  └────────────── crash before marker ⇒ recovery treats as ABORTING</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>On crash, recovery does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ACTIVE (no marker)</td>
+<td>rollback undo / discard redo → as if tx never happened</td>
+</tr>
+<tr>
+<td>COMMITTING (marker not yet durable)</td>
+<td>marker absent ⇒ rollback (undo) / discard (redo)</td>
+</tr>
+<tr>
+<td>COMMITTED (marker durable, logs maybe live)</td>
+<td>redo: re-apply (idempotent); undo: just drop logs</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-worked-example-failure-atomic-linked-list-insert-undo">Worked example — failure-atomic linked-list insert (undo)</h3>
+<p>The caller sequence: <code>tx.begin()</code> → <code>node = tx.alloc(sizeof(Node))</code> (reserved transactionally, no leak) → populate <code>node-&gt;key</code>, <code>node-&gt;val</code>, <code>node-&gt;next = head_off</code> (write the new node fully before it is linked) → <code>tx.add_range(&amp;list.head, 8)</code> (undo-capture the old head) → <code>list.head = oid(node)</code> (the 8B atomic store of the new head) → <code>tx.commit()</code> (flush node+head, drain, set commit marker, drain). Crash effects: a crash before commit leaves the recovery state as head unchanged and the reserved node slot freed (the allocation rolls back) — no leak, no partial list. A crash after the marker is durable leaves head pointing at node, and node is fully durable — a consistent post-commit state.</p>
+<h3 id="sec-8-malformed-reordered-store-examples">Malformed / reordered-store examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Symptom</th>
+<th>Detection</th>
+<th>Handling</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Flush omitted on <code>head</code></td>
+<td>head update lost on crash; list missing node</td>
+<td>crash-inject drops un-drained store</td>
+<td>INV-1 fails fixture; engine must flush</td>
+</tr>
+<tr>
+<td>Fence omitted between node-write and head-store</td>
+<td>head durable before node body → dangling node</td>
+<td>reorder injection</td>
+<td>INV-3/INV-1; require pdrain ordering</td>
+</tr>
+<tr>
+<td>Torn 16B PMEMoid store (no log)</td>
+<td>half-updated oid → OOB off</td>
+<td>INV-4 bounds check</td>
+<td>refuse deref; tx must log 16B writes</td>
+</tr>
+<tr>
+<td>Partial log (torn tail record)</td>
+<td>last record csum invalid</td>
+<td>INV-11 scan</td>
+<td>discard torn record, roll back tx</td>
+</tr>
+<tr>
+<td>Alloc durable, link store lost</td>
+<td>allocated slot unreachable</td>
+<td>INV-5 leak scan</td>
+<td>reclaim on recovery</td>
+</tr>
+<tr>
+<td>Free committed, but second ref still live</td>
+<td>double-free / use-after-free</td>
+<td>INV-5 ownership</td>
+<td>quarantine, fail closed</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Persistence is explicit, never implicit.</strong> A store is durable only after the correct flush + fence reaches the durability domain. Tradeoff: more code, more discipline vs no silent data loss. Op implication: every durable write path is auditable. Violation → data &quot;written&quot; but lost on powerfail (the canonical PMEM bug).</li><li id="p-2"><strong>The 8-byte aligned store is the only atom.</strong> All larger-than-8B durable updates go through a log. Tradeoff: log overhead vs torn-write safety. Violation → torn 16B+ writes leave invariants half-applied, unrecoverable.</li><li id="p-3"><strong>Order then persist — fence orders, flush persists; they are different.</strong> <code>SFENCE</code> orders stores; <code>CLWB</code>/<code>CLFLUSHOPT</code> (eventually) make them durable. Violation: assuming a fence makes data durable → reordered-but-flushed-elsewhere torn state.</li><li id="p-4"><strong>Conservative domain default.</strong> If ADR vs eADR is uncertain, assume <strong>ADR</strong> (caches not durable → always flush). Tradeoff: extra flushes under eADR vs correctness if mis-detected. Violation: assuming eADR on an ADR box → omit flushes → silent loss.</li><li id="p-5"><strong>Crash-consistent metadata is rebuildable.</strong> Volatile indexes (free lists, B+tree volatile caches) are reconstructed from durable, self-describing primaries (bitmaps, persistent nodes). Tradeoff: recovery work vs simpler durable state. Violation: durable-but-corruptible index with no rebuild path → unrecoverable pool.</li><li id="p-6"><strong>No persistent leaks: allocation state changes are transactional.</strong> Alloc-then-link and unlink-then-free are single failure-atomic units. Violation: alloc durable but not linked (or free not committed) → leak/double-free across powerfail.</li><li id="p-7"><strong>Offset pointers only on media; raw pointers never persisted.</strong> <code>PMEMoid{pool_uuid_lo,off}</code> since pool base varies per mmap. Violation: persisting a raw address → dangling/garbage deref on re-map.</li><li id="p-8"><strong>Idempotent, deterministic recovery.</strong> Replay/rollback can run any number of times (crash during recovery is safe) and yields identical state. Violation: non-idempotent recovery → second crash corrupts more.</li><li id="p-9"><strong>Reachability from the persistent root defines liveness.</strong> Anything not reachable from root after a committed tx is garbage (mirrors GC, #32). Violation: orphaned-but-allocated objects = leaks invisible to consistency check.</li><li id="p-10"><strong>Quantify and assert every target.</strong> Every <a class="cite" href="/system-design-blueprints/systems/persistent-memory-storage-engine/numbers/#sec-4">§4</a> number has a benchmark/fixture gate. Tradeoff: test cost. Violation: unverified perf/recovery claims rot.</li><li id="p-11"><strong>Selective persistence.</strong> Persist only what recovery needs; keep hot volatile-derivable fields in DRAM. Tradeoff: rebuild cost vs write-bandwidth savings (PMEM writes are scarce). Violation: persisting volatile caches → write amplification + needless flushes.</li><li id="p-12"><strong>Minimize write amplification &amp; respect 256B granularity.</strong> Batch durable writes; align hot structures to cache line / 256B; prefer non-temporal stores for bulk. Violation: sub-256B scattered writes → read-modify-write + bandwidth collapse.</li><li id="p-13"><strong><code>unsafe</code> is confined and contracted.</strong> All raw mmap/intrinsic/offset-translation <code>unsafe</code> lives in <code>pmem::raw</code> with a documented safety contract per fn; the rest of the engine is safe Rust. Violation: scattered <code>unsafe</code> → unauditable UB surface.</li><li id="p-14"><strong>Recovery is a first-class, always-tested path.</strong> Crash injection runs in CI on every op type; recovery is not an afterthought. Violation: untested recovery = the path that only runs in production incidents.</li><li id="p-15"><strong>Fail closed on corruption.</strong> Bad checksum / impossible state → refuse to open and emit forensic dump, never silently &quot;best-effort&quot; continue. Tradeoff: availability vs integrity. Violation: opening corrupt pools → propagates corruption.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

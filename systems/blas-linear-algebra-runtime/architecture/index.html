@@ -1,0 +1,368 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>BLAS / Linear Algebra Runtime — Architecture · Engineering Blueprints</title><meta name="description" content="BLAS / Linear Algebra Runtime, hld: §3 overview + §8 domain model. Build a from-scratch dense linear-algebra runtime: storage model → Level-1 (vector) → Level-2 (matrix-vector) → Level-3 (matrix-matrix, GEMM-centric) → LAPACK-style factorizations, with a SIMD…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/">BLAS / Linear Algebra Runtime</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>BLAS / Linear Algebra Runtime</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~42 weeks</li> <li>1,839 lines</li> <li>blueprint #349</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/blas-linear-algebra-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:BLAS / Linear Algebra Runtime — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Diagram</h3>
+<pre class="diagram"><code>                         ┌──────────────────────────────────────────────────────────┐
+                         │                    Public API surface                     │
+   Rust callers ───────► │  la (facade)   ::  Level1 / Level2 / Level3 / lapack       │
+   C/Fortran callers ──► │  cblas (extern &quot;C&quot;)  ::  cblas_*  +  LAPACKE-subset        │
+                         └───────────────┬──────────────────────────────────────────┘
+                                         │ (CblasLayout/Transpose/Uplo → internal enums; ld/stride)
+                                         ▼
+        ┌──────────────────────────────────────────────────────────────────────────────┐
+        │                                  la-core                                       │
+        │  Scalar&lt;T&gt; traits · MatView/MatViewMut (ptr,rows,cols,rs,cs) · VecView         │
+        │  Order{Col,Row} · Trans{N,T,C} · Uplo · Diag · Side · Error · machine consts   │
+        └───────┬───────────────────────┬───────────────────────┬───────────────────────┘
+                │                       │                       │
+                ▼                       ▼                       ▼
+        ┌───────────────┐      ┌────────────────┐      ┌─────────────────────────────────┐
+        │   level1      │      │    level2      │      │             level3              │
+        │ axpy dot nrm2 │      │ gemv ger trsv  │      │  GEMM driver                    │
+        │ scal asum rot │      │ symv trmv syr  │      │  ┌────────── 5 loops ─────────┐  │
+        └──────┬────────┘      └───────┬────────┘      │  │ nc→ kc→ mc→ (pack) jr→ ir→ │  │
+               │                       │               │  └───────────┬───────────────┘  │
+               │                       │               │     pack B → Bp (kc×nc)         │
+               │                       │               │     pack A → Ap (mc×kc)         │
+               │                       │               │              ▼                  │
+               │                       │               │   macro-kernel → micro-kernel   │
+               │                       │               │   (mr×nr C tile in registers)   │
+               │                       │               │   symm syrk syr2k trmm trsm ────┤
+               │                       │               └─────────────────┬───────────────┘
+               │                       │                                 │ calls
+               ▼                       ▼                                 ▼
+        ┌──────────────────────────────────────────────────────────────────────────────┐
+        │                                   simd                                         │
+        │  Simd&lt;f32|f64&gt; · load/store/broadcast/fma · runtime dispatch (AVX2/FMA→scalar) │
+        │  aligned_alloc(64) · prefetch hints · packed-buffer arena                      │
+        └───────────────────────────────────┬──────────────────────────────────────────┘
+                                             │
+        ┌────────────────────────────────────┴─────────────────────────────────────────┐
+        │                                 threading                                      │
+        │  ThreadPool · LoopRange partition (jc/ic) · Barrier · per-thread pack buffers   │
+        └────────────────────────────────────────────────────────────────────────────────┘
+                                             ▲
+        ┌────────────────────────────────────┴─────────────────────────────────────────┐
+        │                                  lapack                                        │
+        │  getrf(LU+pivot) potrf(Cholesky) geqrf(QR) getrs potrs trtrs gels  (blocked,    │
+        │  right-looking; panel factor + trailing update via level3)                      │
+        └────────────────────────────────────────────────────────────────────────────────┘
+
+   side: bench (peak-probe, FLOPS, roofline)   ·   conformance (reference oracle, differential, error-bounds, fuzz)</code></pre>
+<h3 id="sec-3-2">3.2 Box Narratives</h3>
+<ul>
+<li><strong>Public API / <code>la</code> facade.</strong> Re-exports typed entry points; validates dims, leading dimensions, aliasing; selects <code>f32</code>/<code>f64</code>/complex monomorphizations. Thin — no arithmetic. Translates user storage order to internal column-major-canonical views (a row-major op(A) is a column-major op(A)ᵀ; we exploit this to keep one code path).</li>
+<li><strong><code>cblas</code> ABI.</strong> <code>#[repr(C)]</code> enums match the reference CBLAS header (<code>CblasRowMajor=101</code>, <code>CblasNoTrans=111</code>, …). Marshals <code>int</code>/<code>lda</code> arguments, applies the row/col-major identity transforms, calls the facade, never panics across the boundary (catch → set xerbla-style error). LAPACKE-subset mirrors <code>LAPACK_COL_MAJOR</code>.</li>
+<li><strong><code>la-core</code>.</strong> The vocabulary. <code>MatView{ptr,nrows,ncols,row_stride,col_stride}</code> is the universal descriptor (a transpose just swaps strides; a submatrix just offsets the ptr). <code>Scalar&lt;T&gt;</code> trait abstracts real/complex (<code>mul_add</code>, <code>conj</code>, <code>abs</code>, <code>zero/one</code>, machine eps). Holds error type and <code>xerbla</code>-equivalent parameter checking. No allocation, no arithmetic kernels.</li>
+<li><strong><code>level1</code>.</strong> Vector kernels; memory-bound (1–2 flops/element). SIMD-reduced dot/nrm2 (tree reduction for accuracy + ILP); <code>nrm2</code> uses scaling to avoid over/underflow. These are correctness-simple but set the SIMD-reduction patterns reused everywhere.</li>
+<li><strong><code>level2</code>.</strong> Matrix-vector; O(n²) work on O(n²) data → memory-bound, no reuse. <code>gemv</code> is the workhorse (used by LAPACK panel factorization). <code>trsv</code>/<code>trmv</code> are inherently sequential along the solve direction; blocked for cache but not compute-bound.</li>
+<li><strong><code>level3</code> / GEMM driver.</strong> The core. Implements <code>C := α·op(A)·op(B) + β·C</code>. The five-loop nest (BLIS naming <code>nc,kc,mc,jr,ir</code>) sizes <code>B</code> panel to L3, <code>A</code> panel to L2/L1, and a <code>mr×nr</code> C micro-tile to the register file. <strong>Packing</strong> copies strided operand panels into contiguous, padded, SIMD-aligned buffers (<code>Ap</code>, <code>Bp</code>) so the micro-kernel sees unit-stride streams. SYMM/SYRK/TRMM/TRSM are expressed as GEMM variants over triangular/symmetric structure.</li>
+<li><strong>Macro/micro-kernel.</strong> Macro-kernel loops over register tiles within a packed block; the <strong>micro-kernel</strong> is the only <code>unsafe</code>, ISA-specific code: it holds <code>mr×nr</code> accumulators in vector registers and streams <code>kc</code> <a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/" title="Live Runtime State Inspector">rank-1</a> updates with FMA, then writes the tile back applying <code>α</code>/<code>β</code>. Everything above it is portable.</li>
+<li><strong><code>simd</code>.</strong> <code>Simd&lt;T&gt;</code> newtype over <code>__m256</code>/<code>__m256d</code> (+ scalar fallback). Runtime dispatch picks the widest available ISA once at init (cached fn pointers). Owns aligned allocation (64-byte) and the packed-buffer arena. Prefetch wrappers.</li>
+<li><strong><code>threading</code>.</strong> Fixed-size pool (no work-stealing in P0; static partitioning of <code>jc</code>/<code>ic</code> loops). Per-thread packing buffers (no shared mutable). Barrier for fork-join. NUMA first-touch deferred (Deferred Features Register).</li>
+<li><strong><code>lapack</code>.</strong> Right-looking blocked factorizations: factor a <code>kb</code>-wide panel (unblocked, level-2), then update the trailing matrix with level-3 GEMM/TRSM — this is <em>why</em> LAPACK is fast: it pushes work into GEMM. Pivot vectors, growth factors, residual checks.</li>
+<li><strong><code>bench</code>.</strong> Probes cache sizes / SIMD width / FMA peak; runs FLOPS sweeps; emits roofline + fraction-of-peak. Statistically robust (warmup, median-of-k, pinned threads).</li>
+<li><strong><code>conformance</code>.</strong> Naïve <code>O(n³)</code> reference oracle (the trusted truth), differential harness, numerical error-bound assertions (componentwise/normwise), and micro-kernel edge fuzzing.</li>
+</ul>
+<h3 id="sec-3-3">3.3 Boundaries</h3>
+<ul>
+<li><strong>Trust boundary:</strong> the CBLAS ABI (untrusted dims/strides/pointers from C callers → validated, never trusted). Internally, the micro-kernel trusts that packing produced correctly-sized, aligned buffers — that invariant is the seam between safe and <code>unsafe</code>.</li>
+<li><strong>Concurrency boundary:</strong> the GEMM <code>jc</code>/<code>ic</code> loop partition; each thread owns disjoint C columns/rows and private pack buffers → no data races by construction.</li>
+<li><strong>Numerical boundary:</strong> accumulation order. GEMM result depends on <code>kc</code> blocking and parallel reduction order → documented, not bit-identical to the naïve oracle (we assert <em>error bounds</em>, not bit-equality).</li>
+</ul>
+<h3 id="sec-3-4">3.4 Data-flow walk — one <code>cblas_dgemm</code> call</h3>
+<ol>
+<li>C caller invokes <code>cblas_dgemm(layout, transA, transB, m,n,k, α, A,lda, B,ldb, β, C,ldc)</code>.</li>
+<li><code>cblas</code> validates args (<a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/reliability/#inv-12">I12</a>); on bad arg → <code>xerbla(routine, pos)</code>, return, no compute.</li>
+<li>Layout/trans mapped to internal enums; row-major folded to col-major-canonical via the identity (<a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/architecture/#sec-8-1">§8.1</a>) → <code>MatView</code>s built (no copy).</li>
+<li>Facade selects the f64 path; <code>α=0</code>/<code>β=0</code> special-cases handled (<a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/reliability/#inv-5">I5</a>).</li>
+<li><code>BlockSizes</code> fetched from the <code>(Machine,dtype)</code> cache (probe ran once at init).</li>
+<li><code>threading</code> partitions the <code>jc</code> loop into disjoint ranges (<a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/reliability/#inv-11">I11</a>); pool fork.</li>
+<li>Per thread: 5-loop nest → <code>pack_b</code>→<code>Bp</code>, <code>pack_a</code>→<code>Ap</code> (aligned, padded, <a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/reliability/#inv-2">I2</a>).</li>
+<li>Macro-kernel drives the <code>unsafe</code> micro-kernel over <code>mr×nr</code> tiles (<a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/reliability/#inv-3">I3</a>); FMA accumulation.</li>
+<li>Tile write-back applies α/β to C; barrier; pool join.</li>
+<li>Optional <code>KernelTrace</code> emitted (op,m,n,k,isa,blocks,threads,pack/compute ns,GFLOP/s).</li>
+</ol>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Dense Linear Algebra</h2>
+<h3 id="sec-8-1">8.1 Storage &amp; Views</h3>
+<p>Matrices are described by <code>MatView{ ptr, nrows, ncols, row_stride(rs), col_stride(cs) }</code>. Canonical internal form is <strong>column-major</strong> (<code>rs=1</code>, <code>cs=lda</code>); row-major is <code>rs=lda</code>, <code>cs=1</code>. Submatrix = pointer offset + clipped dims. Transpose = swap (<code>rs</code>,<code>cs</code>) + swap (<code>nrows</code>,<code>ncols</code>); <strong>no data movement</strong>. This single descriptor collapses all 16 combinations of {layout × transA × transB} for GEMM into one path.</p>
+<pre class="diagram"><code>op(X), Trans=N : view X as-is
+op(X), Trans=T : view Xᵀ  (swap strides)           [real &amp; complex]
+op(X), Trans=C : view conj(Xᵀ) (swap strides + conj on load)   [complex only]
+RowMajor C := A·B  ≡  ColMajor Cᵀ := Bᵀ·Aᵀ  (the row/col-major identity → one kernel)</code></pre>
+<h3 id="sec-8-2">8.2 Scalar Types</h3>
+<p><code>Scalar</code>: <code>f32</code>(<code>s</code>), <code>f64</code>(<code>d</code>), <code>Complex&lt;f32&gt;</code>(<code>c</code>), <code>Complex&lt;f64&gt;</code>(<code>z</code>). Trait provides <code>zero</code>, <code>one</code>, <code>mul_add(a,b,c)=a·b+c</code> (FMA), <code>conj</code>, <code>abs</code>, <code>EPS</code> (2⁻²⁴/2⁻⁵³), <code>SAFMIN</code>, <code>real_t</code> (the underlying real for norms). Complex multiply = 4 real mul + 2 add (or 3-mul Karatsuba — rejected: extra adds hurt FP error &amp; pipelining, <a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/trade-offs/#adr-16">ADR-16</a>).</p>
+<p>Per-type IEEE-754 constants the kernels depend on (the source of every <a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/numbers/#sec-4">§4</a> numerical bound):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Type</th>
+<th>unit roundoff <code>u</code></th>
+<th>overflow <code>OFL</code></th>
+<th>underflow <code>UFL</code></th>
+<th><code>√OFL</code> (nrm2 safe bound)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>f32 (<code>s</code>)</td>
+<td>2⁻²⁴ ≈ 5.96e-8</td>
+<td>≈ 3.40e38</td>
+<td>≈ 1.18e-38</td>
+<td>≈ 1.84e19</td>
+</tr>
+<tr>
+<td>f64 (<code>d</code>)</td>
+<td>2⁻⁵³ ≈ 1.11e-16</td>
+<td>≈ 1.80e308</td>
+<td>≈ 2.23e-308</td>
+<td>≈ 1.34e154</td>
+</tr>
+</tbody></table></div>
+<p><code>FMA</code> gives a single rounding for <code>a·b+c</code> (the product is not rounded before the add), which both halves the error per multiply-add and is the hardware primitive the micro-kernel issues; on the real path this is <code>vfmadd*</code>, on the complex path it composes four real FMAs. The <code>√OFL</code> column is exactly the threshold above which a naïve sum-of-squares overflows — the reason <code>nrm2</code>/<code>asum</code> use the scaled <code>xLASSQ</code> recurrence (<a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/trade-offs/#adr-17">ADR-17</a>, <a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/reliability/#inv-13">I13</a>). <code>SAFMIN</code> (the smallest number whose reciprocal does not overflow) bounds safe division in <code>trsv</code>/<code>trsm</code> scaling.</p>
+<h3 id="sec-8-3">8.3 The BLAS Operation Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Data/Work</th>
+<th>Bound</th>
+<th>Reuse</th>
+<th>Examples</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>O(n)/O(n)</td>
+<td>memory</td>
+<td>none</td>
+<td><code>axpy y:=αx+y</code>, <code>dot</code>, <code>nrm2</code>, <code>scal</code>, <code>asum</code>, <code>iamax</code>, <code>rot</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>O(n²)/O(n²)</td>
+<td>memory</td>
+<td>O(1)</td>
+<td><code>gemv y:=αop(A)x+βy</code>, <code>ger A:=αxyᵀ+A</code>, <code>trsv</code>, <code>trmv</code>, <code>symv</code>, <code>syr/syr2</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>O(n²)/O(n³)</td>
+<td><strong>compute</strong></td>
+<td>O(n)</td>
+<td><code>gemm C:=αop(A)op(B)+βC</code>, <code>symm</code>, <code>syrk</code>, <code>syr2k</code>, <code>trmm</code>, <code>trsm</code></td>
+</tr>
+</tbody></table></div>
+<p>Arithmetic intensity AI = flops/bytes. L1/L2: AI≈O(1) → roofline-pinned to bandwidth. L3: AI grows with block size → can reach the FLOP ceiling. <strong>This table is the entire motivation for the architecture.</strong></p>
+<h3 id="sec-8-4">8.4 The GEMM Five-Loop Model (BLIS)</h3>
+<pre class="diagram"><code>C(m×n) += A(m×k)·B(k×n)
+for jc in 0..n step nc:                 // L5: B,C column panel → nc fits L3
+  for pc in 0..k step kc:               // L4: k-slice → Bp(kc×nc) packed → L3
+      pack B[pc:pc+kc, jc:jc+nc] → Bp    // contiguous, panel-of-nr layout
+      for ic in 0..m step mc:           // L3: A,C row panel → mc fits L2
+          pack A[ic:ic+mc, pc:pc+kc] → Ap // contiguous, panel-of-mr layout
+          // ---- macro-kernel over Ap(mc×kc) × Bp(kc×nc) ----
+          for jr in 0..nc step nr:      // L2: register-column of width nr
+              for ir in 0..mc step mr:  // L1: register-row of height mr
+                  microkernel(Ap[ir], Bp[jr], C[ic+ir, jc+jr], α, β)</code></pre>
+<p><code>Bp</code> reused across all <code>ic</code> (L3 residence); <code>Ap</code> reused across all <code>jr</code> (L2); micro-tile <code>mr×nr</code> reused across <code>kc</code> (registers). Edge cases: <code>m,n,k</code> not multiples of block sizes → pad packed buffers with zeros to <code>mr/nr</code>, write back only valid sub-tile.</p>
+<h3 id="sec-8-5">8.5 Micro-kernel Contract (normative)</h3>
+<p>Inputs: <code>Ap</code> slice (<code>kc×mr</code>, col-of-mr), <code>Bp</code> slice (<code>kc×nr</code>, row-of-nr), <code>C</code> tile pointer + strides, <code>α</code>, <code>β</code>, <code>kc</code>. Behavior: compute <code>Ctile := α·(Apᵀ·Bp) + β·Ctile</code> accumulating <code>kc</code> <a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/" title="Live Runtime State Inspector">rank-1</a> updates into <code>mr×nr</code> register accumulators; on <code>kc</code> exit, scale by <code>α</code>, axpy into <code>C</code> with <code>β</code>. Preconditions (caller-guaranteed): <code>Ap/Bp</code> 64-B aligned, padded to <code>mr/nr</code>; <code>kc≥1</code>. <strong>Only function permitted <code>unsafe</code>.</strong> Reference (<code>mr=nr=…</code> chosen per ISA, e.g. <code>6×8</code> f64 AVX2 ⇒ 6·8/4=12 + 6 + ~2 ≈ within 16 YMM).</p>
+<h3 id="sec-8-6">8.6 Worked Example (3×3 dgemm, α=1,β=0)</h3>
+<pre class="diagram"><code>A=[[1,2,3],[4,5,6],[7,8,9]]  B=I₃ ⇒ C=A.  α=2,β=1,C₀=A ⇒ C=2A+A=3A.
+β=0 with C₀ preloaded NaN ⇒ C must equal αAB (NaN cleared) — I5 test.</code></pre>
+<h3 id="sec-8-7">8.7 Factorization State Machines</h3>
+<ul>
+<li><strong>LU (getrf, right-looking, partial pivot):</strong> for each panel of width <code>kb</code>: (1) factor panel unblocked: per column j find pivot=argmax|A[j:,j]|, swap rows, scale below-diagonal by 1/A[j,j], <a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/" title="Live Runtime State Inspector">rank-1</a> update remaining panel cols; (2) apply row swaps to trailing matrix; (3) <code>trsm</code> to get U block of L⁻¹·trailing; (4) <code>gemm</code> trailing -= L_panel·U_block. Output: in-place L (unit lower) + U (upper), pivot vector <code>ipiv</code>, <code>info</code> = first zero pivot.</li>
+<li><strong>Cholesky (potrf, SPD):</strong> for panel: factor diagonal block (<code>A=LLᵀ</code> unblocked, <code>sqrt</code> of pivots — fail <code>info&gt;0</code> if ≤0), <code>trsm</code> off-diagonal, <code>syrk</code> trailing update. Lower or upper per <code>uplo</code>.</li>
+<li><strong>QR (geqrf, Householder):</strong> for panel: compute Householder vector <code>v</code>/<code>τ</code> per column reflecting subcolumn to ±‖·‖e₁; apply <code>H=I−τvvᵀ</code> to panel; form block reflector <code>T</code> (the WY representation) and update trailing with <code>gemm</code>. Output: R in upper, <code>v</code> below diagonal, <code>τ</code> array.</li>
+</ul>
+<h3 id="sec-8-8">8.8 Edge / Failure-Path Examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Expected</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>m=0 ∨ n=0</code></td>
+<td>no-op, return (level-3); <code>k=0</code> ⇒ C:=βC</td>
+</tr>
+<tr>
+<td><code>k=0, β=0</code></td>
+<td>C := 0</td>
+</tr>
+<tr>
+<td>singular LU (zero pivot at step j)</td>
+<td><code>info=j+1</code>, factorization completes (U has zero on diag)</td>
+</tr>
+<tr>
+<td>indefinite Cholesky</td>
+<td><code>info=j+1</code> at first non-positive pivot; partial factor left in A</td>
+</tr>
+<tr>
+<td><code>lda &lt; max(1,nrows)</code> (col-major)</td>
+<td><code>xerbla</code> param error, no compute (<a class="cite" href="/system-design-blueprints/systems/blas-linear-algebra-runtime/reliability/#inv-12">I12</a>)</td>
+</tr>
+<tr>
+<td><code>nrm2</code> of vector with one <code>±Inf</code></td>
+<td><code>+Inf</code>; with <code>NaN</code> ⇒ <code>NaN</code></td>
+</tr>
+<tr>
+<td>overflow in <code>nrm2</code> (large elems)</td>
+<td>scaled algorithm avoids spurious <code>Inf</code></td>
+</tr>
+<tr>
+<td>aliasing C with A in gemm</td>
+<td>rejected by validation unless exact-same-view trivial case</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

@@ -1,0 +1,818 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Dataframe / In-Memory Columnar Engine (Arrow/Polars-like) from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Dataframe / In-Memory Columnar Engine (Arrow/Polars-like) from Scratch, hld: §3 overview + §8 domain model. Build, from scratch in Rust, a single-node multicore in-memory columnar engine (Arrow-style memory format + vectorized compute kernels) and, layered on it, a dataframe + lazy query engine…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/dataframe-columnar-engine/">Dataframe / In-Memory Columnar Engine (Arrow/Polars-like) from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Dataframe / In-Memory Columnar Engine (Arrow/Polars-like) from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~49 weeks</li> <li>2,292 lines</li> <li>blueprint #395</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/dataframe-columnar-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/dataframe-columnar-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/dataframe-columnar-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/dataframe-columnar-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/dataframe-columnar-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/dataframe-columnar-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/dataframe-columnar-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/dataframe-columnar-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/dataframe-columnar-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Dataframe / In-Memory Columnar Engine (Arrow/Polars-like) from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical diagram</h3>
+<pre class="diagram"><code>                                  ┌──────────────────────────────────────────────────────────┐
+  SOURCES                         │                      cx ENGINE                             │
+  ┌───────────┐                   │                                                            │
+  │ CSV       │   ┌────────────┐  │   ┌───────────────── COLUMNAR CORE (cx-buffer/array) ────┐ │
+  │ Parquet   │──▶│  READER    │──┼──▶│  Arrow buffers, 64B-aligned:                          │ │
+  │ Arrow IPC │   │ schema     │  │   │   [validity bitmap | offsets (i32/i64) | data buffer]  │ │
+  │ JSON      │   │ infer +    │  │   │  ArrayData{dtype,len,null_count,buffers,child_data}    │ │
+  └───────────┘   │ decode     │  │   └───────────────────────┬───────────────────────────────┘ │
+                  └────────────┘  │                           │                                  │
+                                  │        ┌──────────────────┴───────────────────┐             │
+                                  │        ▼                                       ▼             │
+                                  │  ┌───────────────┐                   ┌──────────────────┐    │
+                                  │  │  EAGER PATH    │                   │   LAZY PATH       │    │
+                                  │  │  DataFrame /   │                   │   LazyFrame       │    │
+                                  │  │  Series  +     │                   │     │ Expr trees  │    │
+                                  │  │  compute       │                   │     ▼             │    │
+                                  │  │  kernels       │                   │  LogicalPlan      │    │
+                                  │  │ (cx-frame /    │                   │     │             │    │
+                                  │  │  cx-compute)   │                   │     ▼  OPTIMIZER   │    │
+                                  │  └──────┬─────────┘                   │  (cx-optimize):   │    │
+                                  │         │                             │  predicate ↓      │    │
+                                  │         │                             │  projection ↓     │    │
+                                  │         │                             │  slice ↓ / CSE /  │    │
+                                  │         │                             │  const-fold/coerce│    │</code></pre>
+<p><strong>(continued):</strong></p>
+<pre class="diagram"><code>                                  │         │                             │     │             │    │
+                                  │         │                             │     ▼             │    │
+                                  │         │                             │  PhysicalPlan     │    │
+                                  │         │                             │  scan/filter/proj │    │
+                                  │         │                             │  hash-agg/hash-join│   │
+                                  │         │                             │  sort/sort-merge  │    │
+                                  │         │                             │     │             │    │
+                                  │         │                             │     ▼             │    │
+                                  │         │                             │  VECTORIZED EXEC  │    │
+                                  │         │                             │  (cx-exec):       │    │
+                                  │         │                             │  morsel-driven,   │    │
+                                  │         │                             │  rayon work-steal │    │
+                                  │         │                             │     │ RecordBatch │    │
+                                  │         └───────────────┬─────────────┘     │ stream      │    │
+                                  │                         ▼                   ▼               │
+                                  │                  ┌─────────────────────────────────┐        │
+                                  │                  │   SINK: collect→DataFrame /      │        │
+                                  │                  │   write Parquet / CSV / IPC      │        │
+                                  │                  └─────────────────────────────────┘        │
+                                  │                                                              │
+                                  │  SIDE SERVICES: ┌───────────────┐ ┌──────────────┐ ┌──────┐ │
+                                  │                 │ MemoryPool +  │ │ Type system /│ │ Dict │ │
+                                  │                 │ accounting +  │ │ Schema       │ │ enc. │ │
+                                  │                 │ spill (cx-mem)│ │ (cx-datatype)│ │      │ │
+                                  │                 └───────────────┘ └──────────────┘ └──────┘ │
+                                  └──────────────────────────────────────────────────────────┘
+   FFI: Arrow C Data Interface (cx-ffi) imports/exports buffers zero-copy at the boundary.</code></pre>
+<h3 id="sec-3-2">3.2 Box-by-box responsibilities</h3>
+<ul>
+<li><strong>Reader (cx-io).</strong> Decodes a source into Arrow <code>RecordBatch</code>es. CSV: sample-based schema inference, typed parse, quoting/escaping. Parquet: read Thrift footer, select row groups via statistics, decode pages (RLE/bit-pack/delta/dictionary), reassemble columns with validity. IPC: parse Flatbuffers schema + record-batch messages, wrap buffers zero-copy. Null semantics: producer sets validity bit per slot; reader never fabricates values for null slots. Parallelism boundary: one row group / file split per rayon task.</li>
+<li><strong>Columnar core (cx-buffer + cx-array).</strong> Owns the canonical Arrow memory layout: 64-byte-aligned, immutable, <code>Arc</code>-shared <code>Buffer</code>s; <code>ArrayData{dtype,len,null_count,buffers,child_data}</code>. Every array kind (primitive, boolean, utf8/binary, list, struct, dictionary, null) is a typed view over <code>ArrayData</code>. Slicing adjusts <code>(offset,len)</code> without copying. Mutation never happens in place — builders produce new arrays. This is the <em>trust + zero-copy</em> boundary: buffers crossing FFI are the same bytes.</li>
+<li><strong>Eager path (cx-frame + cx-compute).</strong> <code>Series</code> = named <code>ChunkedArray</code>; <code>DataFrame</code> = <code>Vec&lt;Series&gt;</code> + <code>Schema</code>. Operations call kernels directly and materialize immediately. Used for interactive/REPL work and as the building block under the lazy executor. Null semantics propagate per kernel; concurrency: arrays are <code>Send+Sync</code>, kernels are pure functions of their inputs.</li>
+<li><strong>Lazy path — Expr/Logical (cx-expr + cx-plan).</strong> A <code>LazyFrame</code> records intent as <code>Expr</code> trees over <code>LogicalPlan</code> nodes (Scan/Projection/Filter/Aggregate/Join/Sort/Limit/Distinct/Union). Nothing executes until <code>collect()</code>. Schema is resolved + validated at build time; type coercion is explicit. This is the <em>semantics</em> boundary: the plan is the source of truth for what the query means.</li>
+<li><strong>Optimizer (cx-optimize).</strong> Rule-based rewrites on the <code>LogicalPlan</code>: predicate pushdown (filters toward scans), projection pushdown (read fewer columns), slice/limit pushdown, common-subexpression elimination, constant folding, type coercion insertion. Each rule is <code>LogicalPlan → LogicalPlan</code>, schema-preserving, idempotent where possible. Output is an optimized logical plan.</li>
+<li><strong>Physical plan + executor (cx-plan + cx-exec).</strong> The optimized logical plan lowers to <code>PhysicalPlan</code> (<code>ExecNode</code> trait, <code>execute() -&gt; RecordBatchStream</code>): <code>ScanExec</code>, <code>FilterExec</code>, <code>ProjectExec</code>, <code>HashAggExec</code>, <code>HashJoinExec</code>, <code>SortExec</code>, <code>SortMergeJoinExec</code>, <code>LimitExec</code>. Execution is <strong>morsel-driven</strong>: the source is partitioned into morsels, rayon work-steals across cores, operators are batch-at-a-time, and results flow as a <code>RecordBatch</code> stream. This is the <em>parallelism</em> boundary — no global lock in the hot path; only the shared hash table for build, partitioned to avoid contention.</li>
+<li><strong>Sink (cx-io + cx-frame).</strong> Streams <code>RecordBatch</code>es into a collected <code>DataFrame</code> or writes Parquet/CSV/IPC. Deterministic ordering is enforced only where requested (sort, or <code>maintain_order</code>).</li>
+<li><strong>Side services.</strong> <code>MemoryPool</code> (cx-memory) accounts every allocation against a per-query budget and triggers spill when reservations exceed the threshold. <code>Schema</code>/type system (cx-datatype) is consulted at every plan/kernel boundary. Dictionary encoder shares low-cardinality string data. <code>cx-ffi</code> exports/imports buffers across the Arrow C Data Interface ABI.</li>
+</ul>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Arrow memory layout (general)</h3>
+<p>Every array is a typed view over <code>ArrayData</code>:</p>
+<pre class="diagram"><code>ArrayData {
+  data_type : DataType
+  len       : usize          // logical element count
+  null_count: usize          // cleared validity bits
+  offset    : usize          // logical offset into buffers (zero-copy slice)
+  buffers   : Vec&lt;Buffer&gt;    // 0..N data/offset buffers, layout depends on dtype
+  child_data: Vec&lt;ArrayData&gt; // nested children (List, Struct, ...)
+}</code></pre>
+<ul>
+<li><strong>Validity bitmap:</strong> 1 bit per slot, <strong>LSB-numbered</strong> (slot i → byte i/8, bit i%8); bit set = valid, clear = null. Omitted iff <code>null_count == 0</code>.</li>
+<li><strong>Buffers</strong> are 64-byte aligned, immutable, <code>Arc</code>-shared <code>Bytes</code>. <code>offset</code> lets a slice reuse parent buffers.</li>
+<li>Layout per kind (number of buffers):<ul>
+<li><strong>Primitive</strong> (Int/UInt/Float/Bool-as-bits/temporal): <code>[validity?, data]</code> — fixed-width values (Boolean packs 1 bit/value).</li>
+<li><strong>Variable binary/string</strong> (<code>Utf8</code>,<code>Binary</code>): <code>[validity?, offsets, data]</code> — <code>offsets: i32</code> (Large: i64), value i = <code>data[offsets[i]..offsets[i+1]]</code>.</li>
+<li><strong>List</strong> (<code>List&lt;T&gt;</code>): <code>[validity?, offsets]</code> + child <code>T</code> array; element i = child<code>[offsets[i]..offsets[i+1]]</code>.</li>
+<li><strong>Struct</strong>: <code>[validity?]</code> + one child array per field, all length == parent len.</li>
+<li><strong>Dictionary</strong>: <code>keys</code> (a primitive index array) + <code>values</code> (the dictionary, any array).</li>
+<li><strong>Null</strong>: zero buffers; <code>len</code> only; all slots null.</li>
+</ul>
+</li>
+</ul>
+<h3 id="sec-8-2">8.2 Byte diagrams</h3>
+<p><strong><code>Int32Array</code> length 5, values <code>[10, 20, NULL, 40, 50]</code>:</strong></p>
+<pre class="diagram"><code>validity bitmap (LSB0): bit0=1 bit1=1 bit2=0 bit3=1 bit4=1  -&gt; byte 0 = 0b00011011 = 0x1B
+  (bits 5..63 are padding=0; bitmap buffer length rounded up to 64 bytes)
+data buffer (i32 LE, 4 bytes each, 64-byte aligned, slot 2 value undefined):
+  offset  0:  0A 00 00 00   (=10)
+  offset  4:  14 00 00 00   (=20)
+  offset  8:  ?? ?? ?? ??   (NULL slot — bytes undefined, NOT read)
+  offset 12:  28 00 00 00   (=40)
+  offset 16:  32 00 00 00   (=50)
+null_count = 1</code></pre>
+<p><strong><code>Utf8Array</code> length 4, values <code>[&quot;arrow&quot;,&quot;&quot;,NULL,&quot;db&quot;]</code>:</strong></p>
+<pre class="diagram"><code>validity bitmap: bit0=1 bit1=1 bit2=0 bit3=1 -&gt; 0b1011 = 0x0B
+offsets buffer (i32, len = 5 = len+1), monotonic non-decreasing:
+  [ 0, 5, 5, 5, 7 ]
+   ^arrow(0..5) ^&quot;&quot;(5..5 empty) ^NULL(5..5, ignored) ^&quot;db&quot;(5..7)
+data buffer (UTF-8 bytes, contiguous): &#39;a&#39;&#39;r&#39;&#39;r&#39;&#39;o&#39;&#39;w&#39;&#39;d&#39;&#39;b&#39;  (len 7)
+  note: NULL slot still consumes an offset entry; its [start,end) is well-formed (here empty)</code></pre>
+<p><strong><code>List&lt;Int32&gt;</code> length 3, values <code>[[1,2],[],NULL]</code>:</strong> (NULL is the outer list, distinct from <code>[]</code>)</p>
+<pre class="diagram"><code>parent validity: bit0=1 bit1=1 bit2=0 -&gt; 0b011 = 0x03
+parent offsets (i32, len 4): [0, 2, 2, 2]
+   list0 = child[0..2] = [1,2]; list1 = child[2..2] = []; list2 = NULL (offsets ignored)
+child Int32Array (len 2): data = [1, 2], no nulls</code></pre>
+<p><strong><code>Dictionary&lt;Int8, Utf8&gt;</code> length 5, logical <code>[&quot;red&quot;,&quot;green&quot;,&quot;red&quot;,NULL,&quot;green&quot;]</code>:</strong></p>
+<pre class="diagram"><code>keys = Int8Array  len 5, validity bit3=0 (NULL): values [0, 1, 0, ??, 1]   (?? = null key slot)
+values (dictionary) = Utf8Array len 2: [&quot;red&quot;,&quot;green&quot;]   (offsets [0,3,8], data &quot;redgreen&quot;)
+decode: key 0-&gt;&quot;red&quot;, 1-&gt;&quot;green&quot;; key slot 3 is null -&gt; logical NULL (dictionary not indexed)
+invariant I5: every non-null key &lt; values.len()==2</code></pre>
+<h3 id="sec-8-3">8.3 Type system</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Types</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Signed int</td>
+<td><code>Int8 Int16 Int32 Int64</code></td>
+<td>two&#39;s complement</td>
+</tr>
+<tr>
+<td>Unsigned int</td>
+<td><code>UInt8 UInt16 UInt32 UInt64</code></td>
+<td></td>
+</tr>
+<tr>
+<td>Float</td>
+<td><code>Float16(opt) Float32 Float64</code></td>
+<td>IEEE-754</td>
+</tr>
+<tr>
+<td>Boolean</td>
+<td><code>Boolean</code></td>
+<td>1 bit/value packed</td>
+</tr>
+<tr>
+<td>Decimal</td>
+<td><code>Decimal128(precision,scale)</code></td>
+<td>fixed-point; <code>Decimal256</code> deferred</td>
+</tr>
+<tr>
+<td>Temporal</td>
+<td><code>Date32(days) Date64(ms) Time32(s/ms) Time64(us/ns) Timestamp(unit, tz?) Duration(unit) Interval</code></td>
+<td>tz is a string label; values are UTC-normalized</td>
+</tr>
+<tr>
+<td>String/binary</td>
+<td><code>Utf8 LargeUtf8 Binary LargeBinary</code></td>
+<td>offsets i32 vs i64</td>
+</tr>
+<tr>
+<td>Nested</td>
+<td><code>List&lt;T&gt; LargeList&lt;T&gt; FixedSizeList&lt;T,n&gt; Struct{Field*} Map&lt;K,V&gt;</code></td>
+<td>child arrays</td>
+</tr>
+<tr>
+<td>Dictionary</td>
+<td><code>Dictionary&lt;K:int, V&gt;</code></td>
+<td><code>K</code> index type, <code>V</code> value type</td>
+</tr>
+<tr>
+<td>Null</td>
+<td><code>Null</code></td>
+<td>all-null, zero buffers</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>**<code>Field</code> = { name: String, data_type: DataType, nullable: bool, metadata: Map&lt;String,String&gt; }`.</li>
+<li>**<code>Schema</code> = { fields: Vec&lt;Field&gt;, metadata }`; ordered; column lookup by name (case-sensitive) or index.</li>
+<li><strong>Nullability</strong> is a <code>Field</code> property; an array may still carry a bitmap even if <code>nullable==false</code> (must then be all-valid — checked at boundaries).</li>
+</ul>
+<h3 id="sec-8-4">8.4 Three-valued (Kleene) logic</h3>
+<p><code>U</code> = NULL/unknown. Comparison of anything with NULL → <code>U</code>. Boolean ops:</p>
+<pre class="diagram"><code>AND | T U F        OR  | T U F        NOT
+----+------        ----+------        ---
+ T  | T U F         T  | T T T         T -&gt; F
+ U  | U U F         U  | T U U         U -&gt; U
+ F  | F F F         F  | T U F         F -&gt; T</code></pre>
+<p>Operational consequences: <code>WHERE</code> keeps only rows where predicate is <strong>T</strong> (U and F are dropped). <code>is_null(x)</code> and <code>is_not_null(x)</code> are total (never return U). <code>fill_null(x, v)</code> replaces U with a value. <code>x == x</code> is <code>U</code> when x is NULL (not T).</p>
+<h3 id="sec-8-5">8.5 Compute kernel catalog (<code>cx-compute</code>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Kernels</th>
+<th>Signature shape</th>
+<th>Null behavior</th>
+<th>SIMD note</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Arithmetic</td>
+<td><code>add sub mul div rem neg pow abs</code></td>
+<td><code>(Array,Array)-&gt;Array</code> / scalar broadcast</td>
+<td>output null if either input null; div-by-zero → null or error per policy</td>
+<td>lane-wise; validity = <code>lhs_valid &amp; rhs_valid</code></td>
+</tr>
+<tr>
+<td>Comparison</td>
+<td><code>eq neq lt lt_eq gt gt_eq</code></td>
+<td><code>(Array,Array)-&gt;BooleanArray</code></td>
+<td>null operand → null result (U)</td>
+<td>branchless compare → bitmask</td>
+</tr>
+<tr>
+<td>Boolean</td>
+<td><code>and or not and_kleene or_kleene xor</code></td>
+<td><code>(BooleanArray,..)-&gt;BooleanArray</code></td>
+<td>Kleene tables (<a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#sec-8-4">§8.4</a>)</td>
+<td>bitwise on packed bits + validity</td>
+</tr>
+<tr>
+<td>Cast</td>
+<td><code>cast(Array, DataType)</code></td>
+<td><code>(Array,DataType)-&gt;Array</code></td>
+<td>invalid cast → null (safe) or <code>EngineError::TypeCoercion</code> (strict)</td>
+<td>width-converting loops</td>
+</tr>
+<tr>
+<td>Aggregate</td>
+<td><code>sum min max mean count count_all var std first last n_unique</code></td>
+<td><code>(Array)-&gt;Scalar</code> / grouped</td>
+<td>skip nulls; <code>count_all</code> counts rows; empty input → null (except count=0)</td>
+<td>horizontal reduce; upcast accumulator</td>
+</tr>
+<tr>
+<td>Filter</td>
+<td><code>filter(Array, mask:BooleanArray)-&gt;Array</code></td>
+<td>mask true keeps slot</td>
+<td>mask null treated as false (drop)</td>
+<td>compress/selection</td>
+</tr>
+<tr>
+<td>Take</td>
+<td><code>take(Array, indices:UInt32Array)-&gt;Array</code></td>
+<td>gather by index</td>
+<td>index null → output null; OOB → error</td>
+<td>gather (scatter for write)</td>
+</tr>
+<tr>
+<td>Sort</td>
+<td><code>sort_indices(Array..., opts)-&gt;UInt32Array</code>; <code>sort</code></td>
+<td>multi-key, stable optional</td>
+<td>nulls_first/last configurable</td>
+<td>radix (ints) / comparison (others)</td>
+</tr>
+<tr>
+<td>Hash</td>
+<td><code>hash(Array)-&gt;UInt64Array</code></td>
+<td>per-row hash</td>
+<td>null hashes to a reserved sentinel</td>
+<td>ahash; vectorized</td>
+</tr>
+<tr>
+<td>Set</td>
+<td><code>unique distinct is_in</code></td>
+<td><code>(Array)-&gt;Array</code>/<code>BooleanArray</code></td>
+<td>null is a distinct value (one null group)</td>
+<td>hash-based</td>
+</tr>
+<tr>
+<td>Null</td>
+<td><code>is_null is_not_null fill_null drop_nulls coalesce</code></td>
+<td>total predicates</td>
+<td>operate on bitmap</td>
+<td>bit ops</td>
+</tr>
+<tr>
+<td>String</td>
+<td><code>lower upper len contains starts_with ends_with replace split strip concat strptime strftime</code></td>
+<td><code>(Utf8Array,..)-&gt;Array</code></td>
+<td>null propagates</td>
+<td>byte/UTF-8 scan; SIMD substring</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 DataFrame / Series API surface (<code>cx-frame</code>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Op</th>
+<th>Signature (eager)</th>
+<th>Semantics</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>select</td>
+<td>`df.select([Expr</td>
+<td>&amp;str]) -&gt; DataFrame`</td>
+</tr>
+<tr>
+<td>filter</td>
+<td>`df.filter(mask</td>
+<td>Expr) -&gt; DataFrame`</td>
+</tr>
+<tr>
+<td>with_columns</td>
+<td><code>df.with_columns([Expr]) -&gt; DataFrame</code></td>
+<td>add/replace columns</td>
+</tr>
+<tr>
+<td>group_by + agg</td>
+<td><code>df.group_by([keys]).agg([Expr]) -&gt; DataFrame</code></td>
+<td>hash aggregation</td>
+</tr>
+<tr>
+<td>join</td>
+<td><code>df.join(other, on, how) -&gt; DataFrame</code></td>
+<td>how ∈ {inner,left,right,outer,semi,anti,cross}</td>
+</tr>
+<tr>
+<td>sort</td>
+<td><code>df.sort([SortKey]) -&gt; DataFrame</code></td>
+<td>multi-key stable</td>
+</tr>
+<tr>
+<td>unique</td>
+<td><code>df.unique(subset?, keep) -&gt; DataFrame</code></td>
+<td>distinct rows; keep ∈ {first,last,any}</td>
+</tr>
+<tr>
+<td>head/tail/slice</td>
+<td><code>df.head(n)/tail(n)/slice(off,len)</code></td>
+<td>zero-copy where possible</td>
+</tr>
+<tr>
+<td>concat</td>
+<td><code>concat([df], how) -&gt; DataFrame</code></td>
+<td>vertical (stack rows) / horizontal (stack cols)</td>
+</tr>
+<tr>
+<td>pivot/melt</td>
+<td><code>df.pivot(...) / df.melt(...)</code></td>
+<td>wide↔long reshape</td>
+</tr>
+<tr>
+<td>explode</td>
+<td><code>df.explode(col) -&gt; DataFrame</code></td>
+<td>one row per <code>List</code> element</td>
+</tr>
+<tr>
+<td>Series</td>
+<td><code>Series::new(name, ArrayRef)</code>; <code>s.cast(dtype)</code>, <code>s.sum()</code>, <code>s.sort()</code></td>
+<td>named chunked column</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 Expression grammar (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>Expr      = Column | Literal | Binary | Unary | Func | When | Window | Agg | Cast | Alias ;
+Column    = &quot;col&quot; &quot;(&quot; name &quot;)&quot; | &quot;*&quot; ;
+Literal   = &quot;lit&quot; &quot;(&quot; scalar &quot;)&quot; ;
+Binary    = Expr binop Expr ;
+binop     = &quot;+&quot; | &quot;-&quot; | &quot;*&quot; | &quot;/&quot; | &quot;%&quot; | &quot;==&quot; | &quot;!=&quot; | &quot;&lt;&quot; | &quot;&lt;=&quot; | &quot;&gt;&quot; | &quot;&gt;=&quot;
+          | &quot;and&quot; | &quot;or&quot; | &quot;xor&quot; ;
+Unary     = ( &quot;-&quot; | &quot;not&quot; | &quot;is_null&quot; | &quot;is_not_null&quot; ) Expr ;
+Func      = ident &quot;(&quot; [ Expr { &quot;,&quot; Expr } ] &quot;)&quot; ;        (* scalar: abs, lower, strptime, ... *)
+Agg       = ( &quot;sum&quot; | &quot;min&quot; | &quot;max&quot; | &quot;mean&quot; | &quot;count&quot; | &quot;n_unique&quot; | &quot;first&quot; | &quot;last&quot;
+            | &quot;var&quot; | &quot;std&quot; ) &quot;(&quot; Expr &quot;)&quot; ;
+When      = &quot;when&quot; &quot;(&quot; Expr &quot;)&quot; &quot;.then&quot; &quot;(&quot; Expr &quot;)&quot; { &quot;.when&quot; &quot;(&quot; Expr &quot;)&quot; &quot;.then&quot; &quot;(&quot; Expr &quot;)&quot; }
+            &quot;.otherwise&quot; &quot;(&quot; Expr &quot;)&quot; ;
+Window    = Agg &quot;.over&quot; &quot;(&quot; [ Expr { &quot;,&quot; Expr } ] &quot;)&quot; ;  (* partition keys *)
+Cast      = Expr &quot;.cast&quot; &quot;(&quot; DataType &quot;)&quot; ;
+Alias     = Expr &quot;.alias&quot; &quot;(&quot; name &quot;)&quot; ;</code></pre>
+<p>Example: <code>col(&quot;a&quot;).gt(lit(10)).and(col(&quot;b&quot;).is_not_null())</code> ; <code>sum(col(&quot;c&quot;)).over(col(&quot;region&quot;)).alias(&quot;region_total&quot;)</code>.</p>
+<h3 id="sec-8-8">8.8 Relational algebra mapping</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Algebra</th>
+<th>Operator</th>
+<th>Engine node</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>σ_p</td>
+<td>select (filter)</td>
+<td><code>Filter</code> / <code>FilterExec</code></td>
+<td>p is an <code>Expr</code> evaluating to Boolean; keep T</td>
+</tr>
+<tr>
+<td>π_cols</td>
+<td>project</td>
+<td><code>Projection</code> / <code>ProjectExec</code></td>
+<td>may include computed exprs</td>
+</tr>
+<tr>
+<td>⋈_θ</td>
+<td>join</td>
+<td><code>Join</code> / <code>HashJoinExec</code></td>
+<td>θ via equi-keys (hash) or general (sort-merge)</td>
+</tr>
+<tr>
+<td>γ_{g;f}</td>
+<td>group/aggregate</td>
+<td><code>Aggregate</code> / <code>HashAggExec</code></td>
+<td>g = grouping keys, f = agg exprs</td>
+</tr>
+<tr>
+<td>τ</td>
+<td>sort</td>
+<td><code>Sort</code> / <code>SortExec</code></td>
+<td>multi-key, stable optional</td>
+</tr>
+<tr>
+<td>ρ</td>
+<td>rename</td>
+<td><code>Projection</code> w/ alias</td>
+<td>name change only</td>
+</tr>
+<tr>
+<td>δ / distinct</td>
+<td>distinct</td>
+<td><code>Distinct</code> (<code>HashAggExec</code> no aggs)</td>
+<td>dedupe by key set</td>
+</tr>
+<tr>
+<td>∪</td>
+<td>union</td>
+<td><code>Union</code></td>
+<td>schema-compatible concat</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-9">8.9 Logical plan nodes (<code>cx-plan::LogicalPlan</code>)</h3>
+<p><code>Scan{source, projection?, predicate?}</code>, <code>Projection{exprs, input}</code>, <code>Filter{predicate, input}</code>, <code>Aggregate{keys, aggs, input}</code>, <code>Join{left, right, on, how}</code>, <code>Sort{keys, input}</code>, <code>Limit{offset, n, input}</code>, <code>Distinct{subset, input}</code>, <code>Union{inputs}</code>. Each node exposes <code>schema()</code> (resolved + validated) and <code>children()</code>.</p>
+<h3 id="sec-8-10">8.10 Optimizer rules (<code>cx-optimize</code>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Rule</th>
+<th>Transformation</th>
+<th>Precondition</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>PredicatePushdown</td>
+<td>move <code>Filter</code> below <code>Projection</code>/<code>Join</code>/into <code>Scan.predicate</code></td>
+<td>predicate references only columns available below; deterministic, side-effect-free</td>
+</tr>
+<tr>
+<td>ProjectionPushdown</td>
+<td>propagate the set of needed columns to <code>Scan.projection</code>; drop unused</td>
+<td>column-use analysis from root down</td>
+</tr>
+<tr>
+<td>SlicePushdown</td>
+<td>push <code>Limit</code>/<code>slice</code> below order-preserving nodes; into <code>Scan</code> for row-group limit</td>
+<td>node preserves order or limit semantics</td>
+</tr>
+<tr>
+<td>ConstantFold</td>
+<td>evaluate constant sub-exprs (<code>lit(2)+lit(3)→lit(5)</code>)</td>
+<td>all operands literal; pure function</td>
+</tr>
+<tr>
+<td>CommonSubexprElim (CSE)</td>
+<td>hoist repeated identical sub-exprs into a shared projection</td>
+<td>identical <code>Expr</code> subtree, ≥2 uses, pure</td>
+</tr>
+<tr>
+<td>TypeCoercion</td>
+<td>insert explicit <code>cast</code> per promotion lattice</td>
+<td>binary op / join key / union with mismatched types</td>
+</tr>
+<tr>
+<td>SimplifyExpr</td>
+<td><code>x and true→x</code>, <code>x or false→x</code>, double-negation, <code>filter(true)→input</code></td>
+<td>algebraic identities</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-11">8.11 Physical operators (<code>cx-exec</code>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operator</th>
+<th>Algorithm</th>
+<th>Memory</th>
+<th>Parallelism</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ScanExec</code></td>
+<td>read source → <code>RecordBatch</code> stream; apply pushed predicate/projection</td>
+<td>O(batch)</td>
+<td>one task per file split / Parquet row group</td>
+</tr>
+<tr>
+<td><code>FilterExec</code></td>
+<td>evaluate predicate → mask → <code>filter</code> columns (late materialize)</td>
+<td>O(batch)</td>
+<td>per-morsel, embarrassingly parallel</td>
+</tr>
+<tr>
+<td><code>ProjectExec</code></td>
+<td>evaluate <code>Expr</code> list per batch</td>
+<td>O(batch)</td>
+<td>per-morsel</td>
+</tr>
+<tr>
+<td><code>HashAggExec</code></td>
+<td>partitioned build of group→accumulator hash table; finalize</td>
+<td>O(groups · state)</td>
+<td>partition by hash(key) across cores; spill on budget</td>
+</tr>
+<tr>
+<td><code>HashJoinExec</code></td>
+<td>build hash table on smaller side, probe with larger</td>
+<td>O(build side)</td>
+<td>partitioned build/probe; broadcast small side</td>
+</tr>
+<tr>
+<td><code>SortExec</code></td>
+<td>run generation + k-way merge; multi-key stable</td>
+<td>O(N) + spill</td>
+<td>parallel run gen, merge</td>
+</tr>
+<tr>
+<td><code>SortMergeJoinExec</code></td>
+<td>sort both inputs on key, merge</td>
+<td>O(N) + spill</td>
+<td>parallel sort, streaming merge</td>
+</tr>
+<tr>
+<td><code>LimitExec</code></td>
+<td>early-stop after n rows (+offset)</td>
+<td>O(1)</td>
+<td>sequential cutoff (with order)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-12">8.12 Worked example — lazy query, pushdown, execution</h3>
+<p>Query: <code>scan_csv(&quot;t.csv&quot;).filter(col(&quot;a&quot;).gt(lit(10))).group_by(col(&quot;b&quot;)).agg([sum(col(&quot;c&quot;))]).collect()</code></p>
+<pre class="diagram"><code>LOGICAL (as built):
+  Aggregate keys=[b] aggs=[sum(c)]
+    Filter a &gt; 10
+      Projection *            (implicit)
+        Scan t.csv (all cols a,b,c,d,e)
+
+AFTER predicate + projection pushdown:
+  Aggregate keys=[b] aggs=[sum(c)]
+    Scan t.csv  projection=[a,b,c]  predicate=(a&gt;10)
+  (cols d,e never read; a&gt;10 evaluated during decode; &#39;a&#39; dropped after filter)
+
+PHYSICAL:
+  HashAggExec keys=[b] aggs=[sum(c)]
+    ScanExec t.csv proj=[a,b,c] pred=(a&gt;10)
+
+EXECUTION (numbers illustrative): file = 10M rows, 5 cols.
+  - ScanExec splits CSV into 160 morsels (~64Ki rows each); rayon runs across 8 cores.
+  - Each morsel decodes only a,b,c; applies a&gt;10 → ~30% pass (3M rows survive).
+  - HashAggExec: each worker builds a local hash table b→running_sum(c) (partitioned by hash(b));
+    workers merge partitions; ~12k distinct b groups -&gt; 12k output rows.
+  - Result streamed as RecordBatch(es); collect() concatenates into a DataFrame.</code></pre>
+<h3 id="sec-8-13">8.13 Worked example — hash join with nulls</h3>
+<pre class="diagram"><code>left.join(right, on=&quot;k&quot;, how=&quot;inner&quot;)
+  - Build phase on &#39;right&#39; (smaller): hash(k) -&gt; bucket; rows with k==NULL are NOT inserted
+    (SQL: NULL never equals NULL in an equi-join).
+  - Probe phase on &#39;left&#39;: for each row, hash(k); k==NULL rows produce no match (dropped for inner).
+  - left semi: emit left row if &gt;=1 match.  left anti: emit left row if 0 matches (incl. NULL keys
+    on the left -&gt; always emitted, since NULL matches nothing).
+  - Output schema = left cols ++ right cols (duplicate names suffixed _right).</code></pre>
+<h3 id="sec-8-14">8.14 Worked example — Parquet row-group skip via statistics</h3>
+<pre class="diagram"><code>SELECT * WHERE ts &gt;= 2026-01-01
+File has 8 row groups, each ColumnChunk for &#39;ts&#39; carries Statistics{min,max,null_count}.
+  RG0 min=2025-01-01 max=2025-06-30  -&gt; max &lt; predicate -&gt; SKIP (no pages read)
+  RG3 min=2025-12-15 max=2026-02-01  -&gt; overlaps        -&gt; READ + re-filter rows
+  RG7 min=2026-03-01 max=2026-04-01  -&gt; fully inside    -&gt; READ (no per-row filter needed)
+Result: 5 of 8 row groups skipped; I/O ~ 3/8 of full scan.
+Caveat: stats may be absent or wrong for a column -&gt; fall back to reading + filtering (never skip on missing stats).</code></pre>
+<h3 id="sec-8-15">8.15 Malformed / edge examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Trigger</th>
+<th>Required behavior</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Schema mismatch concat</td>
+<td><code>concat([df1, df2])</code> differing dtypes/names</td>
+<td><code>EngineError::Schema</code>; never silently coerce</td>
+</tr>
+<tr>
+<td>Overflow in <code>sum(Int32)</code></td>
+<td>sum exceeds i32 range</td>
+<td>accumulator upcasts to i64/i128; <code>Checked</code> policy errors on i128 overflow</td>
+</tr>
+<tr>
+<td>Null keys in join</td>
+<td>k == NULL on either side</td>
+<td>equi-join: no match (inner drops); anti/outer keep per <a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#sec-8-13">§8.13</a></td>
+</tr>
+<tr>
+<td>Empty group-by</td>
+<td>aggregate over 0 input rows</td>
+<td><code>sum→null</code>/<code>count→0</code>; one row if no grouping keys, zero rows if grouped</td>
+</tr>
+<tr>
+<td>Huge-cardinality dictionary</td>
+<td>distinct ≈ total</td>
+<td>do <strong>not</strong> dictionary-encode (threshold <a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/numbers/#sec-4">§4</a>); fall back to plain <code>Utf8</code></td>
+</tr>
+<tr>
+<td>Non-UTF8 bytes in <code>Utf8</code></td>
+<td>decoder gets invalid UTF-8</td>
+<td>reject with <code>EngineError::Schema</code> (offer <code>Binary</code> instead); never store invalid UTF-8 in <code>Utf8</code></td>
+</tr>
+<tr>
+<td>Offset overflow</td>
+<td><code>Utf8</code> data buffer &gt; 2 GiB</td>
+<td>error or auto-promote to <code>LargeUtf8</code>; never wrap i32 offset</td>
+</tr>
+<tr>
+<td>Division by zero</td>
+<td>integer <code>div</code>/<code>rem</code> by 0</td>
+<td>null (safe) or <code>EngineError::Overflow</code> (strict) per policy; float → ±inf/NaN per IEEE</td>
+</tr>
+<tr>
+<td>All-null column aggregate</td>
+<td><code>mean</code> over all-null</td>
+<td>result null; <code>count</code> = 0</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-16">8.16 Executor operator state table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operator</th>
+<th>States</th>
+<th>Transitions</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>HashJoinExec</code></td>
+<td><code>Build → Probe → Drained</code></td>
+<td>Build consumes entire build side; on last build batch → Probe; probe side exhausted → Drained</td>
+</tr>
+<tr>
+<td><code>HashAggExec</code></td>
+<td><code>Accumulate → Spilled? → Finalize → Drained</code></td>
+<td>each input batch updates accumulators; over budget → Spilled (write partition); inputs done → Finalize (merge) → Drained</td>
+</tr>
+<tr>
+<td><code>SortExec</code></td>
+<td><code>RunGen → Merge → Drained</code></td>
+<td>buffer + sort runs until budget; over budget → spill run to disk; inputs done → k-way Merge → Drained</td>
+</tr>
+<tr>
+<td><code>ScanExec</code></td>
+<td><code>Open → Emitting → Eof</code></td>
+<td>open source; emit batches per morsel; source exhausted → Eof</td>
+</tr>
+<tr>
+<td><code>SortMergeJoinExec</code></td>
+<td><code>SortL/SortR → Merge → Drained</code></td>
+<td>sort both inputs (may spill) → streaming merge on key → Drained</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-1">P1</a> — Columnar + vectorized over row-at-a-time.</strong> Operate on contiguous arrays of one type, one kernel call per batch. <em>Tradeoff:</em> batch buffers cost memory; pipelining is coarser. <em>Operational:</em> SIMD + cache locality give the throughput in <a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/numbers/#sec-4">§4</a>. <em>Violation:</em> per-row trait dispatch (<code>dyn</code> per element) collapses scan throughput 10–50×; the engine becomes a slow interpreter.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-2">P2</a> — Validity bitmap + three-valued (Kleene) logic everywhere.</strong> A null slot is <em>unknown</em>, not a value. Every kernel consumes and produces a validity bitmap; boolean ops use Kleene tables. <em>Tradeoff:</em> bitmap maintenance per kernel. <em>Operational:</em> <code>COUNT(col)</code> ≠ <code>COUNT(*)</code>; <code>sum</code> skips nulls. <em>Violation:</em> reading a null slot&#39;s bytes as data, or <code>null = null → true</code>, silently corrupts every downstream result.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-3">P3</a> — Zero-copy, immutable buffers.</strong> Buffers are <code>Arc</code>-shared and never mutated; slicing adjusts <code>(offset,len)</code>; &quot;mutation&quot; builds a new array. <em>Tradeoff:</em> copy-on-write allocations. <em>Operational:</em> arrays are freely <code>Send+Sync</code>; FFI export is a pointer hand-off. <em>Violation:</em> in-place mutation of a shared buffer is a data race and a correctness bug across views.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-4">P4</a> — Late materialization.</strong> Carry a selection (mask/indices) and decode/gather columns last, only for surviving rows. <em>Tradeoff:</em> indirection on access. <em>Operational:</em> a 1%-selective filter touches ~1% of the output columns&#39; bytes. <em>Violation:</em> early materialization makes a selective query pay full decode cost on discarded rows.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-5">P5</a> — Push work down to the scan.</strong> Predicates and projections move toward the source so fewer bytes are read/decoded; Parquet stats skip row groups. <em>Tradeoff:</em> optimizer complexity; pushdown must be semantics-preserving. <em>Operational:</em> the cheapest row is the one never read. <em>Violation:</em> reading all columns then projecting wastes I/O and memory bandwidth.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-6">P6</a> — Morsel-driven parallelism, no global sync in the hot path.</strong> Work is split into morsels; rayon work-steals; shared state (hash tables) is partitioned. <em>Tradeoff:</em> scheduling overhead; NUMA awareness needed. <em>Operational:</em> near-linear scaling until a shared structure becomes the bottleneck. <em>Violation:</em> a global mutex or single output queue serializes the engine and kills scaling.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-7">P7</a> — Type safety + explicit coercion.</strong> No silent lossy casts; coercion is an explicit optimizer pass following a documented promotion lattice. <em>Tradeoff:</em> the user must opt into narrowing casts. <em>Operational:</em> <code>Int32 + Float64 → Float64</code> is explicit and predictable. <em>Violation:</em> implicit <code>Float64→Int32</code> truncation produces wrong numbers no one asked for.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-8">P8</a> — Bounded memory + spill.</strong> Every allocation is accounted against a per-query budget; agg/sort/join spill to disk above threshold. <em>Tradeoff:</em> spill is slow; accounting has overhead. <em>Operational:</em> a big group-by degrades to disk instead of OOM-killing the process. <em>Violation:</em> unaccounted allocation → OOM under skew, taking down the host.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-9">P9</a> — Deterministic results when requested.</strong> Parallel execution may reorder rows; <code>sort</code> and <code>maintain_order</code> impose a stable, reproducible order. <em>Tradeoff:</em> maintaining order costs a sort/merge. <em>Operational:</em> <code>EXPLAIN ANALYZE</code> and golden-file tests need reproducibility. <em>Violation:</em> non-deterministic ordering breaks differential tests and confuses users comparing runs.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-10">P10</a> — Schema is law; kernels are null-aware + branchless.</strong> Schemas are validated at every plan/IO boundary; kernels avoid per-element branches (use masks/select). <em>Tradeoff:</em> validation cost at boundaries; branchless code is harder to write. <em>Operational:</em> a malformed file is rejected at the edge, not mid-execution; kernels vectorize. <em>Violation:</em> trusting an unvalidated schema or branchy null handling causes mid-query panics and pipeline stalls.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-11">P11</a> — Observability is an operator-level concern, not an afterthought.</strong> Every operator emits per-span counters (rows, bytes, spill, time) that feed <code>EXPLAIN ANALYZE</code>. <em>Tradeoff:</em> counter plumbing through the executor. <em>Operational:</em> skew, stall, and spill root-cause is read off <code>EXPLAIN ANALYZE</code>, not guessed. <em>Violation:</em> no per-operator metrics means a slow query is an unsolvable black box; regression detection is impossible.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/dataframe-columnar-engine/architecture/#p-12">P12</a> — Reproducible, auditable results and builds.</strong> Pinned <code>Cargo.lock</code>/toolchain, vendored fixtures, and golden-file plan output make every run byte-comparable. <em>Tradeoff:</em> maintaining lockfiles and golden files. <em>Operational:</em> differential and <code>EXPLAIN</code> golden tests only work if output is deterministic and the build is stable. <em>Violation:</em> floating deps or nondeterministic output silently invalidate every golden-file gate.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

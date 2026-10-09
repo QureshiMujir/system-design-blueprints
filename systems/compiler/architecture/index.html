@@ -1,0 +1,369 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Compiler — Architecture · Engineering Blueprints</title><meta name="description" content="Compiler, hld: §3 overview + §8 domain model. Build mlc, a statically typed, Hindley-Milner-inferred, ML-flavored source language compiled ahead-of-time to native code through LLVM, with a Cranelift-JIT REPL for interactive use. The Phase 0…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/compiler/">Compiler</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Compiler</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~15 weeks</li> <li>1,915 lines</li> <li>blueprint #185</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/compiler/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/compiler/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/compiler/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/compiler/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/compiler/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/compiler/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/compiler/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/compiler/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/compiler/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/compiler/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Compiler — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<p>Front end (driver through the verified IR):</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: the compiler&#39;s own front-end phases
+%% legend trust: driver and the IR verifier gate
+  DRV[&quot;&lt;b&gt;mlc driver&lt;/b&gt;&lt;br/&gt;bin/mlc --emit {lex|parse|resolved|&lt;br/&gt;typed|ir|opt|llvm|asm|obj|bin}&quot;]
+  P1[&quot;&lt;b&gt;Phase 1 — mlc-lex&lt;/b&gt;&lt;br/&gt;source bytes → Vec&amp;lt;Token&amp;gt;&lt;br/&gt;logos DFA, byte-precise Span&lt;br/&gt;error tokens carry a DiagId&quot;]
+  P2[&quot;&lt;b&gt;Phase 2 — mlc-parse&lt;/b&gt;&lt;br/&gt;Vec&amp;lt;Token&amp;gt; → Module&amp;lt;&#39;arena&amp;gt;&lt;br/&gt;recursive descent + Pratt&lt;br/&gt;token/bracket recovery, NodeId per node&quot;]
+  P3[&quot;&lt;b&gt;Phase 3 — mlc-resolve&lt;/b&gt;&lt;br/&gt;Module → ResolvedModule&lt;br/&gt;two-pass scope tree, DefId per binder&lt;br/&gt;shadowing rules enforced&quot;]
+  P4[&quot;&lt;b&gt;Phase 4 — mlc-typeck&lt;/b&gt;&lt;br/&gt;ResolvedModule → TypedModule&lt;br/&gt;level-based HM, row-polymorphic records&lt;br/&gt;Maranget exhaustiveness&quot;]
+  P5[&quot;&lt;b&gt;Phase 5 — mlc-ir&lt;/b&gt;&lt;br/&gt;TypedModule → Program (ANF + SSA blocks)&lt;br/&gt;closure conversion&lt;br/&gt;decision-tree lowering&lt;br/&gt;mlc-ir-verify gate&quot;]
+  OUT([&quot;Program (verified)&lt;br/&gt;to the back end&quot;])
+  DRV -- &quot;Vec&amp;lt;SourceFile&amp;gt;&quot; --&gt; P1
+  P1 -- &quot;Tokens&quot; --&gt; P2
+  P2 -- &quot;Module&quot; --&gt; P3
+  P3 -- &quot;ResolvedModule&quot; --&gt; P4
+  P4 -- &quot;TypedModule&quot; --&gt; P5
+  P5 -- &quot;Program (verified)&quot; --&gt; OUT
+  classDef rt stroke-width:1.5px
+  classDef trust stroke-width:1.5px
+  class P1,P2,P3,P4,P5 rt
+  class DRV trust</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the compiler&#39;s own front-end phases</li><li><span class="swatch trust"></span>driver and the IR verifier gate</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>┌───────────────────────────────────────────────────────────────────┐
+│                            mlc driver                             │
+│  bin/mlc --emit {lex|parse|resolved|typed|ir|opt|llvm|asm|obj|bin}│
+└──────────────────────────────┬────────────────────────────────────┘
+                                │ Vec&lt;SourceFile&gt;
+                                ▼
+┌───────────────────────────────────────────────────────────────────┐
+│ Phase 1 — mlc-lex        source bytes → Vec&lt;Token&gt;                │
+│ logos DFA; byte-precise Span; error tokens carry a DiagId          │
+└──────────────────────────────┬────────────────────────────────────┘
+                                │ Tokens
+                                ▼
+┌───────────────────────────────────────────────────────────────────┐
+│ Phase 2 — mlc-parse      Vec&lt;Token&gt; → Module&lt;&#39;arena&gt;              │
+│ recursive descent + Pratt; token/bracket recovery; NodeId per node │
+└──────────────────────────────┬────────────────────────────────────┘
+                                │ Module
+                                ▼
+┌───────────────────────────────────────────────────────────────────┐
+│ Phase 3 — mlc-resolve    Module → ResolvedModule                  │
+│ two-pass scope tree; DefId per binder; shadowing rules enforced    │
+└──────────────────────────────┬────────────────────────────────────┘
+                                │ ResolvedModule
+                                ▼
+┌───────────────────────────────────────────────────────────────────┐
+│ Phase 4 — mlc-typeck     ResolvedModule → TypedModule             │
+│ level-based HM; row-polymorphic records; Maranget exhaustiveness   │
+└──────────────────────────────┬────────────────────────────────────┘
+                                │ TypedModule
+                                ▼
+┌───────────────────────────────────────────────────────────────────┐
+│ Phase 5 — mlc-ir         TypedModule → Program (ANF + SSA blocks) │
+│ closure conversion; decision-tree lowering; mlc-ir-verify gate      │
+└──────────────────────────────┬────────────────────────────────────┘
+                                │ Program (verified)
+                                ▼</code></pre></details>
+<p>Back end (optimizer scaffold through the linked executable):</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: the compiler&#39;s own back-end phases
+%% legend ingest: JIT path for the interactive repl
+  P6[&quot;&lt;b&gt;Phase 6 — mlc-opt&lt;/b&gt;&lt;br/&gt;Program → Program&lt;br/&gt;const-fold + DCE to fixpoint (Phase 0)&lt;br/&gt;CSE/LICM/inline deferred&quot;]
+  P7A[&quot;&lt;b&gt;Phase 7a — mlc-llvm&lt;/b&gt;&lt;br/&gt;Program → LLVM IR via inkwell&lt;br/&gt;DWARF stub, system-clang link&quot;]
+  P7B[&quot;&lt;b&gt;Phase 7b — mlc-jit (Cranelift)&lt;/b&gt;&lt;br/&gt;Program → in-memory fn pointer&lt;br/&gt;for `mlc repl` interactive eval&quot;]
+  P8[&quot;&lt;b&gt;Phase 8 — mlc-link + mlc-rt&lt;/b&gt;&lt;br/&gt;system linker (lld/ld64/link.exe)&lt;br/&gt;links mlc-rt (GC, panic, alloc)&lt;br/&gt;emits Mach-O / ELF / PE&quot;]
+  EXE([&quot;executable&quot;])
+  P6 -- &quot;Program&quot; --&gt; P7A
+  P6 -- &quot;Program&quot; --&gt; P7B
+  P7A --&gt; P8
+  P8 --&gt; EXE
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  class P6,P7A,P8 rt
+  class P7B ingest</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the compiler&#39;s own back-end phases</li><li><span class="swatch ingest"></span>JIT path for the interactive repl</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>┌───────────────────────────────────────────────────────────────────┐
+│ Phase 6 — mlc-opt        Program → Program                        │
+│ const-fold + DCE to fixpoint (Phase 0); CSE/LICM/inline deferred    │
+└──────────────────────────────┬────────────────────────────────────┘
+                                │ Program
+                    ┌───────────┴────────────┐
+                    ▼                        ▼
+┌──────────────────────────────┐  ┌──────────────────────────────────┐
+│ Phase 7a — mlc-llvm          │  │ Phase 7b — mlc-jit (Cranelift)   │
+│ Program → LLVM IR via inkwell│  │ Program → in-memory fn pointer   │
+│ DWARF stub; system-clang link│  │ for `mlc repl` interactive eval  │
+└──────────────┬────────────────┘  └──────────────────────────────────┘
+               │
+               ▼
+┌───────────────────────────────────────────────────────────────────┐
+│ Phase 8 — mlc-link + mlc-rt                                        │
+│ system linker (lld/ld64/link.exe); links mlc-rt (GC, panic, alloc) │
+│ emits Mach-O / ELF / PE                                             │
+└──────────────────────────────┬────────────────────────────────────┘
+                                ▼
+                            executable</code></pre></details>
+<p>Every stage is a pure function over typed values, returning either a refined output or <code>Vec&lt;Diagnostic&gt;</code>; only <code>mlc-driver</code> writes to disk. <code>mlc-diag</code> sits across every phase: every error type (<code>LexErr</code>, <code>ParseErr</code>, <code>ResolveErr</code>, <code>TypeErr</code>, <code>IrErr</code>, <code>OptErr</code>, <code>BackendErr</code>) converts to a <code>Diagnostic</code> with a stable code (<code>E0001</code>..<code>E0999</code>), a primary span, optional secondary spans, and an optional hint (<a class="cite" href="/system-design-blueprints/systems/compiler/reliability/#inv-9">I9</a>). The trust boundary is the source-file boundary: anything read from <code>SourceFile</code> is untrusted until past <code>mlc-lex</code>&#39;s error-token gate (Threat Model <a class="cite" href="/system-design-blueprints/systems/compiler/reliability/#t-1">T1</a>–<a class="cite" href="/system-design-blueprints/systems/compiler/reliability/#t-5">T5</a>). The concurrency boundary is null in Phase 0 — the pipeline is single-threaded per compilation unit; <code>bench/</code> measures wall-clock, not parallel throughput (Deferred Features Register, parallel front-end). The persistence boundary is the object/executable write in Phase 8 only.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — The Source Language <code>mlc</code></h2>
+<p>Full grammar lives in <code>docs/spec/grammar.ebnf</code>; this section is the readable, normative form. Worked examples, a recovery state table, and malformed/failure-path examples follow, per <a class="cite" href="/system-design-blueprints/systems/compiler/architecture/#sec-6">§6</a> (this standard&#39;s <a class="cite" href="/system-design-blueprints/systems/compiler/architecture/#sec-6">§6</a>, not the blueprint&#39;s own <a class="cite" href="/system-design-blueprints/systems/compiler/architecture/#sec-6">§6</a> Design Principles — disambiguated here as &quot;this document&#39;s <a class="cite" href="/system-design-blueprints/systems/compiler/architecture/#sec-8">§8</a>&quot;).</p>
+<h3 id="sec-8-lexical-structure">Lexical Structure</h3>
+<ul>
+<li>Identifiers: <code>[a-z_][A-Za-z0-9_&#39;]*</code>; trailing <code>&#39;</code> legal (<code>x&#39;</code>).</li>
+<li>Constructors: <code>[A-Z][A-Za-z0-9_]*</code> (<code>Some</code>, <code>None</code>, <code>Cons</code>, <code>Nil</code>, <code>Ok</code>, <code>Err</code>).</li>
+<li>Type variables: <code>&#39;</code> + lowercase identifier (<code>&#39;a</code>, <code>&#39;b</code>).</li>
+<li>Keywords: <code>let rec in fun match with if then else module import type and as where mutable open</code>.</li>
+<li>Integer literals: <code>0|[1-9][0-9_]*</code>, <code>0x[0-9a-fA-F_]+</code>, <code>0o[0-7_]+</code>, <code>0b[01_]+</code>. Underscores stripped before value parse.</li>
+<li>Float literals: <code>[0-9][0-9_]*\.[0-9_]*([eE][-+]?[0-9_]+)?</code>.</li>
+<li>String literals: double-quoted, <code>\n \t \\ \&quot; \u{XXXX}</code>, raw <code>r&quot;...&quot;</code>.</li>
+<li>Char literals: <code>&#39;a&#39;</code>, <code>&#39;\n&#39;</code>, <code>&#39;\u{1F600}&#39;</code>.</li>
+<li>Comments: <code>--</code> to end of line; <code>(* ... *)</code> nested (depth-counted).</li>
+<li>Operators: <code>+ - * / mod = == != &lt; &lt;= &gt; &gt;= &amp;&amp; || |&gt; &gt;&gt; &lt;&lt; :: ; , : -&gt; =&gt; |</code> plus float-kind variants <code>+. -. *. /. &gt;.</code>.</li>
+</ul>
+<h3 id="sec-8-surface-grammar-ebnf-sketch">Surface Grammar (EBNF sketch)</h3>
+<pre class="diagram"><code>module      ::= (&#39;module&#39; Ident)? toplevel*
+toplevel    ::= &#39;import&#39; modpath
+              | &#39;type&#39; Ident type_params? &#39;=&#39; type_def
+              | &#39;let&#39; &#39;rec&#39;? Ident pat* (&#39;:&#39; ty)? &#39;=&#39; expr
+              | &#39;open&#39; modpath
+type_def    ::= ty                                     -- alias
+              | constructor_def (&#39;|&#39; constructor_def)*  -- ADT
+              | record_def | extern_def                 -- record | FFI
+expr        ::= &#39;let&#39; &#39;rec&#39;? bindings &#39;in&#39; expr
+              | &#39;fun&#39; pat* &#39;-&gt;&#39; expr
+              | &#39;if&#39; expr &#39;then&#39; expr &#39;else&#39; expr
+              | &#39;match&#39; expr &#39;with&#39; arm+
+              | expr op expr | expr expr                -- binop | application
+              | atom
+arm         ::= &#39;|&#39; pat (&#39;when&#39; expr)? &#39;-&gt;&#39; expr
+pat         ::= &#39;_&#39; | Ident | Constructor pat*
+              | &#39;(&#39; pat (&#39;,&#39; pat)+ &#39;)&#39;                  -- tuple
+              | &#39;{&#39; fieldpat (&#39;,&#39; fieldpat)* &#39;}&#39;         -- record
+              | pat &#39;::&#39; pat | &#39;[]&#39; | &#39;[&#39; pats &#39;]&#39;       -- list sugar
+              | literal
+ty          ::= &quot;&#39;&quot; Ident | Constructor ty_arg*
+              | ty &#39;-&gt;&#39; ty | &#39;(&#39; ty (&#39;,&#39; ty)+ &#39;)&#39;
+              | &#39;{&#39; fielddecl (&#39;,&#39; fielddecl)* &#39;}&#39; | &quot;&#39;&quot; Ident</code></pre>
+<p>LL(2) once the Pratt expression parser handles operator precedence (Phase 2, <a class="cite" href="/system-design-blueprints/systems/compiler/build/#sec-14">§14</a>). Application is left-associative, parsed at a higher-precedence Pratt level than every binary operator.</p>
+<h3 id="sec-8-type-system">Type System</h3>
+<ul>
+<li>Hindley-Milner with let-generalization, level-based à la OCaml (Pottier 2014) — avoids the classical <code>O(n)</code>-per-variable &quot;occurs check costs you the world&quot; generalization walk.</li>
+<li>Rank-1 polymorphism only; function arguments never carry polymorphic types, only <code>let</code>-bindings generalize. Rank-N is an explicit non-goal absent a promoting ADR.</li>
+<li>ADTs: nominal, named constructors, optional payload tuple.</li>
+<li>Records: structural, row-polymorphic (Leijen 2005): <code>{ x: int, y: int | r }</code> reads &quot;has <code>x</code>, <code>y</code>, and zero-or-more other fields <code>r</code>&quot;.</li>
+<li>Tuples: structural sugar for anonymous records.</li>
+<li>Pattern exhaustiveness: Maranget&#39;s algorithm (<a class="cite" href="/system-design-blueprints/systems/compiler/reliability/#inv-13">I13</a>, Phase 4). Non-exhaustive matches warn in Phase 0; <code>--strict-match</code> promotes to error.</li>
+<li>Effects: not modeled in Phase 0 (Deferred Features Register).</li>
+</ul>
+<h3 id="sec-8-module-system">Module System</h3>
+<p>A module is a file; its module name is the basename in <code>PascalCase</code> (<code>option.ml</code> → <code>Option</code>). Modules <code>open</code> each other, forming a DAG; cycles are E0303. Phase 0 has no functors.</p>
+<h3 id="sec-8-worked-example-mandelbrot-ml">Worked Example — <code>mandelbrot.ml</code></h3>
+<pre class="code language-ocaml" data-lang="ocaml"><code>module Mandelbrot
+
+let max_iter = 1000
+
+let mandelbrot cx cy =
+  let rec loop zx zy i =
+    if i = max_iter then 0
+    else
+      let zx2 = zx *. zx in
+      let zy2 = zy *. zy in
+      if zx2 +. zy2 &gt;. 4.0 then i
+      else loop (zx2 -. zy2 +. cx) (2.0 *. zx *. zy +. cy) (i + 1)
+  in
+  loop 0.0 0.0 0</code></pre>
+<p>This exercises: integer/float/char literals, kind-tagged float arithmetic (<code>*.</code>), <code>let rec</code>, <code>if-then-else</code>, and closures over <code>max_iter</code>. It is the canonical <a class="cite" href="/system-design-blueprints/systems/compiler/numbers/#m-7">M7</a> end-to-end fixture (<code>conformance/programs/exec/mandelbrot/</code>).</p>
+<h3 id="sec-8-parser-recovery-state-table">Parser Recovery State Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Action</th>
+<th>Resulting State</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Normal</code></td>
+<td>unexpected token at item boundary</td>
+<td>emit <code>Item::Error</code>, skip to next sync token (<code>let</code>/<code>type</code>/<code>module</code>/<code>import</code>)</td>
+<td><code>Normal</code></td>
+</tr>
+<tr>
+<td><code>Normal</code></td>
+<td>unexpected token inside <code>( … )</code></td>
+<td>emit <code>Expr::Error</code>, skip to matching <code>)</code></td>
+<td><code>Normal</code></td>
+</tr>
+<tr>
+<td><code>Normal</code></td>
+<td>unexpected token inside <code>{ … }</code></td>
+<td>emit <code>Expr::Error</code>/<code>Pat::Error</code>, skip to matching <code>}</code></td>
+<td><code>Normal</code></td>
+</tr>
+<tr>
+<td><code>Normal</code></td>
+<td>EOF inside an open bracket</td>
+<td>emit E0299 (unterminated group), synthesize close</td>
+<td><code>Normal</code> (diagnostic emitted once)</td>
+</tr>
+<tr>
+<td><code>Normal</code></td>
+<td>second error before any sync token consumed</td>
+<td>suppress diagnostic (cascade guard)</td>
+<td><code>Suppressed</code></td>
+</tr>
+<tr>
+<td><code>Suppressed</code></td>
+<td>a sync token is consumed</td>
+<td>resume normal diagnostic emission</td>
+<td><code>Normal</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-malformed-input-example">Malformed-Input Example</h3>
+<p>Input: <code>let x = 1 +</code> (dangling operator, EOF). Lexer: emits <code>Int(1)</code>, <code>Plus</code>, <code>Eof</code> — no lexer error (<a class="cite" href="/system-design-blueprints/systems/compiler/reliability/#inv-12">I12</a>: never panics). Parser: Pratt loop requests a right operand, finds <code>Eof</code>, emits <code>E0210: expected expression after infix operator</code>, synthesizes <code>Expr::Error</code> as the right operand, and the <code>let</code> binding is retained with a poisoned body so later <code>let</code>-bindings in the file still parse and resolve (P4).</p>
+<h3 id="sec-8-failure-path-example">Failure-Path Example</h3>
+<p>Input: <code>let f x = x + true</code> (type error). Lexer/parser/resolver succeed. Type checker: unifies <code>int</code> (from <code>+</code>&#39;s int-kind signature, <a class="cite" href="/system-design-blueprints/systems/compiler/architecture/#sec-8">§8</a> Type System) against <code>bool</code> (from <code>true</code>), fails, emits <code>E0401: type mismatch</code> with primary span on <code>true</code> and secondary span on the <code>+</code> operator, substitutes <code>Ty::Err</code> for <code>f</code>&#39;s return type, and continues checking the rest of the module (<a class="cite" href="/system-design-blueprints/systems/compiler/reliability/#inv-5">I5</a>, P4). <code>f</code>&#39;s call sites downstream still type-check against the poisoned signature without cascading a second error per call site (cascade-guard analogous to the parser&#39;s <code>Suppressed</code> state above).</p>
+<h3 id="sec-8-typed-ir-shape">Typed IR Shape</h3>
+<p>Every IR function is a CFG of basic blocks with block parameters (not phi nodes — the Cranelift/MLIR convention, <a class="cite" href="/system-design-blueprints/systems/compiler/trade-offs/#adr-9">ADR-09</a>): <code>bb0(%n: i64): %t0 = icmp lt %n, 2; cond_br %t0, bb1, bb2</code>. Terminators (<code>Br</code>, <code>CondBr</code>, <code>Switch</code>, <code>Return</code>, <code>TailCall</code>, <code>Unreachable</code>) are syntactically distinct from instructions (<code>Const</code>, <code>BinOp</code>, <code>Call</code>, <code>Load</code>, <code>Store</code>, <code>Closure</code>, <code>Tag</code>), which materially simplifies dataflow analysis versus phi-form SSA (Phase 5, <a class="cite" href="/system-design-blueprints/systems/compiler/build/#sec-17">§17</a>).</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

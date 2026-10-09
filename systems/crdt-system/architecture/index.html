@@ -1,0 +1,415 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>CRDT System — Architecture · Engineering Blueprints</title><meta name="description" content="CRDT System, hld: §3 overview + §8 domain model. Build a production-grade library of Conflict-Free Replicated Data Types in Rust, with state-based and delta-state semantics at the center, an op-based bridge for streaming workloads, causality…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/crdt-system/">CRDT System</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>CRDT System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~6 weeks</li> <li>1,891 lines</li> <li>blueprint #55</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/crdt-system/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/crdt-system/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/crdt-system/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/crdt-system/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/crdt-system/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/crdt-system/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/crdt-system/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/crdt-system/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/crdt-system/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/crdt-system/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:CRDT System — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌──────────────────────────────────────────────────────────────────────┐
+│  Application layer (collaborative editor, whiteboard, sync engine)     │
+│   • Rust crate consumers • WASM (browser) • Python (PyO3)              │
+└─────────────────────────────────┬──────────────────────────────────────┘
+                                  │ public API (crate `crdt`)
+┌─────────────────────────────────▼──────────────────────────────────────┐
+│  Document layer (Phase 6)                                              │
+│   CRDT registry; composition (Document = map&lt;key,CRDT&gt;); snapshot;     │
+│   encode_state / decode_state / encode_delta                           │
+└──────────┬───────────────────────────────────────┬─────────────────────┘
+           │                                        │
+┌──────────▼─────────────────┐         ┌────────────▼────────────────────┐
+│  CRDT primitives (Phases    │         │  Causality primitives (Phase 1) │
+│  2–6)                       │         │  vector clock, version vector,  │
+│  Counters, Sets, Registers, │         │  dotted version vector,         │
+│  Sequences, JSON, Tree      │         │  Lamport, HLC, stability marker │
+└──────────┬──────────────────┘         └─────────────────────────────────┘
+           │
+┌──────────▼──────────────────────────────────────────────────────────────┐
+│  Sync layer (Phases 8–9)                                                 │
+│   Merkle anti-entropy diff (Merkle-Tree project, rank 71);               │
+│   gossip dissemination (Gossip-Protocol project, rank 72);               │
+│   topologies (mesh / hub-and-spoke / hierarchy); tombstone GC            │
+└──────────┬───────────────────────────────────────────┬───────────────────┘
+           │                                            │
+┌──────────▼────────────────┐                ┌──────────▼──────────────────┐
+│  Transport (Phase 8)       │                │  Persistence (Phase 10)     │
+│  trait Transport           │                │   append-only log (WAL,     │
+│   libp2p / WebSocket /     │                │   rank 69) + snapshot;      │
+│   gRPC / in-memory (tests) │                │   GC of stable history      │
+└────────────────────────────┘                └─────────────────────────────┘
+           │
+┌──────────▼──────────────────────────────────────────────────────────────┐
+│  Bindings (Phase 11): WASM (wasm-bindgen) • Python (pyo3) • C ABI = deferred│
+└──────────────────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>Application layer.</strong> Three consumer kinds — native Rust crates, browser WASM modules, and Python server processes — all reach the same <code>Crdt</code> trait surface. They never see merge internals.</p>
+<p><strong>Document layer (Phase 6).</strong> A <code>Document</code> is a keyed map from string to CRDT. It owns the causality clock, exposes snapshot and encode/decode, and is the only object that allocates dots. This is the composition boundary.</p>
+<p><strong>CRDT primitives (Phases 2–6).</strong> Every CRDT implements one trait (<code>Crdt</code>, <a class="cite" href="/system-design-blueprints/systems/crdt-system/design/#sec-11">§11</a>) exposing <code>merge</code>, <code>delta_since</code>, <code>apply_delta</code>, <code>encode_state</code>, <code>decode_state</code>. The trait is the contract every other layer talks to.</p>
+<p><strong>Causality primitives (Phase 1).</strong> A standalone module. A CRDT does not embed a clock; it accepts one and is told which dot it operates under. This separation lets us swap causality schemes without touching the primitives.</p>
+<p><strong>Sync layer (Phases 8–9).</strong> Anti-entropy (Merkle diff) catches replicas up; gossip keeps the steady state close. Both are pure transports for delta encodings; neither knows what CRDT a delta belongs to.</p>
+<p><strong>Transport (Phase 8).</strong> A <code>Transport</code> trait with four backends. The CRDTs do not know which transport runs.</p>
+<p><strong>Persistence (Phase 10).</strong> WAL + snapshot. A CRDT does not know whether it is merged from disk, a peer, or a delta on the wire. The merge law is the merge law.</p>
+<p><strong>Bindings (Phase 11).</strong> Thin wrappers. The Rust core is the single source of truth; bindings re-implement no merge logic.</p>
+<p>Three load-bearing properties recur throughout: (1) <em>the algebra is the contract</em>; (2) <em>causality is a separate module from the CRDTs</em>; (3) <em>sync and storage layer on top, never below</em>.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<p>The domain object is the <strong>delta</strong>: a self-describing, versioned, schema-tagged byte payload that carries a join-semilattice element. Everything on the wire and in the WAL is a delta.</p>
+<h3 id="sec-8-1">8.1 Wire layout (delta envelope)</h3>
+<pre class="diagram"><code>byte 0      : version   (u8)   — currently 1; decoder rejects unknown (I7)
+byte 1      : kind       (u8)   — 0=GCounter 1=PNCounter 2=GSet 3=2PSet
+                                  4=ORSet 5=LWW 6=MV 7=RGA 8=WOOT 9=Logoot
+                                  10=JsonMap 11=JsonArray 12=Document
+bytes 2..6  : body_len   (u32 LE)
+bytes 6..   : body              — zstd(level 3) over bincode(payload)</code></pre>
+<h3 id="sec-8-2">8.2 Worked example — OR-Set &quot;add then concurrent remove + re-add&quot;</h3>
+<p>Replicas A (id 1) and B (id 2). Start empty.</p>
+<ol>
+<li>A: <code>add(&quot;x&quot;)</code> → dot <code>(1,1)</code>. State A: <code>{x: {(1,1)}}</code>.</li>
+<li>A → B sync. Both: <code>{x:{(1,1)}}</code>.</li>
+<li>Concurrently: A <code>remove(&quot;x&quot;)</code> (removes observed dot <code>(1,1)</code>); B <code>add(&quot;x&quot;)</code> → dot <code>(2,1)</code>.</li>
+<li>A state: <code>{}</code>. B state: <code>{x:{(1,1),(2,1)}}</code>.</li>
+<li>Merge A into B: B already has <code>(1,1)</code>; A&#39;s remove only tombstoned the <em>observed</em> <code>(1,1)</code>. The concurrent <code>(2,1)</code> survives. Result: <code>{x:{(2,1)}}</code> — <strong>add wins</strong>, &quot;x&quot; is present.</li>
+</ol>
+<p>This is the observed-remove rule (<a class="cite" href="/system-design-blueprints/systems/crdt-system/reliability/#inv-4">I4</a>, P4): remove acts only on dots the remover had observed.</p>
+<h3 id="sec-8-3">8.3 State-transition table (OR-Set element lifecycle)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Current</th>
+<th>Event</th>
+<th>Next</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>absent</td>
+<td><code>add</code> (dot d)</td>
+<td>live <code>{d}</code></td>
+<td>fresh dot allocated</td>
+</tr>
+<tr>
+<td>live <code>{d…}</code></td>
+<td><code>add</code> (dot d′)</td>
+<td>live <code>{d…,d′}</code></td>
+<td>union of dots</td>
+</tr>
+<tr>
+<td>live <code>{d…}</code></td>
+<td><code>remove</code></td>
+<td>absent (tombstone the observed dots)</td>
+<td>only observed dots removed</td>
+</tr>
+<tr>
+<td>absent (tombstoned)</td>
+<td>concurrent <code>add</code> d′</td>
+<td>live <code>{d′}</code></td>
+<td>re-add survives — d′ unobserved by remover</td>
+</tr>
+<tr>
+<td>live <code>{d…}</code></td>
+<td><code>gc(stable)</code> where all d ∈ stable</td>
+<td>live (dots compacted)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/crdt-system/reliability/#inv-4">I4</a> precondition</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-4">8.4 Malformed-input handling</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Decoder result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>empty buffer</td>
+<td><code>MergeError::BadWire(&quot;empty&quot;)</code></td>
+</tr>
+<tr>
+<td><code>version != 1</code></td>
+<td><code>MergeError::UnknownVersion(v)</code> (<a class="cite" href="/system-design-blueprints/systems/crdt-system/reliability/#inv-7">I7</a>)</td>
+</tr>
+<tr>
+<td><code>kind</code> not matching expected CRDT</td>
+<td><code>MergeError::SchemaMismatch{expected,actual}</code></td>
+</tr>
+<tr>
+<td><code>body_len</code> exceeds buffer</td>
+<td><code>MergeError::BadWire(&quot;truncated&quot;)</code></td>
+</tr>
+<tr>
+<td>zstd frame invalid</td>
+<td><code>MergeError::BadWire(&quot;zstd: …&quot;)</code></td>
+</tr>
+<tr>
+<td>bincode parse fails</td>
+<td><code>MergeError::BadWire(&quot;bincode: …&quot;)</code></td>
+</tr>
+<tr>
+<td>dot from unknown replica id</td>
+<td><code>MergeError::UnknownReplica(id)</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Failure path</h3>
+<p>On any decode error the delta is <em>not</em> applied; the receiver returns the typed error up the stack (<a class="cite" href="/system-design-blueprints/systems/crdt-system/reliability/#inv-8">I8</a>), increments <code>wire.decode.error{kind}</code>, and the sync layer either retries (transient/truncated) or asks the sender to downgrade (version/schema). State is never partially mutated: decode fully precedes apply.</p>
+<h3 id="sec-8-6">8.6 Worked example — vector-clock causality and the concurrency verdict</h3>
+<p>Two replicas A (id 1) and B (id 2), each performing two local updates and one cross-merge.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Action</th>
+<th>VC(A)</th>
+<th>VC(B)</th>
+<th><code>partial_cmp(A,B)</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>—</td>
+<td>start</td>
+<td><code>{}</code></td>
+<td><code>{}</code></td>
+<td><code>Equal</code></td>
+</tr>
+<tr>
+<td>1</td>
+<td>A</td>
+<td>tick</td>
+<td><code>{1:1}</code></td>
+<td><code>{}</code></td>
+<td><code>Greater</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>A</td>
+<td>tick</td>
+<td><code>{1:2}</code></td>
+<td><code>{}</code></td>
+<td><code>Greater</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>B</td>
+<td>tick</td>
+<td><code>{1:2}</code></td>
+<td><code>{2:1}</code></td>
+<td><code>None</code> (concurrent)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>A→B</td>
+<td>B merges A</td>
+<td><code>{1:2}</code></td>
+<td><code>{1:2,2:1}</code></td>
+<td><code>Less</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>B</td>
+<td>tick</td>
+<td><code>{1:2}</code></td>
+<td><code>{1:2,2:2}</code></td>
+<td><code>Less</code></td>
+</tr>
+</tbody></table></div>
+<p>The verdict at step 3 is the load-bearing one: A and B have each made progress the other has not seen, so the clocks are <strong>concurrent</strong> and <code>partial_cmp</code> returns <code>None</code> (<a class="cite" href="/system-design-blueprints/systems/crdt-system/reliability/#inv-9">I9</a>). Any code that <code>.unwrap()</code>s here mis-reads concurrency as an ordering and silently drops a write — the exact bug MM2 predicts. After the merge at step 4, B&#39;s clock dominates A&#39;s, so <code>Less</code> is well-defined again.</p>
+<h3 id="sec-8-7">8.7 Decision table — which set CRDT for which requirement</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th>G-Set</th>
+<th>2P-Set</th>
+<th>OR-Set</th>
+<th>Choice</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>add only, never remove</td>
+<td>✓</td>
+<td>✓</td>
+<td>✓</td>
+<td>G-Set (smallest)</td>
+</tr>
+<tr>
+<td>remove, never re-add</td>
+<td>—</td>
+<td>✓</td>
+<td>✓</td>
+<td>2P-Set (no dot overhead)</td>
+</tr>
+<tr>
+<td>remove then re-add the same value</td>
+<td>—</td>
+<td>✗</td>
+<td>✓</td>
+<td>OR-Set</td>
+</tr>
+<tr>
+<td>concurrent add/remove must favour add</td>
+<td>—</td>
+<td>✗</td>
+<td>✓</td>
+<td>OR-Set</td>
+</tr>
+<tr>
+<td>bounded memory without GC</td>
+<td>✓</td>
+<td>✗ (tombstones)</td>
+<td>✗ (dots)</td>
+<td>G-Set, else GC at stability</td>
+</tr>
+</tbody></table></div>
+<p>Picking 2P-Set where re-adds are required is the single most common production set-CRDT bug; it surfaces exactly when a user re-adds something they previously deleted and the operation silently no-ops (Phase 3 pitfall, MM4).</p>
+<h3 id="sec-8-8">8.8 Worked example — JSON document concurrent edit</h3>
+<p>Document root is a <code>JsonMap</code>. Replicas A and B both edit <code>/profile</code>.</p>
+<ol>
+<li>Initial (both synced): <code>{ &quot;profile&quot;: { &quot;name&quot;: &quot;Ada&quot;, &quot;tz&quot;: &quot;UTC&quot; } }</code>.</li>
+<li>Concurrently: A sets <code>/profile/name = &quot;Ada L.&quot;</code> (HLC <code>t=10@A</code>); B sets <code>/profile/tz = &quot;PST&quot;</code> (HLC <code>t=11@B</code>).</li>
+<li>The two writes touch <strong>different keys</strong> of the same <code>JsonMap</code>, so they merge cleanly: <code>{ &quot;profile&quot;: { &quot;name&quot;: &quot;Ada L.&quot;, &quot;tz&quot;: &quot;PST&quot; } }</code>.</li>
+<li>Now suppose both instead write <code>/profile/tz</code>: A→<code>&quot;EST&quot;</code> (<code>t=12@A</code>), B→<code>&quot;PST&quot;</code> (<code>t=12@B</code>). Same key, equal HLC. The LWW tiebreak <code>(timestamp, replica)</code> (<a class="cite" href="/system-design-blueprints/systems/crdt-system/reliability/#inv-10">I10</a>) breaks the tie by replica id: B (id 2) &gt; A (id 1), so <code>&quot;PST&quot;</code> wins on every replica deterministically.</li>
+</ol>
+<p>This is why same-path conflicts need a <em>total</em> order on writes (<a class="cite" href="/system-design-blueprints/systems/crdt-system/reliability/#inv-10">I10</a>) while different-path edits need none (they commute by construction, <a class="cite" href="/system-design-blueprints/systems/crdt-system/reliability/#inv-14">I14</a>).</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

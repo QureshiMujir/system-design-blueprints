@@ -1,0 +1,1026 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Serialization Runtime with Zero-Copy Support — Architecture · Engineering Blueprints</title><meta name="description" content="Serialization Runtime with Zero-Copy Support, hld: §3 overview + §8 domain model. Build a from-scratch serialization runtime around a zero-copy wire format: IDL front-end → layout computation → encode path → validate-then-view decode path. &#34;Zero-copy decode&#34; = one validation pass…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/">Serialization Runtime with Zero-Copy Support</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Serialization Runtime with Zero-Copy Support</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac (qemu-mentioned)</li> <li>14 phases</li> <li>~22 weeks</li> <li>4,958 lines</li> <li>blueprint #347</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Serialization Runtime with Zero-Copy Support — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Architecture Diagram</h3>
+<pre class="diagram"><code>    schema IDL (.szs)
+            |
+      [ser-schema] parse -&gt; Schema (TypeDefs, Fields, evolution rules) -&gt; SchemaHash
+            |
+      [ser-layout] assign offsets, data-section vs pointer-section, alignment/padding, list/union layout (deterministic)
+            |
+            +--&gt; [ser-codegen] emit per-type Reader/Builder accessors (target lang) | reflective fallback
+            |
+    BUILD:  app --Builder--&gt; [ser-encode] arena/segment alloc -&gt; write data words + pointers -&gt; [ser-runtime] Message (framing)
+            |                                                                                          |
+            |                                                                         wire bytes (segments + frame header)
+            |                                                                                          |
+    READ:   wire bytes --&gt; [ser-decode] VALIDATION PASS (bounds, alignment, pointer targets, recursion/segment limits)  &lt;== trust boundary
+            |                                  | on success -&gt; Reader&lt;&#39;a, T&gt;
+            |                       zero-copy: accessors cast directly into buf, NO parse, NO alloc, lazy field reads
+            |                                  app reads fields
+      [ser-evolve] forward/backward compat check (schema vs schema)     [ser-telemetry] taps encode/decode/validate
+      [ser-tool] inspector / wire-diff / schema registry</code></pre>
+<h3 id="sec-3-2">3.2 ser-schema — IDL Parser + Schema Model</h3>
+<ul>
+<li><strong>Input</strong>: <code>.szs</code> source text; <strong>output</strong>: <code>Schema { types, root, schema_hash }</code>.</li>
+<li>Responsibilities: tokenize, recursive-descent parse, build TypeDef/Field AST, resolve names → TypeIds, assign FieldIds, compute SchemaHash (deterministic hash over canonical type/field ordering), run schema-level validation (no duplicate ids, no forward-reference cycles, union exhaustiveness).</li>
+<li><strong>Data flow</strong>: <code>.szs</code> text → token stream → AST → resolved Schema → SchemaHash.</li>
+<li><strong>Trust boundary contribution</strong>: schema validity (not wire validity) — malformed schemas are rejected here, before layout or encode begins.</li>
+<li><strong>Failure modes</strong>: <code>SerError::SchemaInvalid</code> on parse error, duplicate field id, unresolvable type reference, cyclic struct (non-list).</li>
+<li><strong>External interface</strong>: <code>parse_schema(src: &amp;str) -&gt; Result&lt;Schema, SerError&gt;</code>.</li>
+</ul>
+<h3 id="sec-3-3">3.3 ser-layout — Deterministic Layout Computer</h3>
+<ul>
+<li><strong>Input</strong>: <code>Schema</code>; <strong>output</strong>: <code>Schema</code> with all <code>TypeDef.layout</code> fields populated.</li>
+<li>Responsibilities: assign <code>Field.offset</code> (byte offset within data section), split fields into data-section scalars vs pointer-section references, compute <code>Layout { data_words, ptr_words, align }</code>, handle list element layout, union discriminant + arm layout, padding/alignment rules.</li>
+<li><strong>Invariant</strong>: layout is a pure function of schema — identical schema → byte-identical layout on every platform; no host-layout influence.</li>
+<li><strong>Failure modes</strong>: overflow if <code>data_words</code> or <code>ptr_words</code> exceeds <code>u16::MAX</code>; <code>SerError::SchemaInvalid</code>.</li>
+<li><strong>Performance implication</strong>: layout runs once at build time (code-gen) or once per schema load (reflective path); O(|fields|) per type.</li>
+</ul>
+<h3 id="sec-3-4">3.4 ser-codegen — Accessor Code Generator</h3>
+<ul>
+<li><strong>Input</strong>: <code>Schema</code> + target language tag; <strong>output</strong>: generated source file(s) with per-type <code>Reader&lt;&#39;a, T&gt;</code> / <code>Builder&lt;&#39;a, T&gt;</code> accessor impls.</li>
+<li>Responsibilities: emit <code>fn get_&lt;field&gt;(&amp;self) -&gt; &lt;WireType&gt;</code> for each field (Reader), <code>fn set_&lt;field&gt;(&amp;mut self, v: &lt;WireType&gt;)</code> (Builder); embed offset constants and default values; emit <code>From&lt;&amp;&#39;a [u8]&gt;</code> for Reader.</li>
+<li><strong>Reflective fallback</strong>: <code>ser-runtime</code> exposes a reflective accessor path using Schema at runtime; no generated code required, ~3× slower.</li>
+<li><strong>Build integration</strong>: invoked from <code>build.rs</code>; generated files placed in <code>$OUT_DIR</code>; hermetic (no network, no disk side-effects beyond <code>$OUT_DIR</code>).</li>
+</ul>
+<h3 id="sec-3-5">3.5 ser-encode — Builder + Arena</h3>
+<ul>
+<li><strong>Input</strong>: <code>Schema</code> + app data via Builder API; <strong>output</strong>: <code>Message { segments, root }</code>.</li>
+<li>Responsibilities: bump-allocator arena for segment bytes; <code>Builder&lt;&#39;a, T&gt;</code> assigns field slots by offset, writes scalars into data section, allocates child structs/lists into arena, writes pointer words, handles segment overflow via new-segment alloc, canonical-mode zeroing of padding.</li>
+<li><strong>Concurrency boundary</strong>: Builder is single-threaded per message; multiple independent messages may be built concurrently (arena per message).</li>
+<li><strong>Data flow</strong>: app calls → Builder methods → arena writes → <code>Message</code> ownership transfer → framing in ser-runtime.</li>
+<li><strong>Failure modes</strong>: <code>SerError::OutOfBounds</code> if segment limit exceeded; alloc failure (OOM) propagated as error, not panic.</li>
+</ul>
+<h3 id="sec-3-6">3.6 ser-decode — Validation Pass + Reader (Trust Boundary)</h3>
+<ul>
+<li><strong>Input</strong>: raw wire bytes (<code>&amp;&#39;a [u8]</code>), <code>Schema</code>; <strong>output</strong>: <code>Reader&lt;&#39;a, RootType&gt;</code> on success, <code>SerError</code> on failure.</li>
+<li><strong>THE TRUST BOUNDARY</strong>: every safety invariant is established here. Post-validation, no check is needed.</li>
+<li>Validation pass checks (in order): frame header parse, segment count ≤ limit, total bytes ≤ limit, each pointer target within declared segment, alignment of every pointer target, recursion/nesting depth ≤ limit, list element count × element size does not overflow.</li>
+<li><strong>Zero-copy read</strong>: <code>Reader&lt;&#39;a, T&gt; { buf: &amp;&#39;a [u8], base: Offset }</code> — accessor methods compute <code>base + field_offset</code>, cast <code>&amp;buf[range]</code> to scalar or sub-Reader; NO heap alloc, NO copy.</li>
+<li><strong>Absent field</strong>: if <code>base + field_offset</code> is beyond the message&#39;s declared data section (older writer), accessor returns <code>Field.default</code>.</li>
+<li><strong>Failure modes</strong>: <code>SerError::{OutOfBounds, Misaligned, BadPointer, DepthExceeded, Truncated}</code>.</li>
+<li><strong>Security invariant</strong>: amplification attack impossible — validation is O(message bytes), bounded recursion; no quadratic fan-out.</li>
+</ul>
+<h3 id="sec-3-7">3.7 ser-runtime — Public API + Message Framing</h3>
+<ul>
+<li><strong>Input/output</strong>: app-facing; bridges encode/decode, owns segment buffers, provides framing.</li>
+<li>Responsibilities: <code>encode(builder: Builder) -&gt; Bytes</code>, <code>decode&lt;&#39;a, T&gt;(buf: &amp;&#39;a [u8], schema: &amp;Schema) -&gt; Result&lt;Reader&lt;&#39;a, T&gt;, SerError&gt;</code>, <code>validate(buf: &amp;[u8], schema: &amp;Schema) -&gt; Result&lt;(), SerError&gt;</code>; message frame header (segment table: count + per-segment byte length); SchemaHash embedding in frame.</li>
+<li><strong>Persistence boundary</strong>: runtime hands opaque <code>Bytes</code> to caller; caller owns transport/storage.</li>
+<li><strong>Protocol boundary</strong>: frame header format is the external wire contract (versioned, layout-stable).</li>
+<li><strong>Concurrency</strong>: encode and decode are stateless functions over owned/borrowed data; safe to call from multiple threads without synchronization.</li>
+</ul>
+<h3 id="sec-3-8">3.8 ser-evolve — Schema Evolution Checker</h3>
+<ul>
+<li><strong>Input</strong>: two <code>Schema</code> values (old, new); <strong>output</strong>: <code>CompatResult { forward_ok, backward_ok, violations: Vec&lt;CompatViolation&gt; }</code>.</li>
+<li>Responsibilities: enforce append-only field id rule (no id reuse, no id removal below max), verify optional-field default presence, flag union-arm removal, detect type-change violations (WireType mismatch on same FieldId).</li>
+<li><strong>Integration points</strong>: CI gate (build.rs or test), <code>ser-cli schema diff</code>, runtime schema-mismatch handling (SchemaHash comparison in frame).</li>
+<li><strong>Failure modes</strong>: returns violations list; does not panic; caller decides policy (warn vs abort).</li>
+</ul>
+<h3 id="sec-3-9">3.9 ser-tool — Inspector / Wire-Diff / Registry</h3>
+<ul>
+<li><strong>Input</strong>: wire bytes + schema (inspect/diff); schema files (registry).</li>
+<li>Responsibilities: pretty-print a message to human-readable form (reflective decode path), byte-level hex dump with field annotations, wire-diff (two messages → field-by-field delta), schema registry (store/retrieve/version schema by SchemaHash, flat-file or SQLite backend).</li>
+<li><strong>Operational importance</strong>: primary debugging surface for wire corruption, field default issues, evolution regressions.</li>
+</ul>
+<h3 id="sec-3-10">3.10 ser-telemetry — Metrics + Tracing</h3>
+<ul>
+<li><strong>Input</strong>: tap points at encode entry/exit, validation entry/exit, decode entry/exit.</li>
+<li>Responsibilities: record encode/decode/validate wall-clock latency (histogram), byte counts, validation rejection counts (by <code>SerError</code> variant), tracing span integration (compatible with <code>tracing</code> crate).</li>
+<li><strong>Failure modes</strong>: telemetry must be infallible; metric emission errors are silently dropped, never propagated to caller.</li>
+<li><strong>No-overhead path</strong>: tap API uses <code>#[inline]</code> + <code>cfg(feature = &quot;telemetry&quot;)</code>; zero cost when feature disabled.</li>
+</ul>
+<h3 id="sec-3-11">3.11 Data Flow Summary</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Actor</th>
+<th>Data</th>
+<th>Allocation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Schema load</td>
+<td>ser-schema</td>
+<td><code>.szs</code> → Schema</td>
+<td>Once, at startup</td>
+</tr>
+<tr>
+<td>Layout</td>
+<td>ser-layout</td>
+<td>Schema → Schema+Layout</td>
+<td>In-place, once</td>
+</tr>
+<tr>
+<td>Code-gen</td>
+<td>ser-codegen</td>
+<td>Schema → source</td>
+<td>Build-time only</td>
+</tr>
+<tr>
+<td>Encode</td>
+<td>ser-encode</td>
+<td>App data → arena bytes</td>
+<td>Arena per message</td>
+</tr>
+<tr>
+<td>Frame</td>
+<td>ser-runtime</td>
+<td>Message → wire bytes</td>
+<td>Frame header copy</td>
+</tr>
+<tr>
+<td>Validate</td>
+<td>ser-decode</td>
+<td>wire bytes → trust token</td>
+<td>Zero</td>
+</tr>
+<tr>
+<td>Read</td>
+<td>ser-decode</td>
+<td>trust token → Reader&lt;&#39;a,T&gt;</td>
+<td>Zero</td>
+</tr>
+<tr>
+<td>Field access</td>
+<td>generated/reflective</td>
+<td>Reader&lt;&#39;a,T&gt; → value</td>
+<td>Zero (scalar), borrow (bytes/str)</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Serialization Wire Format &amp; Zero-Copy Runtime</h2>
+<h3 id="sec-8-1">8.1 Overview: Core Entities and Relationships</h3>
+<pre class="diagram"><code>Schema ──owns──&gt; TypeDef* ──owns──&gt; Field*
+   |                |                  |
+SchemaHash      Layout             FieldId, Offset, WireType, DefaultVal, since_version
+   |
+   └──&gt; evolution rules (append-only, reserved holes)
+
+Message ──owns──&gt; Segment* ──contains──&gt; raw bytes (words, pointers)
+    |                                        |
+  root: Pointer                   data-section | pointer-section
+    |
+  Reader&lt;&#39;a, T&gt; ──borrows──&gt; Segment.bytes (lifetime-tied, zero-copy)
+  Builder&lt;&#39;a, T&gt; ──writes──&gt; Arena (segment allocator)</code></pre>
+<p>Entity inventory:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Cardinality</th>
+<th>Invariant</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Schema</td>
+<td>1 per wire format version</td>
+<td>Identified by SchemaHash; immutable once published</td>
+</tr>
+<tr>
+<td>TypeDef</td>
+<td>N per Schema</td>
+<td>id unique within Schema; layout is pure fn of TypeDef</td>
+</tr>
+<tr>
+<td>Field</td>
+<td>N per TypeDef</td>
+<td>FieldId unique within TypeDef; offset non-overlapping</td>
+</tr>
+<tr>
+<td>Layout</td>
+<td>1 per TypeDef</td>
+<td>data_words * 8 + ptr_words * 8 = total struct size</td>
+</tr>
+<tr>
+<td>Segment</td>
+<td>1..N per Message</td>
+<td>SegmentId contiguous 0..N-1; max count bounded</td>
+</tr>
+<tr>
+<td>Pointer</td>
+<td>embedded in segment</td>
+<td>Resolves within declared segment; far ptr stays in-message</td>
+</tr>
+<tr>
+<td>Reader&lt;&#39;a,T&gt;</td>
+<td>0..1 per access path</td>
+<td>buf lifetime ≥ Reader lifetime; no internal allocation</td>
+</tr>
+<tr>
+<td>Builder&lt;&#39;a,T&gt;</td>
+<td>1 per encode session</td>
+<td>Backed by Arena; finalized to Message on seal()</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Wire Format: Segment Layout</h3>
+<pre class="diagram"><code>MESSAGE FRAMING (little-endian):
+ ┌────────────────────────────────────────────────────────────┐
+ │ frame header (8 bytes):                                    │
+ │   [0..4] segment_count: u32  (number of segments, 1-based) │
+ │   [4..8] reserved: u32 = 0                                 │
+ ├────────────────────────────────────────────────────────────┤
+ │ segment_sizes table: segment_count * 4 bytes               │
+ │   each entry: size in words (u32, little-endian)           │
+ │   pad to 8-byte boundary if segment_count is even          │
+ ├────────────────────────────────────────────────────────────┤
+ │ Segment[0] bytes  (size_words[0] * 8 bytes)                │
+ │ Segment[1] bytes  ...                                      │
+ │ ...                                                        │
+ └────────────────────────────────────────────────────────────┘
+root pointer: first word of Segment[0] (always a Struct pointer)</code></pre>
+<p>Frame header invariants:</p>
+<ul>
+<li><code>segment_count</code> ≥ 1; max enforced limit: 512 segments (amplification defense).</li>
+<li>Each segment size: max 512 MiB (words = 67,108,864); sum of all segments ≤ 1 GiB per message.</li>
+<li>Framing is NOT part of zero-copy path — framing header is parsed into Message metadata.</li>
+<li>Segment bytes after framing are never copied; Reader borrows directly from transport buffer.</li>
+</ul>
+<h3 id="sec-8-3">8.3 Pointer Encoding</h3>
+<p>Three pointer kinds, all 8 bytes (one word), little-endian:</p>
+<pre class="diagram"><code>STRUCT POINTER (bits [1:0] = 00):
+ ┌────────────────┬──────────────┬──────────────┐
+ │  [63:32] B:u16 │ [31:16] A:u16│ [1:0]=00 off │
+ │  ptr_words     │  data_words  │  word offset  │
+ └────────────────┴──────────────┴──────────────┘
+ bits [31:2]: signed offset in words from end-of-pointer to target struct
+ bits [47:32]: data section size in words (A = data_words)
+ bits [63:48]: pointer section size in words (B = ptr_words)
+
+LIST POINTER (bits [1:0] = 01):
+ ┌──────────┬───────────────┬────────────┐
+ │ elem_type│  element_count│ [1:0]=01   │
+ │  [2:0]   │  [63:35] u29  │  offset    │
+ └──────────┴───────────────┴────────────┘
+ bits [31:2]: signed offset in words from end-of-pointer to list data
+ bits [34:32]: element size tag (0=void, 1=1-bit, 2=1-byte, 3=2-byte, 4=4-byte, 5=8-byte, 6=ptr, 7=composite)
+ bits [63:35]: element count (for composite: total words in list, then per-element tag word)
+
+FAR POINTER (bits [1:0] = 10):
+ ┌──────────────────────┬──────────────┐
+ │   [63:32] segment_id │ [31:3] off   │
+ │                      │ [2]=landing  │
+ │                      │ [1:0]=10     │
+ └──────────────────────┴──────────────┘
+ landing=0: far ptr -&gt; struct/list ptr in target segment at offset
+ landing=1: double-far ptr -&gt; two consecutive words in target segment (far-ptr + tag)
+ segment_id: SegmentId of target; must be in-message (0..segment_count-1)
+
+NULL POINTER: all 64 bits = 0 → field absent; read returns default value</code></pre>
+<p>Pointer invariants:</p>
+<ul>
+<li>Struct pointer: <code>data_words</code> and <code>ptr_words</code> match TypeDef.layout exactly — validated in pass.</li>
+<li>List pointer: element_count * elem_size ≤ segment bytes remaining.</li>
+<li>Far pointer: segment_id &lt; segment_count; offset within segment bounds.</li>
+<li>Double-far: two target words within same segment, both within bounds.</li>
+<li>Circular pointers: caught by recursion depth counter (max 64 frames).</li>
+<li>Self-referential segment[0]→segment[0] cycles: detected by tracking visited (seg, offset) pairs.</li>
+</ul>
+<h3 id="sec-8-4">8.4 Data Section and Pointer Section Layout</h3>
+<pre class="diagram"><code>STRUCT MEMORY LAYOUT in segment:
+ ┌─────────────────────────────────────────────┐
+ │  data section: data_words * 8 bytes          │
+ │  Field values by WireType:                   │
+ │    Scalar (Bool..F64, Enum): at bit/byte off │
+ │    Union: tag word + active arm field        │
+ ├─────────────────────────────────────────────┤
+ │  pointer section: ptr_words * 8 bytes        │
+ │  One 8-byte pointer slot per reference field │
+ │  (Struct, List, Text, Bytes, Pointer)        │
+ └─────────────────────────────────────────────┘
+
+FIELD PLACEMENT RULES:
+  Bool         → 1 bit; packed into data word, bit offset = field.offset
+  I8/U8        → 1 byte at byte offset (8-aligned within word)
+  I16/U16      → 2 bytes, 2-byte aligned
+  I32/U32/F32  → 4 bytes, 4-byte aligned
+  I64/U64/F64  → 8 bytes (full data word), 8-byte aligned
+  Enum         → 2 bytes (u16 discriminant), 2-byte aligned
+  Union        → 2-byte tag (Enum discriminant) + active arm field in same or next position
+  Text/Bytes   → pointer section; points to list-of-U8 + NUL for Text
+  Struct/List  → pointer section; struct or list pointer</code></pre>
+<p>Alignment padding rules:</p>
+<ul>
+<li>Data section size rounded up to multiple of 8 bytes (1 word).</li>
+<li>Pointer section size always in words (8-byte multiples).</li>
+<li>No padding between data and pointer sections beyond word alignment.</li>
+<li>Intra-word field packing: smaller scalars share a word, packed low-to-high by FieldId.</li>
+<li>Bool packing: up to 64 bools in one data word; bit offset = FieldId % 64.</li>
+</ul>
+<h3 id="sec-8-5">8.5 List Encoding</h3>
+<pre class="diagram"><code>COMPOSITE LIST (structs or unions):
+ ┌──────────────────────────────────────────────┐
+ │  tag word: Struct pointer with offset=−1     │
+ │    data_words=X, ptr_words=Y, count=N        │
+ ├──────────────────────────────────────────────┤
+ │  element[0]: data section (X words)          │
+ │              pointer section (Y words)       │
+ │  element[1]: ...                             │
+ │  ...                                         │
+ └──────────────────────────────────────────────┘
+
+PACKED SCALAR LIST (non-composite):
+ element_count * element_size bytes, no padding between elements
+ (elem_size from list pointer element tag)
+
+VOID LIST:
+ element_count &gt; 0 legal; zero bytes stored; accessor returns ()
+
+TEXT LIST / BYTES LIST:
+ List of pointer; each pointer → a list-of-U8 (Text has trailing NUL, counted in length)</code></pre>
+<p>List invariants:</p>
+<ul>
+<li>Composite: tag word data_words/ptr_words match element TypeDef.layout.</li>
+<li>element_count * (data_words + ptr_words) * 8 ≤ remaining segment bytes from list start.</li>
+<li>Nested list max depth: 64 (shared with struct recursion counter).</li>
+<li>Empty list: element_count=0; tag word present; zero bytes follow.</li>
+<li>Text: UTF-8 enforced at validation; trailing NUL byte present but not counted in user-visible length.</li>
+</ul>
+<h3 id="sec-8-6">8.6 Schema State Machine</h3>
+<pre class="diagram"><code>States of a Schema through its lifecycle:
+
+  [DRAFT] ──parse(.szs)──&gt; [PARSED] ──layout()──&gt; [LAID_OUT] ──hash()──&gt; [PUBLISHED]
+     |                        |                       |                       |
+  parse err              field conflict          alignment err           SchemaHash stable
+  -&gt; Err(SchemaInvalid)  -&gt; Err(SchemaInvalid)  -&gt; Err(SchemaInvalid)   -&gt; immutable
+
+  [PUBLISHED] ──evolve(new_schema)──&gt; [COMPAT_CHECK]
+                                           |
+                              compat? ──&gt; [EVOLVED] (new SchemaHash)
+                              incompat? -&gt; Err(IncompatibleSchema)</code></pre>
+<p>Schema state transitions (normative):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Guard</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DRAFT</td>
+<td>parse() success</td>
+<td>PARSED</td>
+<td>All TypeIds unique, all FieldIds unique per type</td>
+</tr>
+<tr>
+<td>DRAFT</td>
+<td>parse() failure</td>
+<td>ERROR</td>
+<td>Lex/parse error; schema unusable</td>
+</tr>
+<tr>
+<td>PARSED</td>
+<td>layout() success</td>
+<td>LAID_OUT</td>
+<td>No overlapping offsets; alignment satisfied</td>
+</tr>
+<tr>
+<td>PARSED</td>
+<td>layout() failure</td>
+<td>ERROR</td>
+<td>Field id collision or alignment impossible</td>
+</tr>
+<tr>
+<td>LAID_OUT</td>
+<td>hash()</td>
+<td>PUBLISHED</td>
+<td>SchemaHash = xxhash3(canonical schema bytes)</td>
+</tr>
+<tr>
+<td>PUBLISHED</td>
+<td>evolve(new)</td>
+<td>COMPAT_CHECK</td>
+<td>New schema provided</td>
+</tr>
+<tr>
+<td>COMPAT_CHECK</td>
+<td>compat pass</td>
+<td>EVOLVED</td>
+<td>New fields are append-only, old ids/offsets unchanged</td>
+</tr>
+<tr>
+<td>COMPAT_CHECK</td>
+<td>compat fail</td>
+<td>ERROR</td>
+<td>Err(IncompatibleSchema) with diagnostic</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 Validation Pass State Machine</h3>
+<p>The validation pass is the single trust boundary. Operates on raw bytes, produces Reader or error.</p>
+<pre class="diagram"><code>INPUT: &amp;[u8] (wire bytes) + Schema
+
+  START
+    │
+    ▼
+  [PARSE_FRAME] — extract segment_count, segment sizes, verify sum ≤ limit
+    │ err → Err(Truncated | OutOfBounds)
+    ▼
+  [VALIDATE_SEGMENTS] — verify each segment: size matches frame table, non-overlapping
+    │ err → Err(OutOfBounds | Truncated)
+    ▼
+  [READ_ROOT_PTR] — word[0] of segment[0]; must be Struct pointer
+    │ err → Err(BadPointer)
+    ▼
+  [VALIDATE_NODE(ptr, depth)] — recursive; depth counter starts at 0
+    │
+    ├─ struct ptr: check data_words/ptr_words vs schema layout
+    │              check target range in segment
+    │              recurse each pointer-section slot (depth+1)
+    │
+    ├─ list ptr:   check element_count * size ≤ segment remaining
+    │              if composite: validate tag word; recurse each element (depth+1)
+    │              if pointer: recurse each pointer (depth+1)
+    │
+    ├─ far ptr:    segment_id &lt; segment_count; offset in bounds
+    │              if double-far: validate two landing words
+    │              continue validation at resolved location
+    │
+    └─ null ptr:   OK; field will read default
+    │
+    ▼ (all nodes validated)
+  [EMIT_READER] — Reader&lt;&#39;a, T&gt; { buf: &amp;&#39;a [u8], base: root_offset }
+    │
+  DONE — zero-copy access is now safe</code></pre>
+<p>Validation failure modes and error mapping:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>SerError</th>
+<th>Detail</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Frame too short</td>
+<td>Truncated</td>
+<td>segment_count * 4 + 8 &gt; buf.len()</td>
+</tr>
+<tr>
+<td>Segment size overflow</td>
+<td>OutOfBounds</td>
+<td>sum of segment words * 8 &gt; buf.len()</td>
+</tr>
+<tr>
+<td>Segment count &gt; 512</td>
+<td>OutOfBounds</td>
+<td>amplification guard</td>
+</tr>
+<tr>
+<td>Struct range OOB</td>
+<td>OutOfBounds</td>
+<td>ptr_target + (data+ptr)*8 &gt; segment end</td>
+</tr>
+<tr>
+<td>Misaligned pointer target</td>
+<td>Misaligned</td>
+<td>target % 8 ≠ 0</td>
+</tr>
+<tr>
+<td>data_words mismatch</td>
+<td>BadPointer</td>
+<td>ptr.data_words ≠ schema layout.data_words</td>
+</tr>
+<tr>
+<td>ptr_words mismatch</td>
+<td>BadPointer</td>
+<td>ptr.ptr_words ≠ schema layout.ptr_words</td>
+</tr>
+<tr>
+<td>Far seg_id ≥ count</td>
+<td>BadPointer</td>
+<td>segment does not exist</td>
+</tr>
+<tr>
+<td>Depth &gt; 64</td>
+<td>DepthExceeded</td>
+<td>recursion/cycle guard</td>
+</tr>
+<tr>
+<td>List count overflow</td>
+<td>OutOfBounds</td>
+<td>count * size &gt; segment remaining</td>
+</tr>
+<tr>
+<td>Unknown union discriminant</td>
+<td>BadPointer</td>
+<td>value not in schema enum</td>
+</tr>
+<tr>
+<td>Text missing NUL</td>
+<td>SchemaInvalid</td>
+<td>UTF-8 list without trailing 0</td>
+</tr>
+<tr>
+<td>Far loop (circular)</td>
+<td>DepthExceeded</td>
+<td>(seg, offset) revisit detected</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-8">8.8 Reader Access Model (Zero-Copy)</h3>
+<pre class="diagram"><code>Reader&lt;&#39;a, T&gt; borrows buf: &amp;&#39;a [u8]. Accessors perform:
+  1. Compute field byte offset: base + data_section_start + field.offset
+  2. Cast &amp;buf[off..off+size] to &amp;T directly (valid because validation guarantees alignment + bounds)
+  3. Return reference (scalar) or new Reader&lt;&#39;a, SubT&gt; (sub-struct/list)
+
+NO allocation. NO parse. NO copy. One memory access per field.
+Absent field (null pointer): returns field.default as DefaultVal (no buffer access).</code></pre>
+<p>Reader operations by WireType:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>WireType</th>
+<th>Accessor returns</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Bool</td>
+<td>bool</td>
+<td>buf[word_off] &gt;&gt; bit_off &amp; 1</td>
+</tr>
+<tr>
+<td><a class="cite" href="/system-design-blueprints/systems/serialization-runtime-with-zero-copy-support/reliability/#inv-8">I8</a>..I64</td>
+<td>i8..i64</td>
+<td><code>ptr::read_unaligned</code> (LE) or direct cast if aligned</td>
+</tr>
+<tr>
+<td>U8..U64</td>
+<td>u8..u64</td>
+<td>same</td>
+</tr>
+<tr>
+<td>F32/F64</td>
+<td>f32/f64</td>
+<td>bit-cast from u32/u64</td>
+</tr>
+<tr>
+<td>Enum</td>
+<td>EnumType</td>
+<td>read u16 discriminant; map to variant</td>
+</tr>
+<tr>
+<td>Struct</td>
+<td>Reader&lt;&#39;a, SubT&gt;</td>
+<td>resolve pointer; return new Reader at target</td>
+</tr>
+<tr>
+<td>List</td>
+<td>ListView&lt;&#39;a, ElemT&gt;</td>
+<td>resolve list pointer; return slice or iterator</td>
+</tr>
+<tr>
+<td>Union</td>
+<td>UnionReader&lt;&#39;a&gt;</td>
+<td>read tag word; dispatch to active arm Reader</td>
+</tr>
+<tr>
+<td>Text</td>
+<td>&amp;&#39;a str</td>
+<td>resolve list-of-U8; cast to str (UTF-8 validated)</td>
+</tr>
+<tr>
+<td>Bytes</td>
+<td>&amp;&#39;a [u8]</td>
+<td>resolve list-of-U8; return slice</td>
+</tr>
+<tr>
+<td>Pointer</td>
+<td>AnyReader&lt;&#39;a&gt;</td>
+<td>opaque; caller downcasts with schema type</td>
+</tr>
+</tbody></table></div>
+<p>Lifetime rules:</p>
+<ul>
+<li>Reader&lt;&#39;a, T&gt; lifetime &#39;a tied to the original buffer slice.</li>
+<li>Nested Readers share the same &#39;a — no sub-lifetime introduced.</li>
+<li>Compiler enforces: buffer cannot be freed while any Reader alive.</li>
+<li>Explicit deep-copy: <code>reader.to_owned()</code> → allocates; not zero-copy. Opt-in only.</li>
+</ul>
+<h3 id="sec-8-9">8.9 Builder / Encode Model</h3>
+<pre class="diagram"><code>Builder&lt;&#39;a, T&gt; writes into Arena:
+  Arena { segments: Vec&lt;Segment&gt;, current: usize, cursor: usize }
+
+  alloc_struct(layout) → Builder&lt;&#39;a, T&gt;:
+    if cursor + size ≤ segment.capacity → bump cursor, return builder at offset
+    else → alloc new Segment (next SegmentId), write far pointer in current segment
+
+  set_field(field_id, value):
+    compute byte offset from layout
+    write value at offset (little-endian)
+
+  init_struct(field_id) → Builder&lt;&#39;a, SubT&gt;:
+    alloc SubT in current/new segment
+    write Struct pointer into parent pointer section
+
+  init_list(field_id, count) → ListBuilder&lt;&#39;a, ElemT&gt;:
+    alloc count * elem_size bytes
+    write List pointer in parent pointer section
+
+  seal() → Message:
+    finalize all segments; fix up far pointers; emit framing header</code></pre>
+<p>Builder invariants:</p>
+<ul>
+<li>Arena never reallocates existing segments (pointers remain valid).</li>
+<li>Segment growth: new segment allocated when current segment would overflow.</li>
+<li>Far pointer written immediately when crossing segment boundary.</li>
+<li>Default field values: zero for scalars (XOR-encoded default: write field.default ^ value).</li>
+<li>Canonical mode: all padding zeroed; fields written in FieldId order; no dead space.</li>
+<li>Non-canonical mode: padding unspecified (may contain garbage for performance).</li>
+</ul>
+<h3 id="sec-8-10">8.10 Union Encoding</h3>
+<pre class="diagram"><code>UNION in data section:
+ ┌──────────────────────────────────────────────┐
+ │  tag word (2 bytes): u16 discriminant         │
+ │    offset = union.offset (from layout)        │
+ ├──────────────────────────────────────────────┤
+ │  active arm field: at arm.offset              │
+ │    (may overlap with other union arms;        │
+ │     only active arm is valid)                 │
+ └──────────────────────────────────────────────┘
+
+Unnamed union (top-level): tag at data_words[0] bits [15:0]
+Named union: tag at layout-assigned offset; arm fields follow
+
+Validation: discriminant value must be in schema enum; unknown arm → BadPointer
+Reader: read tag → match arm → dispatch accessor
+Builder: set discriminant; zero out overlapping arm bytes before writing active arm
+Evolution: new arms added at end; old readers see unknown tag → return default/error</code></pre>
+<h3 id="sec-8-11">8.11 Schema Evolution Worked Example</h3>
+<p>Scenario: <code>UserProfile v1 → v2</code> adding an optional field.</p>
+<pre class="diagram"><code>v1 IDL:
+  struct UserProfile {   # TypeId = 42
+    @0 id:    U64;       # FieldId=0, offset=word0, since_version=1
+    @1 name:  Text;      # FieldId=1, ptr_slot=0,  since_version=1
+  }
+  Layout v1: data_words=1, ptr_words=1
+
+v2 IDL (evolved):
+  struct UserProfile {
+    @0 id:    U64;       # unchanged
+    @1 name:  Text;      # unchanged
+    @2 score: F64 = 0.0; # FieldId=2, offset=word1, since_version=2, default=0.0
+  }
+  Layout v2: data_words=2, ptr_words=1</code></pre>
+<p>Forward compatibility (v1 reader, v2 wire):</p>
+<ul>
+<li>v1 reader: data_words=1 → reads only word0 (id); ignores word1 (score).</li>
+<li>Pointer: v2 struct pointer has data_words=2; v1 reader treats extra words as padding → safe.</li>
+<li>v1 reader accesses name (ptr_slot=0) → ptr_words=1 still; offset unchanged → correct.</li>
+</ul>
+<p>Backward compatibility (v2 reader, v1 wire):</p>
+<ul>
+<li>v2 reader: data_words=2; v1 wire has data_words=1.</li>
+<li>Struct pointer in v1 wire has data_words=1 &lt; schema&#39;s 2 → score field absent.</li>
+<li>Accessor for score: field.offset &gt; actual data section → return field.default (0.0).</li>
+<li>No error; v2 reader gracefully reads default.</li>
+</ul>
+<p>ser-evolve checks (compile-time/registration):</p>
+<ul>
+<li>All v1 FieldIds present in v2 with same type + offset → OK.</li>
+<li>New fields have since_version &gt; v1.schema_version → OK.</li>
+<li>No field removed without reserved hole → OK.</li>
+<li>IncompatibleSchema if: field type changed, offset changed, id reused for different type.</li>
+</ul>
+<h3 id="sec-8-12">8.12 Sequence Diagrams</h3>
+<h4 id="sec-8-encode-path">Encode Path</h4>
+<pre class="diagram"><code>App                Builder&lt;T&gt;           Arena            ser-runtime
+ |                    |                   |                  |
+ |--init_root(T)----&gt; |                   |                  |
+ |                    |--alloc(layout)--&gt; |                  |
+ |                    |&lt;--Offset---------|                   |
+ |--set(id, val)----&gt; |                  |                   |
+ |                    |--write(off,val)-&gt;|                   |
+ |--init_list(id,N)-&gt; |                  |                   |
+ |                    |--alloc(N*sz)---&gt; |                   |
+ |                    |&lt;--ListBuilder----|                   |
+ |  (fill list elems) |                  |                   |
+ |--seal()----------&gt; |                  |                   |
+ |                    |--finalize()----&gt; |                   |
+ |                    |&lt;--Message--------|                   |
+ |--encode(msg)------------------------------&gt; |             |
+ |                                             |--frame()--&gt; |
+ |&lt;--&amp;[u8] wire bytes--------------------------------------- |</code></pre>
+<h4 id="sec-8-decode-zero-copy-read-path">Decode / Zero-Copy Read Path</h4>
+<pre class="diagram"><code>App           ser-runtime         ser-decode           Reader&lt;&#39;a,T&gt;
+ |                |                   |                     |
+ |--decode(buf)-&gt; |                   |                     |
+ |                |--validate(buf)--&gt; |                     |
+ |                |                   |--parse_frame()      |
+ |                |                   |--walk_ptrs()        |
+ |                |                   |--check_bounds()     |
+ |                |                   |--check_align()      |
+ |                |                   |--check_depth()      |
+ |                |    err? ──────────X Err(SerError)       |
+ |                |&lt;--Ok(Reader)------|                     |
+ |&lt;--Reader&lt;&#39;a,T&gt;-|                   |                     |
+ |                                                          |
+ |--reader.get_id()----------------------------------------&gt;|
+ |                                          cast buf[off..] |
+ |&lt;--u64 (no alloc, no copy)----------------|              |</code></pre>
+<h4 id="sec-8-schema-evolution-check">Schema Evolution Check</h4>
+<pre class="diagram"><code>ser-evolve
+  |
+  |--load_schema(v1_hash) -&gt; Schema_v1
+  |--load_schema(v2_hash) -&gt; Schema_v2
+  |--check_compat(v1, v2):
+  |    for each field f1 in v1:
+  |      find f2 in v2 by FieldId
+  |      assert f2.ty == f1.ty
+  |      assert f2.offset == f1.offset
+  |    for each f2 new in v2:
+  |      assert f2.since_version &gt; v1.schema_version
+  |      assert f2.default.is_some()
+  |--Ok(CompatReport) | Err(IncompatibleSchema{field_id, reason})</code></pre>
+<h3 id="sec-8-13">8.13 Malformed / Edge-Case Examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Wire bytes (hex sketch)</th>
+<th>Validation result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Zero-length message</td>
+<td><code>01 00 00 00 00 00 00 00 00 00 00 00</code></td>
+<td>Err(Truncated) — root ptr missing</td>
+</tr>
+<tr>
+<td>Segment count = 0</td>
+<td><code>00 00 00 00 ...</code></td>
+<td>Err(OutOfBounds) — count must be ≥ 1</td>
+</tr>
+<tr>
+<td>Segment size overflow</td>
+<td>count=1, size_word=0xFFFFFFFF</td>
+<td>Err(OutOfBounds) — 32 GiB &gt; limit</td>
+</tr>
+<tr>
+<td>Struct ptr data_words mismatch</td>
+<td>ptr says 3, schema says 1</td>
+<td>Err(BadPointer)</td>
+</tr>
+<tr>
+<td>List count * elem_size overflows</td>
+<td>count=0xFFFF, size=4, seg=8 bytes</td>
+<td>Err(OutOfBounds)</td>
+</tr>
+<tr>
+<td>Depth 65</td>
+<td>deeply nested struct chain</td>
+<td>Err(DepthExceeded)</td>
+</tr>
+<tr>
+<td>Far ptr → self (seg=0, off=0)</td>
+<td>circular</td>
+<td>Err(DepthExceeded) after 64 hops</td>
+</tr>
+<tr>
+<td>Unknown union discriminant</td>
+<td>tag=0xFFFF, schema has arms 0..3</td>
+<td>Err(BadPointer)</td>
+</tr>
+<tr>
+<td>Text missing NUL</td>
+<td>UTF-8 list, last byte ≠ 0</td>
+<td>Err(SchemaInvalid)</td>
+</tr>
+<tr>
+<td>Non-UTF-8 text bytes</td>
+<td>Text field with 0xFF byte</td>
+<td>Err(SchemaInvalid)</td>
+</tr>
+<tr>
+<td>Misaligned struct target</td>
+<td>ptr offset → odd byte</td>
+<td>Err(Misaligned)</td>
+</tr>
+<tr>
+<td>Empty message (valid)</td>
+<td>count=1, size=1 word, root=null ptr</td>
+<td>Ok(Reader) — all fields default</td>
+</tr>
+<tr>
+<td>Canonical duplicate</td>
+<td>identical logical msg, different padding</td>
+<td>canonical() normalizes; hash equal</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-14">8.14 DefaultVal Encoding</h3>
+<pre class="diagram"><code>DefaultVal per WireType:
+  Scalar  → field.default XOR wire_value (XOR-encoded to allow zero-default = zero-wire)
+  Text    → null pointer → return &quot;&quot; (empty str)
+  Bytes   → null pointer → return &amp;[]
+  Struct  → null pointer → return &quot;default struct&quot; (all fields default recursively)
+  List    → null pointer → return empty ListView
+  Enum    → field.default = discriminant u16
+  Bool    → field.default = 0 or 1 (bit)
+
+XOR encoding invariant: zero bytes on wire = field holds its default value.
+  e.g. default=5 (U8): write (5 XOR value) at offset; read (5 XOR wire_byte)</code></pre>
+<h3 id="sec-8-15">8.15 Canonical Encoding</h3>
+<p>Canonical mode properties:</p>
+<ul>
+<li>All padding bytes = 0x00.</li>
+<li>Fields written in ascending FieldId order within each struct.</li>
+<li>No dead/unreachable segments.</li>
+<li>List elements in original order (list ordering is app-defined; canonical does not sort).</li>
+<li>Far pointers minimized: prefer same-segment when possible.</li>
+<li>Result: SHA-256(canonical_bytes) is stable identity for dedup/caching.</li>
+<li>Canonical encode is ~10–15% slower than non-canonical (extra zeroing pass).</li>
+<li>Non-canonical encode: default; padding unspecified; faster.</li>
+<li>Conversion: <code>Message::canonicalize()</code> → allocates new Arena, re-encodes.</li>
+</ul>
+<h3 id="sec-8-16">8.16 ser-telemetry Instrumentation Points</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Instrumentation point</th>
+<th>Metric / Span</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>encode() entry/exit</td>
+<td>encode_duration_us, encode_bytes</td>
+</tr>
+<tr>
+<td>validate() entry/exit</td>
+<td>validate_duration_us, validate_rejections_total</td>
+</tr>
+<tr>
+<td>decode() (post-validate)</td>
+<td>decode_duration_us (accessor overhead, sampled)</td>
+</tr>
+<tr>
+<td>far pointer resolution</td>
+<td>far_ptr_count (per message)</td>
+</tr>
+<tr>
+<td>segment allocation</td>
+<td>segments_per_message histogram</td>
+</tr>
+<tr>
+<td>schema evolution check</td>
+<td>compat_check_duration_us, incompat_total</td>
+</tr>
+<tr>
+<td>arena alloc</td>
+<td>arena_bytes_allocated</td>
+</tr>
+<tr>
+<td>validation error by kind</td>
+<td>rejection_by_error_kind{OutOfBounds,BadPointer,...}</td>
+</tr>
+</tbody></table></div>
+<p>Tracing: <code>tracing</code> spans wrap encode(), validate(), codegen(). Field-level access NOT traced (too hot; sampling only).</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

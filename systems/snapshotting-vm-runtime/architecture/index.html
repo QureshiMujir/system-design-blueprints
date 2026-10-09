@@ -1,0 +1,261 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Snapshotting VM Runtime from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Snapshotting VM Runtime from Scratch, hld: §3 overview + §8 domain model. Build a managed bytecode VM runtime that can checkpoint (snapshot) and restore its full execution state — GC'd heap, value stack, call frames, registers/PC, threads/fibers, GC metadata, and…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/snapshotting-vm-runtime/">Snapshotting VM Runtime from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Snapshotting VM Runtime from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux (qemu-mentioned)</li> <li>12 phases</li> <li>~32 weeks</li> <li>1,852 lines</li> <li>blueprint #341</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/snapshotting-vm-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/snapshotting-vm-runtime/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/snapshotting-vm-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/snapshotting-vm-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/snapshotting-vm-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/snapshotting-vm-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/snapshotting-vm-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/snapshotting-vm-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/snapshotting-vm-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Snapshotting VM Runtime from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                 bytecode module(s) ──► svm-vm LOADER ──► initial Heap + main Frame
+                                              │
+        ┌─────────────────────────────────────▼──────────────────────────────────────┐
+        │ svm-vm   BYTECODE INTERPRETER CORE                                           │
+        │  value stack | call frames (locals,ret-pc) | PC | threads/fibers + scheduler │
+        │  dispatch loop; SAFE-POINT polls (loop back-edge / call / alloc)              │
+        └───────┬───────────────────────────────────────────────────┬─────────────────┘
+       roots    │ (stack slots, frame locals, globals, registers)    │ object access
+        ┌────────▼───────────────────────────────────┐      ┌────────▼──────────────────┐
+        │ svm-heap  GC&#39;d OBJECT HEAP                   │◄────►│ svm-resource  RESOURCE TBL │
+        │  regions (bump+free-list) | object headers   │      │ fds/sockets/timers/RNG/    │
+        │  mark-sweep GC | mark bits | root set        │      │ clock → ResourceHandle ids │
+        └───────┬─────────────────────────┬────────────┘      └────────┬──────────────────┘
+                │ consistent view          │ dirty pages               │ manifest
+        ┌────────▼──────────┐     ┌─────────▼──────────┐                │
+        │ SAFE POINT        │     │ svm-cow            │                │
+        │ stop-the-world    │     │ mprotect/soft-dirty│                │
+        │ handshake; quiesce │     │ dirty-page bitmap  │                │
+        └────────┬──────────┘     └─────────┬──────────┘                │
+                 │ frozen world              │ dirty set                 │
+        ┌────────▼──────────────────────────▼───────────────────────────▼─────────────┐
+        │ svm-snap  CAPTURE / SERIALIZER                                                │
+        │  enumerate roots → trace graph → assign offsets → relocate ptr→offset →       │
+        │  emit: header + heap-image + relocation-tbl + stacks/frames/PC + thread-tbl + │
+        │        gc-meta + resource-manifest                                            │
+        └────────────────────────────────────┬─────────────────────────────────────────┘
+                                              │ bytes
+        ┌─────────────────────────────────────▼──────────────────────────────────────┐
+        │ svm-format   SNAPSHOT FILE  (.svm)  self-describing | content-hashed | SemVer │
+        │  magic | version | section table | per-section CRC | content hash | manifest  │
+        └─────────────────────────────────────┬──────────────────────────────────────┘
+                       persist / load          │
+        ┌─────────────────────────────────────▼──────────────────────────────────────┐
+        │ svm-restore   RESTORE / RESUME                                               │
+        │  validate (untrusted!) → map heap-image → relocate offset→ptr →              │
+        │  rebuild stacks/frames/PC/threads → reopen/virtualize resources → RESUME      │
+        └──────────────────────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>Per-box:</strong> <strong>Loader</strong> — parses a bytecode module into the initial heap + main frame (the only &quot;from source&quot; path; everything else resumes a snapshot). <strong>Interpreter core (<code>svm-vm</code>)</strong> — the runtime whose state we capture: value stack, call frames (locals + return PC), program counter, threads/fibers + a cooperative scheduler; its dispatch loop <strong>polls safe points</strong> at back-edges/calls/allocations so capture can stop the world deterministically. <strong>Heap (<code>svm-heap</code>)</strong> — regions (bump-allocate young, free-list old), <code>#[repr(C)]</code> object headers (type tag, size, GC mark, forwarding slot), a mark-sweep collector, and the root set (the bridge: stack slots + frame locals + globals are GC roots <em>and</em> serialization roots). <strong>Resource table (<code>svm-resource</code>)</strong> — every external handle (fd, socket, timer, RNG stream, wall-clock reads) goes through a <code>ResourceHandle</code> id, never a raw fd in the heap, so capture sees ids and the manifest, not un-serializable kernel state. <strong>Safe point</strong> — a stop-the-world handshake that quiesces all threads at known-good points so the heap + stacks are internally consistent (no half-mutated object, no in-flight push) before capture. <strong><code>svm-cow</code></strong> — <code>mprotect</code>/soft-dirty dirty-page tracking + a dirty bitmap so incremental snapshots store only changed pages (base+overlay chains, reusing #111&#39;s delta-chain idea). <strong>Capture/serializer (<code>svm-snap</code>)</strong> — enumerates roots, traces the object graph, assigns each object a stable file offset, <strong>relocates pointers to offsets</strong>, and emits the heap image + relocation table + stacks/frames/PC + thread table + GC metadata + resource manifest. <strong>Snapshot format (<code>svm-format</code>)</strong> — the on-disk <code>.svm</code>: magic, SemVer, a section table, per-section CRCs, a whole-file content hash, and the embedded manifest; self-describing so a loader can validate before trusting. <strong>Restore/resume (<code>svm-restore</code>)</strong> — <strong>validates the untrusted snapshot first</strong>, maps the heap image, relocates offsets→pointers, rebuilds stacks/frames/PC/threads, reopens/virtualizes resources per the manifest, and resumes the dispatch loop exactly where capture stopped.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Bytecode VM model (the runtime we snapshot)</h3>
+<p>A small stack machine. Bytecode module = constant pool + function table + code. Values are NaN-boxed-or-tagged; heap objects are GC&#39;d.</p>
+<pre class="diagram"><code>Value   := Int(i64) | Float(f64) | Bool(b) | Nil | Ref(ObjRef)   ; ObjRef = heap object id/offset
+Obj     := Str(bytes) | Array(Vec&lt;Value&gt;) | Map(Vec&lt;(Value,Value)&gt;)
+         | Closure{fn:FnId, upvalues:Vec&lt;Value&gt;} | Struct{tag, fields:Vec&lt;Value&gt;}
+         | ResourceRef(ResourceHandle)            ; the ONLY bridge to external state (I7)
+Frame   := { fn:FnId, pc:u32, locals:Vec&lt;Value&gt;, ret_pc:u32, base_sp:u32 }
+Thread  := { id, stack:Vec&lt;Value&gt;, frames:Vec&lt;Frame&gt;, status:{Running|Parked|Done}, fiber:Option&lt;FiberId&gt; }
+VmState := { heap:Heap, threads:Vec&lt;Thread&gt;, globals:Vec&lt;Value&gt;, scheduler, logical_clock:u64, rng:RngState }</code></pre>
+<h3 id="sec-8-2">8.2 Object header &amp; heap layout (normative, <code>#[repr(C)]</code>)</h3>
+<pre class="diagram"><code>ObjHeader { tag:u16, flags:u8, gc_mark:u8, size:u32, fwd:u32 }   ; fwd = forwarding/offset slot (reused by snapshot)
+Heap      = regions[]; each region = mmap&#39;d page run; objects are header+payload, 8-byte aligned
+Root set  = { every Value::Ref in: thread stacks, frame locals, globals, scheduler queues }</code></pre>
+<p>The <code>fwd</code>/<code>size</code>/<code>tag</code> fields are shared by the GC (mark-sweep) and the snapshotter (offset assignment) — one object model (principle 11).</p>
+<h3 id="sec-8-3">8.3 Snapshot format grammar (<code>.svm</code>, EBNF)</h3>
+<pre class="diagram"><code>snapshot     := magic version flags section_count section_dir section* content_hash
+magic        := &quot;SVM\x01&quot;                                  ; 4 bytes
+version       := u16 major u16 minor                       ; SemVer (I11)
+section_dir  := { kind:u16, offset:u64, len:u64, crc32c:u32 }*   ; one entry per section (I10)
+section      := header_sec | heap_image | reloc_tbl | thread_tbl | gc_meta | resource_manifest | overlay_meta
+header_sec   := { vm_abi:u32, heap_layout:u32, page_size:u32, base_hint:u64, epoch:u64, parent_hash:Opt&lt;Hash32&gt; }
+heap_image   := { region_count, regions: { vaddr_hint:u64, len:u64, page_bytes[] }* }   ; offsets, no live ptrs (I4)
+reloc_tbl    := { count:u64, entries: { at_offset:u64 }* }  ; each location holding an offset to swizzle (I5)
+thread_tbl   := { count, threads: { id, status, stack_off:u64, stack_len, frames:{fn,pc,locals_off,ret_pc,base_sp}* }* }
+gc_meta      := { mark_color:u8, region_free_lists, alloc_cursors, gc_epoch:u64 }
+resource_manifest := { count, resources: { handle_id:u32, kind:u16, policy:u8, descriptor:bytes }* }   ; (I7)
+overlay_meta := { base_hash:Hash32, dirty_page_count:u64, dirty_pages: { region:u16, page_idx:u32 }* }  ; incremental (§7)
+content_hash := BLAKE3-256 over all preceding bytes                                   ; (I10)</code></pre>
+<h3 id="sec-8-4">8.4 Snapshot / restore state machine</h3>
+<pre class="diagram"><code>RUNNING ──request snapshot──► REQUESTED ──safe-point reached (all threads quiesced, I6)──► FROZEN
+FROZEN ──capture(read-only, I8)──► [enumerate roots → trace graph → assign offsets → relocate → emit sections]
+        └─ on error/abort ──► RUNNING (state unchanged, I8/I10)
+FROZEN ──capture done──► WRITING ──fsync + content-hash──► PERSISTED ──resume threads──► RUNNING
+
+(restore, fresh process)
+LOADED(bytes) ──validate magic/version/CRC/hash (I2,I10,I11)──► VERIFIED
+VERIFIED ──map heap image + relocate offset→ptr (I5) ──► HEAP_READY
+HEAP_READY ──rebuild stacks/frames/PC/threads──► VM_READY
+VM_READY ──reopen/virtualize resources per manifest (I7) + restore clock (I9)──► RESOURCES_READY
+RESOURCES_READY ──resume dispatch at saved PC──► RUNNING   (≡ captured VM, I1)
+any validation failure ──► REJECTED (typed LoadError, no partial VM)</code></pre>
+<h3 id="sec-8-5">8.5 Worked example — capture &amp; restore a tiny program</h3>
+<pre class="diagram"><code>program: build map {&quot;k&quot;: [1,2,3]}, open a file (ResourceHandle 7), park at a yield point.
+VM state at safe point:
+  heap: O0=Str(&quot;k&quot;); O1=Int-array[1,2,3]; O2=Map[(Ref O0 → Ref O1)]; O3=ResourceRef(h=7)
+  globals[0]=Ref O2 ; thread0.stack=[Ref O3]; thread0.frames=[{fn:main, pc:42, locals:[Ref O2]}]
+  logical_clock=1000 ; rng=seed-state-X ; resource 7 = file &quot;/data/in.log&quot; @ offset 4096
+capture (offsets assigned in trace order):
+  O0@0x00  O1@0x18  O2@0x40  O3@0x60   (8-byte aligned, header+payload)
+  reloc_tbl: [O2.key→0x00, O2.val→0x18, globals[0]→0x40, stack[0]→0x60, locals[0]→0x40]
+  resource_manifest: { h7, kind=File, policy=ReopenAtOffset, descriptor={path:&quot;/data/in.log&quot;, off:4096} }
+  thread_tbl: t0 {stack_off, frames:[{fn:main,pc:42,locals_off,...}]}; logical_clock=1000; rng=X
+restore (new process, base=0x7f...0000):
+  map heap image; for each reloc entry: *at = base + stored_offset   (offset→ptr, I5)
+  O2.key→&amp;O0, O2.val→&amp;O1, globals[0]→&amp;O2, stack[0]→&amp;O3, locals[0]→&amp;O2
+  resource: reopen &quot;/data/in.log&quot;, lseek 4096, bind to h7 (policy ReopenAtOffset, I7)
+  logical_clock=1000 (≥, I9); rng=X; resume thread0 at pc=42  → continues identically (I1)</code></pre>
+<h3 id="sec-8-6">8.6 Malformed / failure-path examples</h3>
+<ul>
+<li><strong>Truncated section</strong> (dir says len=N, file has N-10) → <code>LoadError::Truncated</code> at validate, REJECTED before any deref (<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-2">I2</a>).</li>
+<li><strong>Reloc offset out of bounds</strong> (<code>at_offset</code> or stored offset ≥ heap_image len) → <code>LoadError::BadReloc</code>, REJECTED (<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-5">I5</a>) — <em>the</em> classic exploit; caught before swizzle.</li>
+<li><strong>Reloc points into the middle of an object</strong> (not a header boundary) → header-tag check fails → <code>LoadError::BadReloc</code> (<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-5">I5</a>/<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-12">I12</a>).</li>
+<li><strong>Content hash mismatch</strong> (one bit flipped) → <code>LoadError::IntegrityFail</code>, REJECTED (<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-10">I10</a>).</li>
+<li><strong>Major version newer than runtime</strong> → <code>LoadError::Unsupported</code>, refuse (no guessing, <a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-11">I11</a>); minor-older → migrate (<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/trade-offs/#sec-9">§9</a>).</li>
+<li><strong>Resource manifest references a missing file under <code>Reopen</code> policy</strong> → restore fails the resource per policy (fail vs lazy vs virtualize); reported, VM not resumed half-wired (<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-7">I7</a>).</li>
+<li><strong>Capture requested but a thread never reaches a safe point</strong> (tight native-ish loop) → timeout → <code>unsafe_capture</code> telemetry, capture aborted, VM keeps RUNNING unchanged (<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-6">I6</a>/<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-8">I8</a>).</li>
+<li><strong>Cycle in object graph</strong> (O1→O2→O1) → allowed; trace uses visited-set; reloc handles back-references (not an error).</li>
+<li><strong>Overlay base hash mismatch</strong> (incremental snapshot&#39;s parent not the expected base) → <code>LoadError::BaseMismatch</code>, refuse to apply delta (<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#sec-7">§7</a>).</li>
+<li><strong>Logical clock in snapshot &lt; host wall clock on restore</strong> → clamp logical_clock up, log <code>time_regression</code> is <em>not</em> triggered (logical, not wall) — wall-clock reads go through resource policy (<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-9">I9</a>).</li>
+</ul>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Consistency requires a safe point.</strong> Capture only at a stop-the-world point where every thread is quiesced at a poll and no object is half-mutated. <em>Tradeoff:</em> pause time. <em>Operational:</em> pause is an SLO (≤ 10 ms). <em>Violation:</em> a snapshot mid-<code>push</code> or mid-object-write restores a corrupt heap/stack.</li><li id="p-2"><strong>Position independence (relocation, not addresses).</strong> The heap image stores <strong>offsets</strong>, never live pointers; restore relocates offsets→pointers at the new base. <em>Violation:</em> a snapshot only restorable at the exact same virtual address — useless across processes/ASLR.</li><li id="p-3"><strong>No raw external handles in the heap.</strong> Every fd/socket/timer/RNG/clock access goes through a <code>ResourceHandle</code> id + the manifest. <em>Violation:</em> a serialized fd number is meaningless on restore → use-after-free of a kernel resource.</li><li id="p-4"><strong>Determinism.</strong> Same VM state + same epoch ⇒ byte-identical snapshot (stable iteration order, no addresses, no timestamps in the image body). <em>Violation:</em> non-reproducible snapshots; impossible to diff/dedup; breaks #344 replay.</li><li id="p-5"><strong>The loader is an attacker.</strong> Every <code>.svm</code> is untrusted: validate magic/version/section table/CRC/content-hash/relocation bounds <em>before</em> dereferencing anything. <em>Violation:</em> a crafted snapshot becomes arbitrary memory corruption on restore (the project&#39;s #1 CVE class).</li><li id="p-6"><strong>Restore ≡ capture (semantic equivalence).</strong> A restored VM must continue indistinguishably from the captured one (same heap graph, stacks, PC, logical time). Verified differentially (<a class="cite" href="/system-design-blueprints/systems/snapshotting-vm-runtime/reliability/#inv-1">I1</a>). <em>Violation:</em> silent divergence — the worst bug, because it looks like it worked.</li><li id="p-7"><strong>Self-describing, versioned format.</strong> Every snapshot carries its format version, section table, and manifest; loaders refuse unknown majors and migrate compatible minors. <em>Violation:</em> an unreadable snapshot after a runtime upgrade.</li><li id="p-8"><strong>Incremental by dirty pages, not full rewrites.</strong> Steady-state snapshots store only changed pages over a base (COW + delta chain). <em>Tradeoff:</em> chain length vs restore cost (periodic compaction). <em>Violation:</em> O(heap) cost per checkpoint kills time-travel/frequent checkpoints.</li><li id="p-9"><strong>Monotonic logical time.</strong> A logical clock (and seeded RNG state) is captured and restored so time never goes backward across restore and replays deterministically. <em>Violation:</em> timers fire twice / negative durations / non-deterministic restore.</li><li id="p-10"><strong>Capture is read-only on the frozen world; restore writes once.</strong> Capture never mutates VM state (so it can be retried/aborted); restore builds the VM atomically then flips to running. <em>Violation:</em> a failed capture that left the heap modified can&#39;t be resumed.</li><li id="p-11"><strong>GC and snapshot share the root set + object model.</strong> The collector&#39;s roots/headers/forwarding fields are exactly what the serializer traces. One object model, not two. <em>Violation:</em> the snapshot misses an object the GC keeps (or vice versa) → dangling refs.</li><li id="p-12"><strong>Validate the graph, not just the bytes.</strong> Beyond CRC/hash: every relocated offset must point within the heap image to a valid object header of the declared type; cycles allowed, dangling forbidden. <em>Violation:</em> a structurally-valid-but-graph-invalid snapshot crashes later, far from the load.</li><li id="p-13"><strong>Streaming, bounded memory.</strong> Capture streams sections to the writer; restore can <code>mmap</code> + lazily page/relocate. Never require a full second heap copy. <em>Violation:</em> OOM snapshotting a heap that barely fit.</li><li id="p-14"><strong>Stable, SemVer&#39;d snapshot + VM API.</strong> The <code>.svm</code> format and the <code>Value</code>/<code>Obj</code>/<code>Frame</code> schema are versioned; #344 and tooling depend on them. <em>Violation:</em> every release orphans old snapshots and breaks consumers.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

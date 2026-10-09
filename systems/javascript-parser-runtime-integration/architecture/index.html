@@ -1,0 +1,536 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>JavaScript Parser + Runtime Integration — Architecture · Engineering Blueprints</title><meta name="description" content="JavaScript Parser + Runtime Integration, hld: §3 overview + §8 domain model. Build a from-scratch, ECMAScript-2023 front-end + runtime-integration layer in Rust: a Unicode-correct lexer, a recursive-descent + Pratt parser emitting an immutable ESTree AST with byte Spans, full…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/web-browsers-collaboration/">Web, Browsers &amp; Collaboration</a> </li><li> <a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/">JavaScript Parser + Runtime Integration</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:255"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/web-browsers-collaboration/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Web, Browsers &amp; Collaboration</span></a> </p> <h1>JavaScript Parser + Runtime Integration</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~14 weeks</li> <li>2,580 lines</li> <li>blueprint #259</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/javascript-parser-runtime-integration/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:JavaScript Parser + Runtime Integration — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 System Diagram</h3>
+<pre class="diagram"><code>                 ┌──────────────────────────────────────────────────────┐
+                 │  Host engine (project 126) / embedder                 │
+                 │  parse_script · parse_module · link · evaluate         │
+                 └──────────────────────────────────────────────────────┘
+                                         │  intrinsics hook · ModuleLoader impl
+                                         v
+   ╔═════════════════════════════════════════════════════════════════════╗
+   ║ js-runtime : ScriptRecord/ModuleRecord · Realm · EnvironmentRecord  ║
+   ║             · ModuleLoader · Evaluator bridge · Completion           ║
+   ╚═════════════════════════════════════════════════════════════════════╝
+        ^ ScopeTree (static semantics)            ^ Program (ESTree AST)
+        │                                          │
+   ┌──────────────────────────┐   ┌───────────────────────────────────┐
+   │ js-semantics             │   │ js-parser : grammar -&gt; ESTree      │
+   │   Scope/Binding/hoisting │   │   cover grammars · ASI            │
+   └──────────────────────────┘   └───────────────────────────────────┘
+                                                   │  LexGoal feedback
+                                                   v  tokens
+                          ┌──────────────────────────────────────────┐
+                          │ js-ast : Program/Expr/Stmt + Span + Visit  │
+                          └──────────────────────────────────────────┘
+                          ┌──────────────────────────────────────────┐
+                          │ js-lexer : Token stream (LexGoal, CowStr) │
+                          └──────────────────────────────────────────┘
+
+   DATA FLOW:  source:&amp;str ──lex──▶ Token&lt;&#39;s&gt; ──parse──▶ Program ──analyze──▶ ScopeTree
+               ──instantiate──▶ ScriptRecord/ModuleRecord ──link──▶ linked Records
+               ──evaluate──▶ Completion  (Evaluator supplied by 126)
+
+   TRUST BOUNDARY: everything below host = UNTRUSTED source; core crates no_std + safe Rust
+   CONCURRENCY: single-threaded parse; Program + ScopeTree IMMUTABLE =&gt; Send + Sync after parse
+   PERSISTENCE: none; records are pure values; ModuleLoader is the only I/O surface</code></pre>
+<h3 id="sec-3-2">3.2 Component Responsibilities</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Box</th>
+<th>In → Out</th>
+<th>Key invariant</th>
+<th>Built in</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>js-lexer</strong></td>
+<td><code>&amp;str</code> → <code>Token&lt;&#39;s&gt;</code></td>
+<td>goal-directed; CowStr borrows source</td>
+<td>P1</td>
+</tr>
+<tr>
+<td><strong>js-ast</strong></td>
+<td>ctor calls → <code>Program</code></td>
+<td>ESTree-compatible; immutable; <code>Span</code> = byte offsets</td>
+<td>P0</td>
+</tr>
+<tr>
+<td><strong>js-parser</strong></td>
+<td>tokens → <code>Program</code></td>
+<td>cover grammars reinterpreted not re-parsed; ASI per spec</td>
+<td>P2–P7</td>
+</tr>
+<tr>
+<td><strong>js-semantics</strong></td>
+<td><code>&amp;Program</code> → <code>ScopeTree</code></td>
+<td>one <code>Binding</code> per decl; hoist + TDZ exact</td>
+<td>P8</td>
+</tr>
+<tr>
+<td><strong>js-runtime</strong></td>
+<td><code>Program</code>+<code>ScopeTree</code> → Records</td>
+<td>3-phase; live bindings; Evaluator is a trait</td>
+<td>P9–P11</td>
+</tr>
+<tr>
+<td><strong>ModuleLoader</strong></td>
+<td>specifier+referrer → <code>ModuleRecord</code></td>
+<td>host-owned; only I/O surface</td>
+<td>P10</td>
+</tr>
+<tr>
+<td><strong>js-cli</strong></td>
+<td>argv → stdout/exit</td>
+<td>thin shell; only <code>std</code> member</td>
+<td>P0, all</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — ECMAScript Grammar, AST &amp; Records</h2>
+<h3 id="sec-8-1">8.1 Token model (<code>js-lexer</code>)</h3>
+<p><code>Token&lt;&#39;s&gt;</code> variants (LOCKED): <code>Ident · PrivateName · Keyword · Punctuator · NumericLiteral · BigIntLiteral · StringLiteral · TemplatePart · RegExpLiteral · LineTerminatorBefore · Comment · Eof</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Mechanism</th>
+<th>Note</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>/</code> disambiguation</td>
+<td><code>LexGoal{Div,RegExp,TemplateTail}</code> set by parser</td>
+<td>classic JS bug if mis-set (P6)</td>
+</tr>
+<tr>
+<td>template</td>
+<td>head/middle/tail; <code>template_brace_stack</code> tracks nesting</td>
+<td><code>TemplatePart{cooked,raw,head,tail}</code></td>
+</tr>
+<tr>
+<td>ASI signal</td>
+<td><code>had_line_terminator</code> flag</td>
+<td>parser consumes; never a syntactic token</td>
+</tr>
+<tr>
+<td>cooked vs raw</td>
+<td><code>CowStr</code> = borrowed slice, owned only on escape</td>
+<td><code>raw</code> kept for tagged-template <code>.raw</code></td>
+</tr>
+<tr>
+<td>numerics</td>
+<td><code>f64</code> value + <code>&amp;str raw</code>; <code>BigIntLiteral</code> keeps text</td>
+<td>legacy octal <code>0NNN</code> = strict early error</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Grammar (EBNF, ES2023 — abridged, load-bearing productions)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>Script        ::= StatementList?
+Module        ::= ModuleItemList?
+ModuleItem    ::= ImportDeclaration | ExportDeclaration | StatementListItem
+
+Statement     ::= Block | VariableStatement | EmptyStatement | ExpressionStatement
+                | IfStatement | BreakableStatement | ReturnStatement | ThrowStatement
+                | TryStatement | LabelledStatement | WithStatement | DebuggerStatement
+IterationStatement ::= &quot;do&quot; Statement &quot;while&quot; &quot;(&quot; Expression &quot;)&quot; &quot;;&quot;
+                | &quot;while&quot; &quot;(&quot; Expression &quot;)&quot; Statement
+                | &quot;for&quot; &quot;(&quot; ForHeader &quot;)&quot; Statement
+ForHeader     ::= Expression? &quot;;&quot; Expression? &quot;;&quot; Expression?
+                | ((&quot;var&quot;|LexicalKw) ForBinding | LeftHandSide) (&quot;in&quot;|&quot;of&quot;) Expression
+LexicalDeclaration ::= (&quot;let&quot;|&quot;const&quot;) BindingList &quot;;&quot;</code></pre>
+<pre class="code language-ebnf" data-lang="ebnf"><code>Expression    ::= AssignmentExpression (&quot;,&quot; AssignmentExpression)*
+AssignmentExpression ::= ConditionalExpression | ArrowFunction | YieldExpression
+                | LeftHandSide AssignmentOperator AssignmentExpression
+ShortCircuitExpression ::= LogicalORExpression | CoalesceExpression
+CoalesceExpression ::= CoalesceExpr &quot;??&quot; BitwiseORExpression  (* ?? NOT mixable w/ &amp;&amp;,|| *)
+UnaryExpression ::= (&quot;delete&quot;|&quot;void&quot;|&quot;typeof&quot;|&quot;+&quot;|&quot;-&quot;|&quot;~&quot;|&quot;!&quot;|&quot;await&quot;) UnaryExpression
+                | UpdateExpression
+LeftHandSide  ::= NewExpression | CallExpression | OptionalExpression
+OptionalExpression ::= (MemberExpr|CallExpr) OptionalChain  (* ?. *)</code></pre>
+<pre class="code language-ebnf" data-lang="ebnf"><code>ArrowFunction ::= ArrowParameters [no LT] &quot;=&gt;&quot; ConciseBody
+CoverParenthesizedExpressionAndArrowParameterList ::=
+      &quot;(&quot; Expression? &quot;)&quot; | &quot;(&quot; Expression &quot;,&quot; &quot;)&quot; | &quot;(&quot; &quot;)&quot; | &quot;(&quot; &quot;...&quot; BindingElement &quot;)&quot;
+    | &quot;(&quot; Expression &quot;,&quot; &quot;...&quot; BindingElement &quot;)&quot;
+
+ImportDeclaration ::= &quot;import&quot; ImportClause FromClause &quot;;&quot; | &quot;import&quot; ModuleSpecifier &quot;;&quot;
+ImportClause  ::= ImportedDefaultBinding (&quot;,&quot; (NameSpaceImport | NamedImports))?
+ExportDeclaration ::= &quot;export&quot; ExportFromClause FromClause &quot;;&quot;
+                | &quot;export&quot; NamedExports &quot;;&quot; | &quot;export&quot; VariableStatement
+                | &quot;export&quot; Declaration | &quot;export&quot; &quot;default&quot; (HoistableDecl|ClassDecl|AssignExpr &quot;;&quot;)</code></pre>
+<h3 id="sec-8-3">8.3 Production → AST mapping (<code>js-ast</code>, ESTree-compatible)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Production</th>
+<th>AST node</th>
+<th>ESTree <code>type</code></th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>IdentifierReference</code></td>
+<td><code>Expr::Ident(Ident)</code></td>
+<td><code>Identifier</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>a + b</code>, <code>instanceof</code></td>
+<td><code>Expr::Binary</code></td>
+<td><code>BinaryExpression</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>a &amp;&amp; b</code>, <code>a ?? b</code></td>
+<td><code>Expr::Logical</code></td>
+<td><code>LogicalExpression</code></td>
+<td><code>&quot;??&quot;</code> not mixable</td>
+</tr>
+<tr>
+<td><code>a = b</code>, <code>a += b</code></td>
+<td><code>Expr::Assign</code></td>
+<td><code>AssignmentExpression</code></td>
+<td>LHS refined to <code>Pattern</code> if <code>=</code></td>
+</tr>
+<tr>
+<td><code>a.b</code>, <code>a[b]</code>, <code>a.#p</code></td>
+<td><code>Expr::Member(MemberExpr)</code></td>
+<td><code>MemberExpression</code></td>
+<td><code>#p</code>→<code>PrivateIdentifier</code></td>
+</tr>
+<tr>
+<td><code>a?.b</code>, <code>a?.()</code></td>
+<td><code>Expr::OptionalChain</code></td>
+<td><code>ChainExpression</code></td>
+<td><code>optional:true</code></td>
+</tr>
+<tr>
+<td><code>(a,b)=&gt;e</code></td>
+<td><code>Expr::Arrow(ArrowFn)</code></td>
+<td><code>ArrowFunctionExpression</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>tag`...`</code></td>
+<td><code>Expr::TaggedTemplate</code></td>
+<td><code>TaggedTemplateExpression</code></td>
+<td><code>cooked/raw</code></td>
+</tr>
+<tr>
+<td><code>[a,...r]=x</code></td>
+<td><code>Pattern::Array(ArrayPat)</code></td>
+<td><code>ArrayPattern</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>var/let/const</code></td>
+<td><code>Decl::Var(VarDecl)</code></td>
+<td><code>VariableDeclaration</code></td>
+<td>`kind:&quot;var&quot;</td>
+</tr>
+<tr>
+<td><code>import …</code></td>
+<td><code>ModuleItem::Import(ImportDecl)</code></td>
+<td><code>ImportDeclaration</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>export …</code></td>
+<td><code>ModuleItem::ExportNamed/Default/All</code></td>
+<td><code>Export*Declaration</code></td>
+<td></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-4">8.4 ASI decision table (P6)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Trigger</th>
+<th>Inserts?</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>offending token preceded by ≥1 LineTerminator</td>
+<td>yes</td>
+<td><code>a=1\nb=2</code> → <code>a=1; b=2;</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>offending token = <code>}</code></td>
+<td>yes</td>
+<td><code>{1\n2}</code> → <code>{1;2;}</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>end of input, incomplete production</td>
+<td>yes</td>
+<td><code>x=1</code> (EOF) → <code>x=1;</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>restricted production w/ LT present</td>
+<td>yes</td>
+<td><code>return\nx</code> → <code>return; x;</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>postfix <code>++</code>/<code>--</code> with LT before operator</td>
+<td>yes</td>
+<td><code>a\n++b</code> → <code>a; ++b;</code></td>
+</tr>
+<tr>
+<td>6</td>
+<td>inside <code>for( ; ; )</code> header</td>
+<td><strong>no</strong></td>
+<td>syntax error</td>
+</tr>
+<tr>
+<td>7</td>
+<td>token is grammatically valid on next line</td>
+<td><strong>no</strong></td>
+<td><code>a\n.b</code> → <code>a.b</code></td>
+</tr>
+</tbody></table></div>
+<p>Restricted productions (LOCKED): <code>return</code>, <code>throw</code>, <code>break</code>, <code>continue</code>, postfix <code>++</code>/<code>--</code>, arrow <code>=&gt;</code> params, <code>yield</code>.</p>
+<h3 id="sec-8-5">8.5 Worked example A — <code>const f = (a, b) =&gt; a ?? b;</code></h3>
+<p>Lex (Script): <code>Keyword(const) Ident(f) Punct(=) Punct(() Ident(a) Punct(,) Ident(b) Punct()) Punct(=&gt;) Ident(a) Punct(??) Ident(b) Punct(;) Eof</code></p>
+<p>Cover→refine: <code>(a, b)</code> parsed as <code>CoverParenthesizedExpressionAndArrowParameterList</code>; on <code>=&gt;</code> [no LT] <strong>reinterpreted</strong> as <code>ArrowParameters</code> (single-pass refine, not re-parse).</p>
+<p>Scopes: <code>Scope#0 Global [f: Const, tdz→false@init] · Scope#1 Function(arrow) [a: Param, b: Param]</code></p>
+<p><code>f</code> TDZ until const initializer; <code>??</code> is <code>LogicalExpression</code>, not mixable with <code>&amp;&amp;</code>/<code>||</code>.</p>
+<h3 id="sec-8-6">8.6 Worked example B — cyclic module pair (live binding)</h3>
+<p>Parse: <code>a.js</code>, <code>b.js</code> → <code>SourceTextModuleRecord{status:Unlinked}</code> each.</p>
+<p>Link (DFS, Unlinked→Linking→Linked): <code>ResolveExport(a,&quot;a&quot;)</code>, <code>ResolveExport(b,&quot;b&quot;)</code> → resolved; <code>b</code> in <code>a.js</code> → indirect (LIVE) slot → <code>b.js</code>&#39;s <code>ModuleEnv</code>.</p>
+<p>Evaluate: post-order, cyclic-safe via status guard; <code>a=1</code> first, <code>b=a+1=2</code>; <code>getB()</code> reads live binding.</p>
+<h3 id="sec-8-7">8.7 <code>link</code> sequence — ModuleDeclarationInstantiation (P10)</h3>
+<pre class="diagram"><code>Host ──link(root, loader)──► js-runtime
+  InnerModuleLinking(root, stack, idx=0)
+     status: Unlinked → Linking
+     for spec in requested_modules:
+        loader.resolve(spec, referrer) ─► ModuleRecord (memoized)
+        InnerModuleLinking(dep, …)     (DFS; cycle? skip if ≥Linking)
+     InitializeEnvironment:
+        new Module EnvironmentRecord
+        for ie in import_entries:
+           ResolveExport(target, ie.name) ─► ResolveSet
+              ├ ambiguous  ─► LinkError::Ambiguous
+              ├ not-found  ─► LinkError::NotFound
+              └ {mod,bind} ─► create indirect (live) binding
+        declare local_export_entries + hoisted fns
+     status: Linking → Linked   (whole SCC together)
+  ◄ Ok(()) | Err(LinkError)</code></pre>
+<h3 id="sec-8-8">8.8 Early-error catalog (P7/P8)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Phase caught</th>
+<th>Error kind</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>return 1;</code> at top level</td>
+<td>parse</td>
+<td><code>IllegalReturn</code></td>
+<td>return only inside function</td>
+</tr>
+<tr>
+<td><code>function f(a,a){&quot;use strict&quot;}</code></td>
+<td>early-error</td>
+<td><code>DuplicateParam</code></td>
+<td>dup params forbidden strict</td>
+</tr>
+<tr>
+<td><code>let let = 1</code></td>
+<td>early-error</td>
+<td><code>EarlyError</code></td>
+<td><code>let</code> not valid lexical name</td>
+</tr>
+<tr>
+<td><code>1 = 2</code></td>
+<td>parse</td>
+<td><code>InvalidAssignmentTarget</code></td>
+<td>LHS not valid Reference</td>
+</tr>
+<tr>
+<td><code>export {x} from &quot;a&quot;; export {x} from &quot;b&quot;</code></td>
+<td>link</td>
+<td><code>LinkError::Ambiguous</code></td>
+<td><code>ResolveSet</code> size &gt; 1</td>
+</tr>
+<tr>
+<td><code>with(o){}</code> in module/strict</td>
+<td>early-error</td>
+<td><code>EarlyError</code></td>
+<td>strict mode</td>
+</tr>
+<tr>
+<td><code>01</code> octal literal in strict</td>
+<td>lex</td>
+<td><code>InvalidNumber</code></td>
+<td>legacy octal forbidden</td>
+</tr>
+<tr>
+<td><code>var x; let x;</code> same scope</td>
+<td>early-error</td>
+<td><code>EarlyError</code></td>
+<td>LexicallyDeclaredNames ∩ VarDeclaredNames ≠ ∅</td>
+</tr>
+<tr>
+<td>`a ?? b</td>
+<td></td>
+<td>c`</td>
+<td>parse</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

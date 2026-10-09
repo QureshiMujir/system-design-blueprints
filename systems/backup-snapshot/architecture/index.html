@@ -1,0 +1,316 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Backup / Snapshot System — Architecture · Engineering Blueprints</title><meta name="description" content="Backup / Snapshot System, hld: §3 overview + §8 domain model. Build a content-addressed, encrypted, incremental backup and snapshot system in the BorgBackup / restic / Kopia / Tarsnap / duplicity / rdiff-backup lineage, layered on the snapshot lineage of ZFS…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/backup-snapshot/">Backup / Snapshot System</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Backup / Snapshot System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~8 weeks</li> <li>1,833 lines</li> <li>blueprint #111</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/backup-snapshot/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/backup-snapshot/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/backup-snapshot/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/backup-snapshot/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/backup-snapshot/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/backup-snapshot/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/backup-snapshot/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/backup-snapshot/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/backup-snapshot/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/backup-snapshot/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Backup / Snapshot System — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                                  source tree
+                                       |
+                          +------------v------------+
+                          |    snapshot driver      |  (1)
+                          |  (CoW / freeze-pause)   |
+                          +------------+------------+
+                                       v  consistent view
+                          +------------v------------+
+                          |        walker           |  (2)
+                          |  (POSIX metadata pass)  |
+                          +------------+------------+
+                                       v  file stream
+                          +------------v------------+
+                          |    chunker (rank 109)   |  (3)
+                          | FastCDC + BLAKE3 chunks |
+                          +------------+------------+
+                                       v  { id, plaintext }
+                          +------------v------------+
+                          |       AEAD layer        |  (4)
+                          |  XChaCha20-Poly1305     |
+                          |  per-chunk derived key  |
+                          +------------+------------+
+                                       v  { id, ciphertext }
+                          +------------v------------+
+                          |   repository backend    |  (5)
+                          | local / S3 / SFTP / REST|
+                          +------------+------------+
+                                       v
+            manifest { id, parent, root, key_version, signature }  (6)
+                                       |
+                          +------------v------------+
+                          | retention+GC+verify+    |  (7)
+                          |   restore + prune       |
+                          +-------------------------+</code></pre>
+<p><strong>(1) Snapshot driver.</strong> Captures a consistent point-in-time view via copy-on-write where available (Btrfs <code>BTRFS_IOC_SNAP_CREATE_V2</code>, <code>zfs snapshot</code>, LVM <code>lvcreate -s</code>) and via <code>FIFREEZE</code>/<code>FITHAW</code> or application-coordinated quiesce where not. The backup never reads the live tree directly; this is what makes it work against running databases.</p>
+<p><strong>(2) Walker.</strong> Traverses the snapshot mount, emitting POSIX metadata (mode, owner, mtime, xattrs, ACLs, hard-link identity) per entry. Lazy iterator; one entry per <code>next()</code>.</p>
+<p><strong>(3) Chunker.</strong> Delegates to rank 109&#39;s FastCDC + BLAKE3 engine. A chunk is named by the BLAKE3 hash of its plaintext — content addressing is the durability story, not redundancy. A chunk read back is <em>required</em> to hash to its name; bit rot is detected at read time, never trusted at scrub time.</p>
+<p><strong>(4) AEAD layer.</strong> Encryption is per-chunk with a derived key. A per-chunk key is HKDF-derived from the master key and chunk id; the nonce is HKDF-derived from chunk id and a per-backup epoch. Nonce reuse — the single most dangerous failure of GCM/ChaCha20-Poly1305 — is impossible by construction, not by hygiene.</p>
+<p><strong>(5) Repository backend.</strong> Pluggable with a small surface: <code>put</code>, <code>put_if_match</code>, <code>get</code>, <code>head</code>, <code>list</code>, <code>delete</code>, content-typed keys (<code>chunks/&lt;hash&gt;</code>, <code>manifests/&lt;hash&gt;</code>, <code>keys/&lt;version&gt;</code>), optimistic concurrency via etag. Local disk, S3 (rank 107), SFTP, and a REST blob server all implement the same trait.</p>
+<p><strong>(6) Manifest.</strong> The only mutable object. A signed Merkle-tree commit object naming the chunks of a backup; its id is the BLAKE3 of its body. Chunks are content-addressed, append-only, never overwritten. Restore, verify, retention, and GC all operate on the manifest set; they never modify chunks.</p>
+<p><strong>(7) Retention / GC / verify / restore / prune.</strong> Retention is a pure function from <code>[Manifest]</code> to the kept set. GC is mark-sweep over the chunk set against the retained-manifest live closure. Verify is end-to-end (fetch, decrypt, re-hash, check signature). Restore is the inverse of backup. Prune is retention + GC.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Data Model</h2>
+<p>The system&#39;s domain is a small set of immutable, content-addressed objects plus exactly one mutable pointer class.</p>
+<p><strong>Object kinds</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Object</th>
+<th>Address</th>
+<th>Mutable?</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Chunk</td>
+<td><code>chunks/&lt;aa&gt;/&lt;rest&gt;</code> (hex of BLAKE3(plaintext))</td>
+<td>append-only</td>
+<td>XChaCha20-Poly1305(plaintext) ‖ tag</td>
+</tr>
+<tr>
+<td>TreeNode</td>
+<td><code>manifests/trees/&lt;id&gt;</code> (BLAKE3(body))</td>
+<td>append-only</td>
+<td>prost-encoded File/Directory/Symlink/Other node</td>
+</tr>
+<tr>
+<td>Manifest</td>
+<td><code>manifests/&lt;id&gt;</code> (BLAKE3(body))</td>
+<td>append-only</td>
+<td>prost body ‖ Ed25519 signature</td>
+</tr>
+<tr>
+<td>Head pointer</td>
+<td><code>heads/&lt;source-root-hash&gt;</code></td>
+<td>mutable (etag CAS)</td>
+<td>latest manifest id for a source</td>
+</tr>
+<tr>
+<td>Key version</td>
+<td><code>keys/&lt;version&gt;/...</code></td>
+<td>append-only</td>
+<td>salt, params, sign_pk, aead, optional sealed master</td>
+</tr>
+<tr>
+<td>Chunk index</td>
+<td><code>indexes/&lt;repo-id&gt;/&lt;ts&gt;</code></td>
+<td>append-only</td>
+<td>serialized <code>HashSet&lt;ChunkRef&gt;</code></td>
+</tr>
+<tr>
+<td>Lock</td>
+<td><code>locks/repo.lock</code>, <code>locks/gc.lock</code></td>
+<td>mutable (etag CAS)</td>
+<td>holder, acquired, ttl, purpose</td>
+</tr>
+</tbody></table></div>
+<p><strong>Worked example.</strong> Source tree <code>/data</code> = <code>a.txt</code> (1 KB), <code>bin/b.dat</code> (10 KB), <code>big.rnd</code> (1 MB). Backup 1: FastCDC produces chunks <code>C1</code> (a.txt), <code>C2</code> (b.dat), <code>C3..C6</code> (big.rnd). Each chunk plaintext is BLAKE3-hashed → chunk_ref, encrypted, PUT. TreeNodes: <code>T_file(a.txt)</code>, <code>T_file(b.dat)</code>, <code>T_file(big.rnd)</code>, <code>T_dir(bin)</code>, <code>T_dir(/data root)</code>. Manifest <code>M1.root = id(T_dir(/data))</code>, <code>M1.parent = None</code>, signed. <code>heads/hash(/data) = M1.id</code>. Now append 100 bytes to <code>a.txt</code>. Backup 2: only <code>a.txt</code>&#39;s chunk changes → new <code>C1&#39;</code>; <code>C2..C6</code> already in the index → skipped. New TreeNodes for the changed path only; <code>M2.parent = M1.id</code>; <code>heads/...</code> CAS from <a class="cite" href="/system-design-blueprints/systems/backup-snapshot/numbers/#m-1">M1</a> to <a class="cite" href="/system-design-blueprints/systems/backup-snapshot/numbers/#m-2">M2</a>. Stored delta ≈ one chunk, not the whole tree.</p>
+<p><strong>State table (backup lifecycle):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Event</th>
+<th>Next state</th>
+<th>Side effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Idle</td>
+<td><code>backup</code> invoked</td>
+<td>Snapshotting</td>
+<td>acquire repo lock</td>
+</tr>
+<tr>
+<td>Snapshotting</td>
+<td>snapshot ok</td>
+<td>Walking</td>
+<td>mount snapshot</td>
+</tr>
+<tr>
+<td>Snapshotting</td>
+<td>driver error</td>
+<td>Failed</td>
+<td>release lock, journal BackupFailed</td>
+</tr>
+<tr>
+<td>Walking</td>
+<td>per-chunk new</td>
+<td>Uploading</td>
+<td>seal + PUT, index insert</td>
+</tr>
+<tr>
+<td>Walking</td>
+<td>per-chunk dedup</td>
+<td>Walking</td>
+<td>dedup counter++</td>
+</tr>
+<tr>
+<td>Uploading</td>
+<td>all files done</td>
+<td>Committing</td>
+<td>build + sign manifest</td>
+</tr>
+<tr>
+<td>Committing</td>
+<td>head CAS ok</td>
+<td>Done</td>
+<td>release snapshot + lock, journal complete</td>
+</tr>
+<tr>
+<td>Committing</td>
+<td>head CAS fail</td>
+<td>Walking</td>
+<td>reload head, relink parent, retry</td>
+</tr>
+<tr>
+<td>any</td>
+<td>kill -9</td>
+<td>Crashed</td>
+<td>journal replayable; head untouched (<a class="cite" href="/system-design-blueprints/systems/backup-snapshot/reliability/#inv-11">I11</a>)</td>
+</tr>
+</tbody></table></div>
+<p><strong>Malformed input.</strong> A manifest whose <code>id != BLAKE3(body)</code> (<a class="cite" href="/system-design-blueprints/systems/backup-snapshot/reliability/#inv-4">I4</a>), whose signature fails (<a class="cite" href="/system-design-blueprints/systems/backup-snapshot/reliability/#inv-3">I3</a>), or whose prost body fails to decode is rejected at load with <code>MANIFEST_INVALID</code>. A chunk whose decrypted plaintext does not hash to its key name (<a class="cite" href="/system-design-blueprints/systems/backup-snapshot/reliability/#inv-1">I1</a>) raises <code>CHUNK_HASH_MISMATCH</code>. A truncated chunk (ciphertext shorter than the AEAD tag) raises <code>CHUNK_TRUNCATED</code>. An unknown <code>aead</code> enum value raises <code>AEAD_UNSUPPORTED</code>. A <code>layout_version</code> greater than the binary understands raises <code>LAYOUT_TOO_NEW</code> and refuses to operate.</p>
+<p><strong>Failure path.</strong> Mid-upload repo disconnect → transient error → journal retained → <code>bks resume</code> replays from last <code>ChunkUploaded</code>; already-present chunks are no-ops (content-addressed). Tag failure on open → <code>CHUNK_CORRUPT(chunk_ref, manifest_id)</code> surfaced, restore continues to surface all gaps rather than aborting on the first.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

@@ -1,0 +1,513 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Virtual Memory + Paging Subsystem · Engineering Blueprints</title><meta name="description" content="Virtual Memory + Paging Subsystem, plain words. Build a virtual-memory and paging subsystem — the kernel-level component that translates virtual to physical addresses, manages multi-level page tables, drives the page-fault path (demand paging…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <span aria-current="page">Virtual Memory + Paging Subsystem</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Virtual Memory + Paging Subsystem</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux+qemu</li> <li>13 phases</li> <li>~37 weeks</li> <li>2,768 lines</li> <li>blueprint #148</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/virtual-memory/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/virtual-memory/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/virtual-memory/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/virtual-memory/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/virtual-memory/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/virtual-memory/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/virtual-memory/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/virtual-memory/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/virtual-memory/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/virtual-memory/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Virtual Memory + Paging Subsystem">  <p class="note warn">
+The <strong>plain-words page for this system has not been written yet</strong>. Below is the architecture overview taken
+        straight from the blueprint; the other tabs are generated from the blueprint too.
+</p> <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                    user syscall / hardware trap (mmap, munmap, mprotect,
+                    fork, exec, page fault)
+                              │
+                              ▼
+                 ┌────────────────────────┐
+                 │   VMA Manager (§15)    │  rbtree by VirtAddr; find/insert/
+                 │   per-process MmStruct │  split/merge; immutable VMAs (P2)
+                 └───────────┬────────────┘
+                              │ VMA + fault addr
+                              ▼
+                 ┌────────────────────────┐
+                 │ Fault Dispatcher (§17) │  classify: anon / file / COW /
+                 │                        │  swap-in / stack-grow / invalid
+                 └───┬─────────┬─────┬────┘
+                     │         │     │
+        ┌────────────▼──┐ ┌────▼───┐ ▼──────────────┐
+        │ Page Tables    │ │ Buddy  │ │  TLB Manager  │
+        │ Walker+Mapper  │ │ Alloc  │ │  (§19)        │
+        │ (§14, per-arch)│ │ (§16)  │ │  pending set, │
+        │ pure walk(); PTE│ │ magaz. │ │  batched IPI  │
+        └───────┬────────┘ └───┬────┘ └───────────────┘
+                 │              │
+                 ▼              ▼
+        ┌─────────────────────────────┐
+        │ Replacement Queues (§20)    │  active/inactive LRU, clock sweep
+        └──────────────┬──────────────┘
+                        │ eviction candidate
+           ┌────────────┴─────────────┐
+           ▼                          ▼
+   ┌───────────────┐          ┌───────────────────┐
+   │ Swap (§21)    │          │ Page Cache (§22)   │  radix tree by
+   │ zswap + disk  │          │ (inode, offset);   │
+   │ tiering       │          │ writeback queue    │
+   └───────────────┘          └────────────────────┘
+
+   ┌──────────────────────┐     ┌───────────────────────────┐
+   │ Huge Pages / NUMA(§23)│     │ Security Layer (§24)      │
+   │ THP promote/demote;   │     │ W^X, KASLR, KPTI;         │
+   │ per-node buddy+migrate│     │ Meltdown/Spectre defense  │
+   └──────────────────────┘     └───────────────────────────┘</code></pre>
+<p><strong>VMA Manager</strong> — owns the per-process address-space description; every
+<code>mmap</code>/<code>munmap</code>/<code>mprotect</code> mutates this tree first (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-15">§15</a>). <strong>Fault
+Dispatcher</strong> — the single entry point from a hardware trap; classifies and
+routes (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-17">§17</a>). <strong>Page Tables</strong> — the pure translation function plus the
+mutator that installs/removes mappings, arch-isolated (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-14">§14</a>). <strong>Buddy
+Allocator</strong> — physical page supply, decoupled from policy (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-16">§16</a>, <a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-3">P3</a>). <strong>TLB
+Manager</strong> — the per-CPU coherence protocol between page-table writes and
+cached translations (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-19">§19</a>). <strong>Replacement Queues</strong> — the eviction-candidate
+selection policy, decoupled from allocation (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-20">§20</a>). <strong>Swap</strong> — the two-tier
+backing store for evicted anonymous pages (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-21">§21</a>). <strong>Page Cache</strong> — the
+backing store and dirty-tracking layer for file-backed pages, shared across
+all <code>MmStruct</code>s mapping the same file (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-22">§22</a>). <strong>Huge Pages / NUMA</strong> —
+cross-cutting placement and promotion policy consulted by the fault
+dispatcher and allocator (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-23">§23</a>). <strong>Security Layer</strong> — cross-cutting
+enforcement consulted by the mapper (W^X), the boot sequence (KASLR), and
+the syscall/interrupt entry trampoline (KPTI) (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-24">§24</a>). All later sections stay
+consistent with this diagram; no box here is renamed elsewhere.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Address Translation Model</h3>
+<p>Translation is the pure function <code>walk: (root: PhysAddr, vaddr: VirtAddr) -&gt; Result&lt;PhysAddr, WalkFault&gt;</code> (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-1">P1</a>). A <code>VirtAddr</code> on x86-64 must be in
+canonical form: bits 63–48 equal bit 47 (sign-extended); a non-canonical
+address faults before any table is consulted (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#sec-8-7">§8.7</a>). The hardware MMU caches
+<code>walk</code>&#39;s result in the TLB; <code>vm-tlb</code> never re-derives the result, only
+invalidates it (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#sec-8-3">§8.3</a>).</p>
+<h3 id="sec-8-2">8.2 Multi-Level Page Table Layout</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Level</th>
+<th>x86-64 index bits</th>
+<th>aarch64 4K granule</th>
+<th>aarch64 16K granule</th>
+<th>aarch64 64K granule</th>
+<th>Entry size</th>
+<th>Entries/table</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>L0/PML4</td>
+<td>9 (bits 47–39)</td>
+<td>9 (bits 47–39)</td>
+<td>1 (bit 47)</td>
+<td>— (3-level)</td>
+<td>8 B</td>
+<td>512 / 512 / 2</td>
+</tr>
+<tr>
+<td>L1/PDPT</td>
+<td>9 (bits 38–30)</td>
+<td>9 (bits 38–30)</td>
+<td>11 (bits 46–36)</td>
+<td>13 (bits 42–29)</td>
+<td>8 B</td>
+<td>512 / 512 / 2048 / 8192</td>
+</tr>
+<tr>
+<td>L2/PD</td>
+<td>9 (bits 29–21)</td>
+<td>9 (bits 29–21)</td>
+<td>11 (bits 35–25)</td>
+<td>13 (bits 28–16)</td>
+<td>8 B</td>
+<td>512 / 512 / 2048 / 8192</td>
+</tr>
+<tr>
+<td>L3/PT</td>
+<td>9 (bits 20–12)</td>
+<td>9 (bits 20–12)</td>
+<td>11 (bits 24–14)</td>
+<td>13 (bits 15–3, shared w/ offset)</td>
+<td>8 B</td>
+<td>512 / 512 / 2048 / 8192</td>
+</tr>
+</tbody></table></div>
+<pre class="diagram"><code>VirtAddr (x86-64, 48-bit canonical)
+ 63........48 47....39 38....30 29....21 20....12 11.....0
+[sign-extend][ PML4 idx ][ PDPT idx ][ PD idx ][ PT idx ][ offset ]
+                  │            │          │         │
+                  ▼            ▼          ▼         ▼
+              PML4[i] ──► PDPT[i] ──► PD[i] ──► PT[i] ──► frame + offset</code></pre>
+<p><code>vm-arch-x86_64</code> and <code>vm-arch-aarch64</code> isolate these constants; <code>vm-core</code>
+never branches on architecture (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-9">P9</a>).</p>
+<h3 id="sec-8-3">8.3 TLB Model &amp; Consistency</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Meaning</th>
+<th>Transitions in</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Empty</td>
+<td>no translation cached for this VA range on this CPU</td>
+<td>boot, or after invalidation completes</td>
+</tr>
+<tr>
+<td>Valid</td>
+<td>cached translation matches current PTE</td>
+<td>on hardware walk (TLB fill)</td>
+</tr>
+<tr>
+<td>Stale-Pending</td>
+<td>PTE changed; this CPU&#39;s cache not yet invalidated</td>
+<td>on peer&#39;s page-table write, before shootdown ACK</td>
+</tr>
+<tr>
+<td>Invalidated</td>
+<td>shootdown IPI processed; entry evicted</td>
+<td>on IPI handler completion</td>
+</tr>
+</tbody></table></div>
+<pre class="diagram"><code>Writer CPU               Peer CPU (cached entry)
+   │ 1. write new PTE           │
+   │ 2. record in PendingSet ───┼──► entry: Stale-Pending
+   │ 3. epoch boundary → IPI ───┼──► 4. invlpg/TLBI; ACK
+   │ 5. wait for all ACKs       │
+   │ 6. mark write &quot;visible&quot; ───┴──► entry: Invalidated</code></pre>
+<p><a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#inv-3">I3</a> is exactly step 6 gated on step 5: no consumer of the &quot;write is visible&quot;
+state is allowed to observe it before every peer&#39;s ACK.</p>
+<h3 id="sec-8-4">8.4 Page-Fault Path</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>VMA kind</th>
+<th>Present?</th>
+<th>Access</th>
+<th>Dispatch</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>none (no VMA covers addr)</td>
+<td>—</td>
+<td>any</td>
+<td>SIGSEGV (user) / kernel oops</td>
+</tr>
+<tr>
+<td>Anonymous</td>
+<td>absent</td>
+<td>read/write</td>
+<td>zero-fill allocate, map, return</td>
+</tr>
+<tr>
+<td>FileBacked</td>
+<td>absent</td>
+<td>read/write</td>
+<td>page-cache lookup/read, map, return</td>
+</tr>
+<tr>
+<td>any</td>
+<td>absent, swap PTE</td>
+<td>any</td>
+<td>swap-in (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-21">§21</a>), map, return</td>
+</tr>
+<tr>
+<td>any (COW-marked)</td>
+<td>present, read-only</td>
+<td>write</td>
+<td>allocate, copy, map writable, return</td>
+</tr>
+<tr>
+<td>any</td>
+<td>present</td>
+<td>violates <code>Protection</code></td>
+<td>SIGSEGV (user) / kernel oops</td>
+</tr>
+</tbody></table></div>
+<pre class="diagram"><code>trap → save frame → classify(FaultKind) → find_vma(mm, addr)
+   ├─ no VMA ───────────────────► fatal
+   ├─ protection violated ──────► fatal
+   └─ not present ─┬─ anon ─────► buddy.alloc → map → done
+                   ├─ file ─────► pagecache.lookup/read → map → done
+                   ├─ swap ─────► vm-swap.swap_in → map → done
+                   └─ COW write ► buddy.alloc → copy → map(writable) → done</code></pre>
+<h3 id="sec-8-5">8.5 PTE Bit Semantics</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Bit</th>
+<th>x86-64 name</th>
+<th>aarch64 equivalent</th>
+<th>Semantics</th>
+<th>Set by</th>
+<th>Cleared by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>PRESENT</td>
+<td>Valid</td>
+<td>translation active</td>
+<td>mapper on map()</td>
+<td>mapper on unmap()</td>
+</tr>
+<tr>
+<td>1</td>
+<td>WRITABLE</td>
+<td>AP[2] (inverted)</td>
+<td>write permitted</td>
+<td>mapper per <code>Protection</code></td>
+<td>mprotect / COW mark</td>
+</tr>
+<tr>
+<td>2</td>
+<td>USER</td>
+<td>AP[1]</td>
+<td>ring-3 accessible</td>
+<td>mapper per VMA</td>
+<td>never (VMA-lifetime constant)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>ACCESSED</td>
+<td>AF</td>
+<td>referenced since last clear</td>
+<td>hardware, on any access</td>
+<td>replacement daemon sweep (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-20">§20</a>)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>DIRTY</td>
+<td>(software-tracked on aarch64 pre-DBM)</td>
+<td>written since last clear</td>
+<td>hardware / software fault</td>
+<td>writeback enqueue (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#inv-8">I8</a>)</td>
+</tr>
+<tr>
+<td>7</td>
+<td>HUGE (PS)</td>
+<td>block-vs-table bit</td>
+<td>this entry is a leaf at a higher level</td>
+<td>mapper on THP promote</td>
+<td>THP demote (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-23">§23</a>)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>GLOBAL</td>
+<td>nG (inverted)</td>
+<td>exempt from PCID/ASID flush</td>
+<td>mapper on kernel map</td>
+<td>never (kernel-lifetime constant)</td>
+</tr>
+<tr>
+<td>63</td>
+<td>NX (XD)</td>
+<td>UXN/PXN</td>
+<td>execute forbidden</td>
+<td>mapper (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-6">P6</a>)</td>
+<td>never for a given mapping&#39;s lifetime</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Worked Example: fork() + COW Write Fault</h3>
+<ol>
+<li>Parent process P has one Anonymous VMA <code>[0x1000, 0x2000)</code> mapped
+PRESENT+WRITABLE, frame F, refcount(F)=1.</li>
+<li><code>fork()</code> clones the VMA rbtree (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-18">§18</a>, <a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-2">P2</a>); for each present user PTE,
+clears WRITABLE in both parent&#39;s and child&#39;s PTE; refcount(F) → 2.</li>
+<li>TLB shootdown (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-19">§19</a>) invalidates any cached WRITABLE translation of F on
+every CPU that had it cached (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#inv-3">I3</a>).</li>
+<li>Child writes to <code>0x1000</code>. Hardware raises a <code>Protection { attempted_write: true }</code> fault (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#sec-8-4">§8.4</a> row 5).</li>
+<li><code>vm-fault</code> checks refcount(F): 2 ⇒ slow path. Allocates frame F&#39;, copies
+F→F&#39;, maps F&#39; WRITABLE in the child, decrements refcount(F) → 1 (ADR
+spans: <a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-10">P10</a>).</li>
+<li>Parent&#39;s next write to <code>0x1000</code> faults identically; refcount(F)=1 at that
+point ⇒ <strong>fast path</strong>: re-mark F WRITABLE in place, no copy (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#inv-5">I5</a> satisfied
+without an allocation).</li>
+</ol>
+<h3 id="sec-8-7">8.7 Malformed-Input Handling</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Detection</th>
+<th>Response</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Non-canonical <code>VirtAddr</code> (x86-64 bits 63–48 ≠ sign-extension of bit 47)</td>
+<td><code>VirtAddr::new</code> construction check</td>
+<td><code>Err(AddrError::NonCanonical)</code>, fault classified <code>Reserved</code></td>
+</tr>
+<tr>
+<td><code>PhysAddr</code> above MAXPHYADDR (52 bits)</td>
+<td><code>PhysAddr::new</code> construction check</td>
+<td><code>Err(AddrError::OutOfRange)</code></td>
+</tr>
+<tr>
+<td>VMA insert overlapping an existing VMA</td>
+<td>rbtree insert-time check (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#inv-4">I4</a>)</td>
+<td><code>Err(VmaError::Overlap)</code></td>
+</tr>
+<tr>
+<td>Corrupted swap PTE (slot index beyond allocated range)</td>
+<td><code>vm-swap</code> bounds check on swap-in</td>
+<td>fault escalates to <code>FaultError::KernelOops</code> (never silently zero-fills)</td>
+</tr>
+<tr>
+<td>Unaligned huge-page promotion request (constituent 4K pages not physically contiguous)</td>
+<td>THP promoter&#39;s contiguity scan (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-23">§23</a>)</td>
+<td>promotion aborted, region left at native granularity</td>
+</tr>
+<tr>
+<td><code>free(pfn, order)</code> with <code>pfn</code> not aligned to <code>2^order</code></td>
+<td>buddy debug-build assertion on the XOR-computed buddy</td>
+<td>debug: panic; release: refuse free, log <code>vm_double_free_detected</code>-adjacent counter</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-8">8.8 Failure-Path Example</h3>
+<p>Page-cache writeback races a <code>truncate()</code>: writeback thread samples a dirty
+page&#39;s <code>(inode, offset)</code> at t0; <code>truncate()</code> shrinks the file at t1,
+invalidating that offset&#39;s page-cache entry; writeback&#39;s write-out at t2
+targets a now-invalid region. Detection: the page-cache entry carries a
+generation counter bumped by <code>truncate</code>; writeback re-checks the generation
+immediately before issuing I/O and aborts on mismatch (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-22">§22</a>, <a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#inv-8">I8</a>&#39;s atomic-
+dirty-sample principle extended to generation-checking). Recovery: the
+aborted write is dropped (the page is legitimately gone); no corruption
+because the check-then-act window is closed by the generation compare
+happening under the same lock that <code>truncate</code> takes to invalidate entries.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-1">P1</a> — Page-table walker is pure.</strong> No side effects; deterministic function of <code>(root, vaddr)</code>. Tradeoff: forbids caching state inside the walker itself. Operational implication: any two calls with the same inputs are diffable in a crash dump. Violating it: a stateful walker makes stale-TLB bugs indistinguishable from walker bugs.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-2">P2</a> — VMA is immutable until torn down.</strong> Mutation creates a new VMA and replaces (rbtree swap), never edits in place. Tradeoff: extra allocation per <code>mprotect</code>/<code>split</code>. Operational implication: a VMA pointer captured under a read lock is safe to read after the lock is dropped. Violating it: reintroduces the exact in-place-mutation race this principle exists to remove.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-3">P3</a> — Allocation decoupled from replacement.</strong> The buddy allocator has zero eviction-policy knowledge (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/trade-offs/#adr-24">ADR-24</a>). Tradeoff: replacement must go through an explicit &quot;free candidate&quot; handoff. Operational implication: allocator and replacement policy are independently benchmarkable and independently swappable. Violating it: couples the fastest-path code (alloc/free) to the most-complex-to-change code (policy).</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-4">P4</a> — Per-CPU fast paths before global locks.</strong> Magazines (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-16">§16</a>), lazy TLB (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-19">§19</a>), per-CPU pending sets. Tradeoff: memory overhead of N per-CPU structures. Operational implication: contention metrics are per-CPU, not global. Violating it: a single global lock on the hot allocation path caps throughput at one CPU&#39;s worth of work.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-5">P5</a> — TLB shootdowns batched at epoch boundaries.</strong> One IPI per epoch, not per modification (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/build/#sec-19">§19</a>, <a class="cite" href="/system-design-blueprints/systems/virtual-memory/trade-offs/#adr-26">ADR-26</a>). Tradeoff: bookkeeping cost of the pending set. Operational implication: bulk <code>munmap</code> cost is O(1) IPIs, not O(pages). Violating it: a 1 GiB <code>munmap</code> costs 5 orders of magnitude more IPIs (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/numbers/#sec-35">§35</a> item 4).</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-6">P6</a> — W^X enforced unconditionally.</strong> No PTE has WRITABLE and EXECUTABLE simultaneously (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#inv-6">I6</a>). Tradeoff: JIT compilers need a write-then-switch-to-exec dance. Operational implication: closes an entire exploit class structurally. Violating it: reopens the dominant code-injection primitive of the 2000s–2010s.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-7">P7</a> — Determinism in panic/fault paths.</strong> Crashes are reproducible from the same trace. Tradeoff: no randomized backoff in the fault path itself (randomization lives only in KASLR&#39;s one-time boot choice). Operational implication: a kdump reproduces bit-for-bit under the same input trace. Violating it: &quot;flaky&quot; kernel panics are undebuggable.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-8">P8</a> — The verifier asserts invariants, not comments.</strong> Every I# (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#sec-7">§7</a>) has an automated detector in <code>vm-verifier</code>. Tradeoff: verifier overhead in debug builds (disabled in release). Operational implication: an invariant violation is a test failure, not a postmortem discovery. Violating it: invariants rot silently as the codebase changes.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-9">P9</a> — Multi-target from day one.</strong> x86-64 and aarch64 both first-class from Phase 0. Tradeoff: ~30% more Phase-0 implementation work. Operational implication: no architecture-specific assumption can leak into <code>vm-core</code> because a second arch immediately contradicts it. Violating it: a single-arch-first design bakes in x86-specific assumptions (e.g. <code>INVPCID</code> availability) that break aarch64 porting later.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-10">P10</a> — Reference counting is the sole authority for shared-page lifetime.</strong> COW pages, page-cache pages (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#inv-5">I5</a>). Tradeoff: every mapping path must remember to increment/decrement. Operational implication: a page&#39;s refcount is the single source of truth for &quot;can this be freed.&quot; Violating it: double-free or premature-free races (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#sec-26">§26</a> FM classes).</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-11">P11</a> — NUMA locality preferred, never mandatory.</strong> First-touch + fallback list, no forced interleave by default (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/trade-offs/#adr-28">ADR-28</a>). Tradeoff: node imbalance under adversarial access patterns. Operational implication: the common case (local access) is fast; the rare case (cross-node) is correct but slower, never wrong. Violating it: forced locality either wastes memory (over-replication) or produces starvation on a busy node.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-12">P12</a> — Every invariant has a telemetry signal, not just an assertion.</strong> Each I# emits a counter on violation-adjacent conditions (near-miss), not only on hard failure. Tradeoff: metric cardinality. Operational implication: an on-call engineer sees a trend (rising near-misses) before a hard failure. Violating it: the first signal of a brewing invariant violation is the crash itself.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-13">P13</a> — Fail loud in debug, fail safe in release.</strong> Debug builds panic on invariant violation; release builds degrade (SIGSEGV the offending process, or contain to the smallest blast radius) per <a class="cite" href="/system-design-blueprints/systems/virtual-memory/reliability/#sec-26">§26</a>. Tradeoff: behavioral divergence between debug and release requires the conformance suite to run both. Operational implication: production never silently corrupts on a caught violation. Violating it: either debug builds are too slow to run the full fuzz canary, or release builds crash the whole machine for a single process&#39;s bug.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/virtual-memory/architecture/#p-14">P14</a> — Telemetry before optimization.</strong> Fragmentation, eviction rate, fault rate, and TLB-shootdown rate are exposed (<a class="cite" href="/system-design-blueprints/systems/virtual-memory/blueprint/#sec-27">§27</a>) before any tuning work begins. Tradeoff: instrumentation overhead must itself be budgeted (kept &lt; 1% per M-table <a class="cite" href="/system-design-blueprints/systems/virtual-memory/numbers/#sec-31">§31</a>). Operational implication: every performance claim in this document is falsifiable against a live counter. Violating it: tuning decisions made on guesswork regress silently.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

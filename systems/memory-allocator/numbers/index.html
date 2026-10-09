@@ -1,0 +1,280 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Memory Allocator — Numbers · Engineering Blueprints</title><meta name="description" content="Memory Allocator, constraints, perf targets, capacity. Build smalloc, a general-purpose, drop-in replacement for the C library's malloc / free / realloc / calloc / aligned_alloc family, shipped as libsmalloc.so (LD_PRELOAD-injectable) and libsmalloc.a…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <a href="/system-design-blueprints/systems/memory-allocator/">Memory Allocator</a> </li><li> <span aria-current="page">Numbers</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Memory Allocator</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~14 weeks</li> <li>2,425 lines</li> <li>blueprint #29</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/memory-allocator/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/memory-allocator/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/memory-allocator/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/memory-allocator/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/memory-allocator/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/memory-allocator/numbers/" aria-current="page" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/memory-allocator/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/memory-allocator/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/memory-allocator/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/memory-allocator/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Memory Allocator — Numbers">  <p class="note warn"><strong>Design targets, not measurements.</strong> Latency and throughput rows are the budgets the blueprint sets for its own benches; memory and capacity rows are arithmetic from stated inputs, formula shown. A build's <a href="/system-design-blueprints/systems/memory-allocator/build/">status</a> says what has actually been measured.</p> <section class="prose"><h2 id="sec-4">4. System Constraints</h2>
+<p>Reference rig (used for every number below unless stated): AMD EPYC 7763 (64 cores),
+256 GB DDR4-3200, Linux 6.6, glibc 2.39, single NUMA node pinned via <code>numactl</code>. The one
+defining property: <strong>the fast path issues zero syscalls and holds zero locks</strong> — every
+number below is a consequence of preserving that property.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Alloc throughput, single thread, class ≤64 B</td>
+<td>≥ 40 M ops/s (Phase 3), ≥ 65 M ops/s (Phase 6)</td>
+</tr>
+<tr>
+<td>Free throughput, single thread, class ≤64 B</td>
+<td>≥ 45 M ops/s (Phase 3), ≥ 70 M ops/s (Phase 6)</td>
+</tr>
+<tr>
+<td><code>malloc(64)</code> latency p50 / p95 / p99 (Phase 6, warm)</td>
+<td>30 ns / 55 ns / 120 ns</td>
+</tr>
+<tr>
+<td><code>free(p)</code> latency p50 / p95 / p99 (Phase 6, warm)</td>
+<td>25 ns / 50 ns / 110 ns</td>
+</tr>
+<tr>
+<td>Per-object metadata, small class (out-of-band, Phase 5+)</td>
+<td>0 B in user-visible memory</td>
+</tr>
+<tr>
+<td>Per-object metadata, small class (Phase 2 in-band, superseded)</td>
+<td>16 B</td>
+</tr>
+<tr>
+<td>Per-object metadata, large (≥ 2 MiB, <code>sm_block_hdr_t</code>)</td>
+<td>32 B</td>
+</tr>
+<tr>
+<td>Worst-case internal fragmentation (class step ≤ 12.5 %, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-8">ADR-08</a>)</td>
+<td>≤ 12.5 %</td>
+</tr>
+<tr>
+<td>Worst-case external fragmentation (buddy order ≤ 21, Phase 4)</td>
+<td>≤ 25 % of mapped bytes</td>
+</tr>
+<tr>
+<td>RSS ceiling per idle arena above live bytes</td>
+<td>≤ 2 MiB, decommitted within 100 ms (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-5">M5</a>)</td>
+</tr>
+<tr>
+<td>Thread-cache footprint per thread</td>
+<td>≤ 390 KiB (Σ 29 class sizes = 26,376 B × limit 15, &quot;Back-of-Envelope Capacity Model&quot;)</td>
+</tr>
+<tr>
+<td>Page size / span granule / max span</td>
+<td>4 KiB / 2 MiB / 2 MiB (buddy order 12–21)</td>
+</tr>
+<tr>
+<td>Max live allocations (arena VA 16 GiB × 64 arenas ÷ 8 B min class)</td>
+<td>2^37</td>
+</tr>
+<tr>
+<td>Startup cost, first <code>malloc</code> (cold TLS init)</td>
+<td>≤ 5 µs</td>
+</tr>
+<tr>
+<td>Thread-exit drain cost per 15-entry class</td>
+<td>≤ 2 µs</td>
+</tr>
+<tr>
+<td>Max concurrency (arenas)</td>
+<td><code>min(sysconf(_SC_NPROCESSORS_ONLN), 64)</code></td>
+</tr>
+<tr>
+<td>Cache-line / false-sharing assumption</td>
+<td>64 B line; remote-free queue head padded</td>
+</tr>
+<tr>
+<td>NUMA assumption</td>
+<td>single-node pinned; no cross-node migration (Phase 0–11)</td>
+</tr>
+<tr>
+<td>Availability / failure budget</td>
+<td>0 crashes / 10^9 alloc-free ops (Phase 11 fuzz gate)</td>
+</tr>
+<tr>
+<td>RTO on process crash</td>
+<td>N/A (no persistence, Phase 0–11); Phase 13 target ≤ 500 ms</td>
+</tr>
+<tr>
+<td>Scaling assumption</td>
+<td>linear to 8 threads (≥ 6×); sub-linear past 32 (arena contention)</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section aria-labelledby="sec-30"> <h2 id="sec-30">Performance targets (§30)</h2> <div class="table-wrap"><table class="data"><caption class="sr-only">Performance targets</caption><thead><tr><th scope="col">ID</th><th scope="col">Metric</th><th scope="col">Target</th><th scope="col">Phase Gate</th></tr></thead><tbody><tr id="m-1"><td><a class="row-anchor" href="#m-1"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-1">M1</a></a></td><td><code>malloc</code>/<code>free</code> 10K-cycle bring-up wall-clock</td><td>&lt; 50 ms</td><td>Phase 1</td></tr><tr id="m-2"><td><a class="row-anchor" href="#m-2"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-2">M2</a></a></td><td>1,000,000-op <a class="cite" href="/system-design-blueprints/systems/memory-allocator/reliability/#inv-4">I4</a> accounting-identity violations</td><td>0</td><td>Phase 2</td></tr><tr id="m-3"><td><a class="row-anchor" href="#m-3"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-3">M3</a></a></td><td><code>malloc(64)</code> p50, single-thread, warm</td><td>&lt; 50 ns</td><td>Phase 3</td></tr><tr id="m-4"><td><a class="row-anchor" href="#m-4"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-4">M4</a></a></td><td>Internal fragmentation, mixed 10,000-object workload</td><td>≤ 12.5%</td><td>Phase 3</td></tr><tr id="m-5"><td><a class="row-anchor" href="#m-5"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-5">M5</a></a></td><td>RSS return-to-baseline after full free (buddy-backed)</td><td>≤ 100 ms</td><td>Phase 4</td></tr><tr id="m-6"><td><a class="row-anchor" href="#m-6"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-6">M6</a></a></td><td>10,000,000-object 64 B slab microbenchmark throughput</td><td>≥ 60 M ops/s</td><td>Phase 5</td></tr><tr id="m-7"><td><a class="row-anchor" href="#m-7"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-7">M7</a></a></td><td>8-thread <code>malloc(64)</code>/<code>free</code> scaling vs single-thread</td><td>≥ 6.0×</td><td>Phase 6</td></tr><tr id="m-8"><td><a class="row-anchor" href="#m-8"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-8">M8</a></a></td><td><code>malloc(64)</code> p50, single-thread, warm (steady state)</td><td>&lt; 30 ns</td><td>Phase 6</td></tr><tr id="m-9"><td><a class="row-anchor" href="#m-9"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-9">M9</a></a></td><td><code>malloc(2 MiB)</code> p50, single-thread</td><td>&lt; 8 µs</td><td>Phase 7</td></tr><tr id="m-10"><td><a class="row-anchor" href="#m-10"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-10">M10</a></a></td><td>Hardening overhead on <code>t-test1</code> (redzone+DFD, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-13">ADR-13</a> default)</td><td>≤ 3%</td><td>Phase 8</td></tr><tr id="m-11"><td><a class="row-anchor" href="#m-11"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-11">M11</a></a></td><td><code>redis-benchmark</code> SET p99 under preload vs glibc malloc</td><td>within 5%</td><td>Phase 10</td></tr><tr id="m-12"><td><a class="row-anchor" href="#m-12"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-12">M12</a></a></td><td><code>mimalloc-bench</code> suite vs jemalloc 5.x</td><td>≤ 2× (Phase 0), ≤ 1.2× (Phase 11)</td><td>Phase 11</td></tr><tr id="m-13"><td><a class="row-anchor" href="#m-13"><a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-13">M13</a></a></td><td>30-day continuous fuzz run, uncaught aborts</td><td>0</td><td>Phase 11</td></tr></tbody></table></div> </section><section class="prose"><h2 id="sec-34">34. Back-of-Envelope Capacity Model</h2>
+<ol>
+<li><strong>Size-class count = 29.</strong> Derived from the internal-fragmentation bound (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a>,
+≤ 12.5%): a class step ratio <code>r</code> yields worst-case waste <code>(r−1)/(2r)</code>; solving
+<code>(r−1)/(2r) ≤ 0.125</code> gives <code>r ≤ 1.29</code>. Applying <code>r ≈ 1.2–1.25</code> from 128 B to 4096 B
+(<code>log(4096/128) / log(1.25) ≈ 15</code> steps) plus 9 fixed small steps below 128 B
+(<code>sm_size_classes</code>, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/blueprint/#sec-11-6">§11.6</a>) totals 29 classes.</li>
+<li><strong>Per-object radix-map overhead ≈ negligible (&lt; 0.01 B/object).</strong> A 3-level radix
+tree (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/trade-offs/#adr-12">ADR-12</a>) with 256 entries/level × 8 B/pointer = 2 KiB/level populated path;
+amortized over a fully populated 2 MiB leaf span holding 2^18 minimum-size (8 B)
+objects: <code>(3 × 2 KiB) / 2^18 ≈ 0.023 B/object</code> — confirms <a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a>&#39;s &quot;0 B in-band&quot; row
+(the map overhead lives outside user-visible memory entirely).</li>
+<li><strong>Thread-cache footprint per thread ≤ 390 KiB.</strong> <code>Σ(sm_size_classes) = 26,376 B</code>
+(8+16+…+4096, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/blueprint/#sec-11-6">§11.6</a>) <code>× limit 15 = 395,640 B ≈ 386 KiB</code>, rounded to the <a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a> ceiling
+of 390 KiB.</li>
+<li><strong>Max live allocations ≈ 2^37.</strong> Arena VA reservation 16 GiB (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-6">P6</a>) × 64 arenas
+(<a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a> max concurrency) = 1 TiB total reserved VA; <code>1 TiB ÷ 8 B min class = 2^40 / 2^3 = 2^37</code> (matches the revised <a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a> row).</li>
+<li><strong>Minimum idle RSS floor ≈ 128 MiB.</strong> 64 arenas (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a>) × ≤ 2 MiB idle-arena RSS
+ceiling (<a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a>) = 128 MiB — the floor below which RSS cannot usefully be tuned once
+every arena has been touched once.</li>
+<li><strong>TLB reach at 4 KiB pages ≈ 6 MiB; at 2 MiB huge pages ≈ 3 GiB.</strong> Reference rig
+assumption: 1536-entry L2 TLB (typical modern x86_64); <code>1536 × 4 KiB = 6 MiB</code>
+reach — smaller than a single arena&#39;s hot working set, motivating <code>MADV_HUGEPAGE</code>
+(<a class="cite" href="/system-design-blueprints/systems/memory-allocator/architecture/#p-6">P6</a>, Phase 13): <code>1536 × 2 MiB = 3 GiB</code> reach once huge pages back the region.</li>
+<li><strong>Composed worst-case fragmentation multiplier ≈ 1.52×.</strong> Internal (≤ 12.5%, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a>)
+and external (≤ 25%, <a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#sec-4">§4</a>) bounds compose as independent multipliers:
+<code>1 / ((1 − 0.125) × (1 − 0.25)) = 1 / 0.65625 ≈ 1.524</code> — i.e. mapped bytes can
+reach 1.524× live bytes in the documented worst case.</li>
+<li><strong>Memory-bandwidth demand at the <a class="cite" href="/system-design-blueprints/systems/memory-allocator/numbers/#m-6">M6</a> target ≈ 7.7 GB/s/core.</strong> <code>60 M ops/s (M6, Performance Engineering) × 64 B object × 2 (write-on-alloc, read-on-free touch) ≈ 7.68 GB/s</code>; against the reference rig&#39;s DDR4-3200 dual-channel bandwidth
+(~25.6 GB/s/socket), this leaves headroom for roughly 3 fully-loaded cores before
+the slab microbenchmark becomes bandwidth-bound rather than latency-bound.</li>
+</ol>
+<hr>
+</section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

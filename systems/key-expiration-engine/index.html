@@ -1,0 +1,694 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Key-Expiration Engine · Engineering Blueprints</title><meta name="description" content="Every cache, database, broker and session store eventually grows a time-to-live (TTL). The blueprint names the two naive answers and what each costs: check-on-read leaks memory at scale, because a key nobody reads again is never freed, and scan-and-evict stalls the foreground…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <span aria-current="page">Key-Expiration Engine</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Key-Expiration Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux</li> <li>13 phases</li> <li>~17 weeks</li> <li>2,700 lines</li> <li>blueprint #62</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/key-expiration-engine/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/key-expiration-engine/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/key-expiration-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/key-expiration-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/key-expiration-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/key-expiration-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/key-expiration-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/key-expiration-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/key-expiration-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Key-Expiration Engine"> <div class="doc-grid"> <aside class="doc-toc" data-pagefind-ignore> <details class="toc" open data-collapse-narrow> <summary>On this page</summary> <ol><li><a href="#ex-in-one-paragraph">In one paragraph</a></li><li><a href="#ex-the-problem-concretely">The problem, concretely</a></li><li><a href="#ex-how-it-works-end-to-end">How it works, end to end</a></li><li><a href="#ex-the-core-ideas">The core ideas</a></li><li><a href="#ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</a></li><li><a href="#ex-what-must-never-be-false">What must never be false</a></li><li><a href="#ex-what-breaks-in-production">What breaks in production</a></li><li><a href="#ex-the-numbers">The numbers</a></li><li><a href="#ex-how-it-compares">How it compares</a></li><li><a href="#ex-building-it-the-phase-plan">Building it — the phase plan</a></li><li><a href="#ex-questions-to-test-yourself">Questions to test yourself</a></li><li><a href="#ex-if-you-only-remember-three-things">If you only remember three things</a></li><li><a href="#ex-words-used-here">Words used here</a></li></ol> </details> </aside> <div class="doc-main"> <p class="meta doc-meta" data-pagefind-ignore> <span>Plain-words explainer</span> <span>status: checked</span> <span>written 2026-10-07</span> <span>checked by Opus 5.5 on 2026-10-07</span> <span>471 lines</span> </p>  <div class="prose explainer"><h2 id="ex-in-one-paragraph">In one paragraph</h2>
+<p>A key-expiration engine accepts <code>(key, deadline)</code> pairs and fires each deadline at, or shortly
+after, the moment it was set against (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-1">§1</a>). It targets at least 5,000,000 inserts per second on one
+thread with O(1) amortised cost per insert, 100M outstanding keys, and crash recovery from a
+write-ahead log in 5 s or less (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a>). Its core is a multi-level timer structure (<strong>hierarchical
+timing wheel</strong>) plus a small sorted queue for deadlines that are about to fire (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-1">§8.1</a>). It
+exposes Redis&#39;s <code>EXPIRE</code>-family commands, so existing Redis clients work unchanged (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-1">§1</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-9">P9</a>). Cache
+and session-store authors, SREs running the standalone binary, and library authors embedding
+<code>kee-core</code> run it (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-1">§1</a>). Choosing what to evict when memory is full is not its job (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-3">P3</a>).</p>
+<h2 id="ex-the-problem-concretely">The problem, concretely</h2>
+<p>Every cache, database, broker and session store eventually grows a time-to-live (TTL). The blueprint
+names the two naive answers and what each costs: check-on-read leaks memory at scale, because a
+key nobody reads again is never freed, and scan-and-evict stalls the foreground workload while it
+scans (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-2">§2</a>). This project is described as the smallest system that forces you to solve both (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-2">§2</a>).</p>
+<p>A third trap hides in the clock. If the scheduler stores wall-clock times, every NTP correction
+makes already-scheduled deadlines fire early or late. The blueprint calls this the single most
+expensive bug class in timer systems (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-1">P1</a>). It repeats the point for replication: if a follower
+re-adds a relative TTL when it applies a record, every deadline replays late by exactly the
+replication lag (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-7">P7</a>).</p>
+<p>Then add scale. At 100M keys and 5,000,000 inserts per second, a plain sorted heap pays O(log n)
+per insert and &quot;degrades visibly past ~1M keys&quot; (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-2">ADR-02</a>). A crash must not lose every TTL
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-8">ADR-08</a>). And a hot shard must not stall the others (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-11">P11</a>). The blueprint&#39;s structure is the answer
+to those pressures taken together, and it states that every other decision exists to protect one
+property: the wheel/heap partition is the only path to O(1)-amortised insert at 100M keys (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a>).</p>
+<h2 id="ex-how-it-works-end-to-end">How it works, end to end</h2>
+<p>Follow one <code>PEXPIRE</code> through the boxes of <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>&#39;s diagram (drawn from the blueprint&#39;s <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a> diagram, coloured by role, with module names from <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-1">§1</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>
+and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a> where the blueprint gives them):</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: the core path of one PEXPIRE
+%% legend ingest: client side, sinks and supporting parts
+%% legend store: the write-ahead log
+C([&quot;&lt;b&gt;Client&lt;/b&gt;&lt;br/&gt;RESP2/RESP3 or HTTP admin&lt;br/&gt;INGRESS (kee-redis crate, §21)&quot;])
+EN[&quot;&lt;b&gt;Engine (§19)&lt;/b&gt;&lt;br/&gt;shard lookup/CAS → WAL append&lt;br/&gt;(if Durable) → route by top_horizon&lt;br/&gt;→ ack&quot;]
+HT[&quot;&lt;b&gt;Heap-top&lt;/b&gt;&lt;br/&gt;BinaryHeap, ≤ 256 entries&quot;]
+WH[&quot;&lt;b&gt;HierarchicalWheel&lt;/b&gt;&lt;br/&gt;6 levels × 64 slots&quot;]
+CR[&quot;&lt;b&gt;Cron driver&lt;/b&gt;&lt;br/&gt;fixed 1 ms tick: heap-top pop →&lt;br/&gt;wheel advance_to(now) →&lt;br/&gt;notify each fire&quot;]
+SK[&quot;&lt;b&gt;Sink trait&lt;/b&gt;&lt;br/&gt;KeyspaceEventSink | WebhookSink |&lt;br/&gt;DurableSink&quot;]
+LZ[&quot;&lt;b&gt;Lazy probe on read (§18)&lt;/b&gt;&quot;]
+WL[(&quot;&lt;b&gt;WAL (§22)&lt;/b&gt;&lt;br/&gt;group commit, snapshot, recovery&quot;)]
+CK[&quot;&lt;b&gt;Clock source&lt;/b&gt;&lt;br/&gt;monotonic drives ticks&lt;br/&gt;wall only at the API edge&quot;]
+HL[&quot;&lt;b&gt;HLC replication (§23)&lt;/b&gt;&quot;]
+C --&gt; EN
+EN -- &quot;Deadline within top_horizon&quot; --&gt; HT
+EN -- &quot;otherwise&quot; --&gt; WH
+HT --&gt; CR
+WH --&gt; CR
+CR --&gt; SK
+EN -. &quot;side path&quot; .-&gt; LZ
+EN -. &quot;side path&quot; .-&gt; WL
+CK ~~~ HL
+classDef rt stroke-width:1.5px
+classDef ingest stroke-width:1.5px
+classDef store stroke-width:1.5px
+class EN,HT,WH,CR rt
+class C,SK,LZ,CK,HL ingest
+class WL store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the core path of one PEXPIRE</li><li><span class="swatch ingest"></span>client side, sinks and supporting parts</li><li><span class="swatch store"></span>the write-ahead log</li></ul></figcaption></figure>
+<ol>
+<li><strong>Ingress.</strong> The RESP frontend (<code>kee-redis</code> crate) and the HTTP admin API are the only untrusted
+entry points. Every command maps to one <code>Engine</code> call (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>).</li>
+<li><strong>Engine.</strong> It owns the per-shard <code>KeyId → KeyState</code> maps. A submit goes to the WAL first if the
+insert is durable, then to the heap-top or the wheel (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-3">I3</a>). The same box runs the active and
+lazy expiration policy (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-18">§18</a>).</li>
+<li><strong>Wheel and heap-top.</strong> These two structures partition all outstanding deadlines disjointly
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>). The wheel is the O(1) path, the heap-top is the accuracy path, and the WAL is the
+durability path, one responsibility each (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-2">P2</a>).</li>
+<li><strong>Cron driver.</strong> A single thread owns the advance of time: nothing else advances the wheel or
+pops the heap-top (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>). On each 1 ms tick it pops the heap-top, advances the wheel, and
+notifies each fire (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>). The heap-top is consulted before the wheel (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-17-2">§17.2</a>).</li>
+<li><strong>Notification sinks.</strong> A fired <code>Deadline</code> fans out one-way to zero or more consumers; no sink
+can push state back into the wheel (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>). A slow sink is treated as <code>Dropped</code> after 100 ms by
+default (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-13">I13</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-6">P6</a>).</li>
+<li><strong>WAL (<code>kee-wal</code>).</strong> It is the only crash-recovery source of truth; the in-memory wheel is
+disposable (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM3</a>). Replication consumes the same WAL stream, stamps each record with a
+hybrid logical clock, and followers re-clock absolute deadlines locally (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-7">P7</a>).</li>
+<li><strong>Clock source.</strong> It is the sole owner of both clock domains. Every other component reads time
+through it, never through <code>Instant::now()</code> or <code>SystemTime::now()</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-1">P1</a>).</li>
+</ol>
+<p>The blueprint states three properties that hold everywhere: time flows one direction (clock to
+wheel/heap to fire to notify), the data path has no back-edge, and the WAL alone decides what
+survives a crash (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>).</p>
+<h2 id="ex-the-core-ideas">The core ideas</h2>
+<h3 id="ex-a-wheel-of-wheels-a-deadline-is-a-base-64-number-8-1-8-5-mm1">A wheel of wheels: a deadline is a base-64 number (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-1">§8.1</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-5">§8.5</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM1</a>)</h3>
+<p>A <code>HierarchicalWheel</code> has <code>NUM_LEVELS = 6</code> levels of <code>SLOTS_PER_LEVEL = 64</code> slots, with
+<code>TICK_NS = 1,000,000</code> (1 ms, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-5">ADR-05</a>). Level 0 advances every tick and level <em>k</em> advances every
+<code>64^k</code> ticks (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-1">§8.1</a>). A deadline&#39;s level is <code>⌊log₆₄(Δticks)⌋</code> and its slot in that level is
+<code>(Δticks &gt;&gt; (6·level)) &amp; 0x3F</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-1">§8.1</a>). The blueprint reads this as a base-64 radix sort computed
+one carry at a time, so insert is O(1) because the &quot;sort&quot; is deferred to the tick that needs it
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM1</a>). The horizon is <code>64^6</code> ticks × 1 ms = 68,719,476,736 ms, about 795 days or 2.18 years
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-1">§8.1</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D1).</p>
+<p>The blueprint&#39;s own trace (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-5">§8.5</a>): at <code>now = 0</code>, <code>PEXPIRE k 130</code>, so <code>Δticks = 130</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>What happens</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1. Insert</td>
+<td><code>130 &lt; 64</code> is false; level = ⌊log₆₄(130)⌋ = 1; slot = <code>(130 &gt;&gt; 6) &amp; 0x3F</code> = 2; node sits in level-1 slot 2</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-5">§8.5</a></td>
+</tr>
+<tr>
+<td>2. At 128 ms</td>
+<td>level 0&#39;s cursor wraps; level 1&#39;s current slot (slot 2) is cascaded down</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-5">§8.5</a></td>
+</tr>
+<tr>
+<td>3. Re-insert</td>
+<td><code>Δticks = 130 − 128 = 2</code>, so the node lands in level-0 slot 2</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-5">§8.5</a></td>
+</tr>
+<tr>
+<td>4. At 130 ms</td>
+<td>level 0&#39;s cursor reaches slot 2 and the node fires, within the 1 ms tick tolerance</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-5">§8.5</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-7">M7</a></td>
+</tr>
+</tbody></table></div>
+<p>The recompute in step 3 is the whole point of <strong>cascading</strong>: it must use the current <code>now</code>, not the
+value at insert time. The blueprint names re-inserting against a stale <code>self.now</code> as a bug class
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM1</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-26">§26</a> &quot;Cascade data loss&quot;, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-36">§36</a> question 12).</p>
+<h3 id="ex-the-heap-top-a-small-sorted-queue-in-front-of-the-wheel-17-2-8-6-mm7-adr-04">The heap-top: a small sorted queue in front of the wheel (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-17-2">§17.2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-6">§8.6</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM7</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-4">ADR-04</a>)</h3>
+<p>The wheel fires within a 1 ms tick (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-7">M7</a>); the heap-top reaches 200 µs (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-6">M6</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a>). For deadlines about to fire, the engine keeps a
+<code>BinaryHeap</code> of at most 256 entries (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-4">ADR-04</a>). A deadline whose offset is within <code>top_horizon</code>
+(default 16 ms, which is 16 ticks) goes to the heap-top instead of the wheel (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-17-2">§17.2</a>). The
+state table says the same: <code>Scheduled (heap-top)</code> when <code>Δ &lt; top_horizon</code>, <code>Scheduled (wheel)</code>
+otherwise (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-6">§8.6</a>). When the heap-top is full, the farthest-deadline entry is evicted into the wheel
+as one atomic step, which is what keeps <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-6">I6</a> (disjoint partition) true (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-17-2">§17.2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-6">I6</a>).</p>
+<p>The blueprint&#39;s argument for a fixed capacity is that a hot small structure with spillover into a
+general slow one beats growing the fast structure (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM7</a>). Its sizing note: at <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-2">M2</a>&#39;s 800,000 inserts
+per second, a 16 ms window could in theory see <code>800,000 × 0.016 = 12,800</code> inserts, but 256 was
+sized against the empirical short-TTL fraction, and the eviction path covers the gap (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D4).</p>
+<h3 id="ex-generation-numbers-cancel-without-searching-the-wheel-8-2-8-6-i7-p12-mm5">Generation numbers: cancel without searching the wheel (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-2">§8.2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-6">§8.6</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-12">P12</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM5</a>)</h3>
+<p>Each wheel node is 24 bytes: <code>key</code> (8 B), <code>generation</code> (4 B), <code>deadline</code> (8 B), <code>next</code> (4 B)
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-2">§8.2</a>). The per-key <code>KeyState</code> holds the current generation (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>). <code>PERSIST</code> (remove the TTL) does
+not hunt through a slot. It increments the generation and frees the <code>KeyState</code>, so the wheel
+entry becomes <code>Stale</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-6">§8.6</a>). When that node later fires, the fire path compares generations;
+a mismatch is silently discarded (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-6">§8.6</a>). Re-<code>EXPIRE</code> works the same way (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-7">I7</a>).</p>
+<p>The same field makes replay safe. WAL replay, HLC merge and generation-checked fire must give the
+same state when applied once or twice (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-12">P12</a>), so at-least-once delivery converges without a
+separate &quot;have I seen this?&quot; table (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM5</a>).</p>
+<h3 id="ex-two-clocks-monotonic-for-when-wall-for-what-it-means-p1-i4-i5-mm2-22-2">Two clocks: monotonic for &quot;when&quot;, wall for &quot;what it means&quot; (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-22-2">§22.2</a>)</h3>
+<p>All scheduling uses the monotonic clock (<code>CLOCK_MONOTONIC</code>). The wall clock (<code>CLOCK_REALTIME</code>) is
+read only at the API edge (an <code>EXPIREAT</code>) or to stamp an outgoing notification (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-1">P1</a>). The two are
+distinct newtypes, <code>MonotonicNs</code> and <code>WallNs</code>, so mixing them is a compile error (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-1">§1</a>). The
+conversion from wall to monotonic happens once, at insert, which is why a wall-clock step never
+reschedules a stored deadline (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-5">I5</a>).</p>
+<p>The WAL stores wall time. <code>Insert</code> records hold <code>deadline_wall_ns</code> as an <code>i128</code> and <code>Tombstone</code>
+records hold <code>fired_at_wall_ns</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-3">§8.3</a>). On recovery the engine computes
+<code>Δ = deadline_wall_ns − now_wall</code> and re-inserts at <code>now_mono + Δ</code>, re-deriving the monotonic
+offset from the wall-time record (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-22-2">§22.2</a>). The blueprint&#39;s edge case for this design is a wall clock
+stepped backward by a week between crash and restart, where <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-22-8">§22.8</a> says recovery immediately fires
+every deadline that is &quot;now in the past&quot;. That sentence and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-22-2">§22.2</a>&#39;s formula, which subtracts the
+current wall time, do not obviously agree, and the point is logged in the errata. <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-36">§36</a> question 17
+asks why the monotonic value is not persisted directly.</p>
+<h3 id="ex-active-plus-lazy-expiration-bounded-by-wall-time-18-2-p5-adr-06-adr-07-mm4-i10">Active plus lazy expiration, bounded by wall time (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-5">P5</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-6">ADR-06</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-7">ADR-07</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM4</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-10">I10</a>)</h3>
+<p>The wheel fires deadlines on time, but a deadline can be past while its node has not yet been
+swept. Two mechanisms cover that (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-18-1">§18.1</a>). The <strong>lazy probe</strong> checks <code>KeyState.deadline</code> on every
+keyed read; a passed deadline fires immediately and leaves the wheel node stale for the generation
+check to absorb (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-7">I7</a>). The <strong>active-expire cycle</strong> sweeps wheel levels 0 and 1 from the
+current cursor, bounded by wall time (25% of a 100 ms slice, so 25 ms), and saves a resumable
+cursor if the budget runs out mid-sweep (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-5">P5</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-10">I10</a>).</p>
+<p>Why wall time, not a sample count? A count assumes uniform key occupancy and breaks the moment
+one shard is hot, whereas a time bound holds under any distribution (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM4</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-5">P5</a>). Memory pressure
+raises the budget in steps: <code>Low→25ms, Medium→50ms, High→100ms, Critical→immediate synchronous force_expire_pass()</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-18-2">§18.2</a>). Pressure escalates expiration aggressiveness only; it never makes an
+eviction decision (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-3">P3</a>).</p>
+<h3 id="ex-replication-ships-absolute-deadlines-ordered-by-a-hybrid-clock-8-4-8-8-23-2-p7-mm6-i9">Replication ships absolute deadlines, ordered by a hybrid clock (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-4">§8.4</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-8">§8.8</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-23-2">§23.2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-7">P7</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM6</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-9">I9</a>)</h3>
+<p>A <code>PEXPIREAT</code> ships as an absolute wall time, and the follower converts it to its own monotonic
+clock when it applies it (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-7">P7</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-23-2">§23.2</a>). Ordering uses a <strong>hybrid logical clock (HLC)</strong>:
+<code>Hlc { wall_ms: u64, logical: u32, node_id: u32 }</code>, 16 bytes (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-4">§8.4</a>). <code>Hlc::now</code> takes
+<code>wall = max(physical, last.wall)</code>; <code>logical</code> resets to 0 on a wall advance and increments
+otherwise (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-23-2">§23.2</a>). The <code>logical</code> counter orders events inside one millisecond, which is why
+millisecond resolution is enough (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-4">§8.4</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM6</a>). <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-23-6">§23.6</a> and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-36">§36</a> question 9 instead speak of a
+&quot;64-bit packing&quot; of <code>wall_ms</code> with the 32-bit <code>logical</code> counter, which the 16-byte struct of <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-4">§8.4</a>
+and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/design/#sec-11">§11</a> does not describe; the blueprint states both.</p>
+<p>The blueprint&#39;s failure-path example (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-8">§8.8</a>): a follower sees an <code>Insert</code> stamped <code>(wall_ms=1000, logical=0, node_id=A)</code> and then, after network reordering, a <code>Tombstone</code> stamped <code>(wall_ms=999, logical=3, node_id=A)</code> for the same key and generation. Under <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-9">I9</a> the follower detects that applying
+it would violate causality, rejects the tombstone, and re-requests the correct order from the
+primary, rather than risk a resurrected-after-fire key (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-8">§8.8</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-23-9">§23.9</a>).</p>
+<h2 id="ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</h2>
+<h3 id="ex-active-structure-hierarchical-wheel-adr-02">Active structure: hierarchical wheel (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-2">ADR-02</a>)</h3>
+<p><strong>Chosen:</strong> a hierarchical timing wheel, for O(1)-amortised insert against a heap&#39;s O(log n)
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-2">ADR-02</a>). <strong>Rejected:</strong> a flat sorted heap (<code>BinaryHeap</code>). <strong>When the rejected choice is right:</strong>
+under about 100K keys, where simplicity and debuggability beat the asymptotics, for example a
+single-tenant embedded cache (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-2">ADR-02</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-37">§37</a> Alt-1).</p>
+<h3 id="ex-heap-top-capacity-256-entries-adr-04">Heap-top capacity: 256 entries (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-4">ADR-04</a>)</h3>
+<p><strong>Chosen:</strong> a fixed 256-entry heap-top, the smallest size that absorbs steady-state &quot;soon&quot;
+arrivals without thrashing (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-4">ADR-04</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D4). <strong>Rejected:</strong> 0 (pure wheel) and unbounded.
+<strong>When the rejected choice is right:</strong> 0 wins when sub-ms accuracy is not required (batch or
+session TTLs in minutes); unbounded wins at fewer than 10K live short TTLs, where memory is cheap
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-4">ADR-04</a>).</p>
+<h3 id="ex-active-expire-bound-wall-time-adr-06">Active-expire bound: wall time (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-6">ADR-06</a>)</h3>
+<p><strong>Chosen:</strong> 25% of a 100 ms slice, so a predictable foreground stall whatever the key
+distribution (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-6">ADR-06</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-5">P5</a>). <strong>Rejected:</strong> a fixed sample count. <strong>When the rejected choice is
+right:</strong> only with a provably uniform key distribution and an external hard scheduler that already
+bounds lock hold time (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-6">ADR-06</a>).</p>
+<h3 id="ex-lazy-expiration-on-access-mandatory-adr-07">Lazy expiration on access: mandatory (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-7">ADR-07</a>)</h3>
+<p><strong>Chosen:</strong> check on every read, closing the memory-waste gap the active cycle cannot guarantee
+under skew (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-7">ADR-07</a>). <strong>Rejected:</strong> active-only. <strong>When the rejected choice is right:</strong> when reads
+are rare relative to inserts, for example a write-heavy telemetry TTL store, and the per-read
+branch is not worth paying (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-7">ADR-07</a>).</p>
+<h3 id="ex-durability-wal-by-default-adr-08-adr-09">Durability: WAL by default (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-8">ADR-08</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-9">ADR-09</a>)</h3>
+<p><strong>Chosen:</strong> a mandatory WAL, opt-out per insert with <code>Durability::BestEffort</code>, because losing all
+TTLs on restart is unacceptable for a session store or billing rate limiter (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-8">ADR-08</a>). Group commit
+runs every 1 ms or 1024 records, whichever is sooner (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-9">ADR-09</a>). <strong>Rejected:</strong> no durability at all,
+and per-request fsync. <strong>When the rejected choice is right:</strong> no-WAL for pure cache-aside
+deployments where the backing store re-validates independently of TTL state (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-8">ADR-08</a>); per-request
+fsync under regulatory zero-durability-gap mandates such as financial ledger TTLs (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-9">ADR-09</a>).</p>
+<h3 id="ex-replication-ordering-hybrid-logical-clock-adr-13">Replication ordering: hybrid logical clock (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-13">ADR-13</a>)</h3>
+<p><strong>Chosen:</strong> an HLC, combining wall-time meaning for <code>EXPIREAT</code> with causal ordering and needing no
+synchronized clocks (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-13">ADR-13</a>). <strong>Rejected:</strong> a pure wall clock and a pure Lamport (logical) clock.
+<strong>When the rejected choice is right:</strong> a pure wall clock with hardware PTP-synced nodes (sub-µs
+skew); a pure logical clock for a purely internal deployment where wall-time meaning stays local
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-13">ADR-13</a>).</p>
+<h3 id="ex-roads-not-taken-37-38">Roads not taken (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-37">§37</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-38">§38</a>)</h3>
+<p><em>Sorted heap only</em> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-37">§37</a> Alt-1) wins below about 100K live deadlines, where O(log n) is negligible
+and one well-understood structure is easier to debug. Go&#39;s runtime timer heap is the example.
+It was rejected because the 100M-key, 5,000,000-inserts-per-second target makes O(log n) per
+insert &quot;an 80× cost penalty at scale&quot; (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-37">§37</a> Alt-1). Alt-1 cites <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-15-4">§15.4</a>&#39;s baseline comparison for
+this, and that comparison is 200 ms for the heap against 50 ms for the single-level wheel on
+1,000,000 insert+fire round trips (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-15-4">§15.4</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-14-4">§14.4</a>). The blueprint states both and does not
+reconcile them.</p>
+<p><em>Calendar queue</em> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-37">§37</a> Alt-2) wins when the deadline distribution is known and stable, so one bucket
+width can be tuned once, as in discrete-event simulation. It was rejected because TTL distributions
+here are operator-defined and shift at runtime, and a fixed width either wastes memory or brings
+back O(occupancy) scans.</p>
+<p><em>One OS timer per key</em> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-37">§37</a> Alt-3) wins at thousands of latency-critical timers, where the kernel&#39;s
+high-resolution timers give accuracy for free. It was rejected because 100M timers would exhaust
+the 65,536 file-descriptor budget in <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a> and the kernel&#39;s per-timer bookkeeping does not amortise.
+The deferred io_uring driver is a tick-resolution upgrade, not this (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-37">§37</a> Alt-3, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-17">ADR-17</a>).</p>
+<p><em>A separate wheel per shard</em> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-37">§37</a> Alt-4) wins when looser global fire ordering is acceptable and
+running 256 cron drivers is affordable. It was rejected because it would multiply the WAL, snapshot
+and recovery machinery by 256 with no correctness benefit (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-37">§37</a> Alt-4, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-10">P10</a>).</p>
+<p><em>Deferred features</em> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-38">§38</a>). The register lists 12 items, each with an un-defer trigger: for example
+the io_uring sub-ms timer driver (when sub-ms accuracy is a hard requirement, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-17">ADR-17</a>) and
+multi-leader replication (when <code>Distributed-KV-Store</code> ships a stable embeddable Raft crate).</p>
+<h2 id="ex-what-must-never-be-false">What must never be false</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-1">I1</a></strong>: a deadline never fires before its target. <code>conformance/wheel.insert_fire</code>;
+<code>kee_fire_early_violations_total</code> (expect 0); fail-closed: halt the cron driver, page on-call (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-2">I2</a></strong>: every accepted deadline fires exactly once or is cancelled. Generation tests plus a
+<code>kee_fires_total</code> vs <code>kee_inserts_total</code> reconciliation job (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-3">I3</a></strong>: WAL durability precedes the ack for <code>Durability::DurableLog</code> inserts. <code>kill -9</code>
+injection; <code>kee_ack_before_fsync_violations_total</code> (expect 0); fail the request, never ack early (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-4">I4</a></strong>: monotonic time never decreases within a process. A 10M-sample property test;
+<code>kee_monotonic_regression_total</code>; a regression is a process-fatal panic (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-5">I5</a></strong>: a wall-clock step never reschedules an inserted deadline. <code>SimulatedClock</code> NTP-step test;
+structural, so no telemetry (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-6">I6</a></strong>: wheel and heap-top hold disjoint deadlines. A property test checks the intersection is
+empty after every op; <code>kee_dual_residency_violations_total</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-7">I7</a></strong>: a fire whose generation mismatches is discarded. <code>kee_stale_fire_discarded_total</code>; a count
+above 0 is normal, not a failure (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-8">I8</a></strong>: recovery replays every deadline outstanding at the crash, and no more. Noticed by the
+<code>kill -9</code> recovery test and <code>kee_recovery_deadlines_recovered_total</code>; on a violation startup
+is blocked pending an operator forensic scan (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-9">I9</a></strong>: HLC timestamps strictly increase per node and respect causality on merge.
+<code>conformance/repl.hlc_ordering</code>; <code>kee_hlc_causality_violations_total</code>; the offending record is
+rejected and re-requested (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-10">I10</a></strong>: the active-expire cycle never holds a shard lock past 25 ms by default. Clock-stall
+injection test; <code>kee_active_cycle_duration_seconds</code>, alert if p99 exceeds the budget (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-11">I11</a></strong>: the fire path performs zero heap allocations in steady state. An instrumented-allocator
+benchmark; <code>kee_fire_path_allocations_total</code> (expect 0); the CI perf gate fails the build (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-12">I12</a></strong>: a follower never fires a replicated deadline earlier than <code>primary_fire_time − 2×NTP_skew_ms</code>. Two-node <code>conformance/repl.absolute</code>; <code>kee_follower_early_fire_total</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-13">I13</a></strong>: every <code>Sink::deliver</code> call returns within <code>MAX_SINK_DELIVER_DURATION</code> (100 ms default)
+or counts as <code>Dropped</code>. <code>kee_notification_dropped_total{sink}</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-7">§7</a>).</li>
+</ul>
+<h2 id="ex-what-breaks-in-production">What breaks in production</h2>
+<p>The <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-26">§26</a> table has no FM-numbers, so each mode is cited by its class name.</p>
+<ul>
+<li><strong>Cron-driver stall.</strong> <code>kee_cron_tick_last_completed_seconds</code> goes stale and inserts pile up.
+Root causes: a lock-ordering inversion, or an unbounded sink call that bypasses <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-13">I13</a>. A liveness
+watchdog alerts after 3 × <code>TICK_NS</code> of staleness. It is process-fatal by design: restart and
+recover from the WAL, with a thread dump captured on the trip (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-26">§26</a>).</li>
+<li><strong>Cascade data loss.</strong> Deadlines silently vanish under load because a cascade re-inserts against
+a stale <code>self.now</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-16-6">§16.6</a>). Detected by the <code>conformance/wheel.cascade</code> regression or an <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-2">I2</a>/<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-8">I8</a>
+telemetry gap; no auto recovery: hotfix plus regression fixture, with the 24 h soak trace replay
+isolating the exact rotation (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-26">§26</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-16-9">§16.9</a>).</li>
+<li><strong>WAL corruption.</strong> A torn write or disk failure shows up as a CRC mismatch at the recovery scan
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-8">I8</a>). <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-26">§26</a> lists &quot;Startup blocked&quot; as the symptom yet truncate-to-last-good-record as the auto
+recovery; <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-22-2">§22.2</a> calls a tail mismatch &quot;not treated as fatal&quot; and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#t-3">T3</a> says &quot;Truncate + restart&quot;,
+while <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-22-9">§22.9</a> and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-8">I8</a> block startup for an operator scan with <code>tools/wal-inspect</code>. The blueprint
+does not say which cases truncate and which block; loss past the truncation point is bounded and
+never silent (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-22-9">§22.9</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#t-3">T3</a>).</li>
+<li><strong>Replication divergence.</strong> A follower diverges beyond the skew tolerance after an unresolved HLC
+causality violation, or persistent skew beyond <code>NTP_skew_ms</code>. Detected by
+<code>kee_hlc_causality_violations_total</code> and <code>kee_follower_early_fire_total</code>. The follower
+re-requests the record; otherwise a full snapshot resync per <code>docs/runbooks/follower-skew.md</code>
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-26">§26</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-23-9">§23.9</a>).</li>
+<li><strong>Memory-pressure runaway.</strong> The OOM-killer fires despite active-expire escalation, typically
+from adversarial no-TTL key growth, which this engine cannot bound alone (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-3">P3</a>). Detected through
+cgroup <code>MemoryHigh</code>/OOM events. <code>PressureLevel::Critical</code> forces a synchronous expire pass; the
+operator raises the limit or engages the <code>LRU-LFU-Cache</code> eviction layer (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-26">§26</a>).</li>
+<li><strong>Split-brain.</strong> Two nodes accept writes during a partition because the single-leader assumption
+was violated. Detected as divergent WAL LSN sequences on reconnect. No auto recovery; it is out
+of scope for single-leader mode, so reconcile manually or resync from the designated primary
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-26">§26</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-23-8">§23.8</a>).</li>
+</ul>
+<p>Threats worth knowing (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-25">§25</a>): <strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#t-5">T5</a></strong> an unauthenticated replication stream (mTLS deferred, a
+trusted network segment assumed); <strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#t-7">T7</a></strong> a buggy or malicious <code>Sink</code>, contained by <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-13">I13</a>&#39;s bounded
+queue and timeout; <strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#t-10">T10</a></strong> an unauthenticated <code>FORCE_EXPIRE_PASS</code>, answered by an internal-only
+admin binding; <strong><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#t-11">T11</a></strong> a <code>TTL</code> timing probe that reveals whether a key exists, documented as a risk
+needing RESP-boundary authentication.</p>
+<h2 id="ex-the-numbers">The numbers</h2>
+<p>Rows marked <em>target</em> are design targets gated by the M-table (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-31">§31</a>), not measurements.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Budget / result</th>
+<th>Formula or source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Insert rate, no WAL, single thread</td>
+<td>≥ 5,000,000/s (target)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-1">M1</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a></td>
+</tr>
+<tr>
+<td>Insert rate, WAL group commit</td>
+<td>≥ 800,000/s (target)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-2">M2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a></td>
+</tr>
+<tr>
+<td>Fire throughput, 10M pre-populated deadlines</td>
+<td>≥ 10,000,000 fires/s (target)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-3">M3</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-31">§31</a></td>
+</tr>
+<tr>
+<td>Per-insert cost</td>
+<td>O(1); &quot;≤ 300 ns p50, ≤ 1 µs p99&quot; in <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a>, but &quot;&lt; 100 ns&quot; p50 in <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-31">§31</a> and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D3</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-4">M4</a>/<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-5">M5</a> (see note below)</td>
+</tr>
+<tr>
+<td>Fire jitter, wheel-tick path</td>
+<td>≤ 1 ms p99 (target)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-7">M7</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a></td>
+</tr>
+<tr>
+<td>Fire jitter, heap-top path</td>
+<td>≤ 200 µs p99 (target)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-6">M6</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a></td>
+</tr>
+<tr>
+<td>Active-expire staleness</td>
+<td>≤ 25 ms after deadline (target)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-8">M8</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a></td>
+</tr>
+<tr>
+<td>Recovery time</td>
+<td>≤ 5 s for a 1M-record WAL (target)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-9">M9</a>; <code>1,000,000 / 200,000 = 5 s</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D6)</td>
+</tr>
+<tr>
+<td>Group-commit fsync rate</td>
+<td>≈ 1,000 fsyncs/s vs 50,000/s device floor</td>
+<td><code>800,000 × 0.001 s = 800</code> records per window (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D5)</td>
+</tr>
+<tr>
+<td>Wheel horizon</td>
+<td>≈ 795 days (≈ 2.18 years)</td>
+<td><code>64^6 × 1 ms</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D1)</td>
+</tr>
+<tr>
+<td>RAM at 100M keys</td>
+<td>≤ 12 GiB ceiling</td>
+<td>24 B node + ≈ 48 B <code>KeyState</code> = 72 B; × 1.33 ≈ 96 B (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D2, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a>; see note below)</td>
+</tr>
+<tr>
+<td>Heap-top worst-case arrival</td>
+<td>12,800 in a 16 ms window vs capacity 256</td>
+<td><code>800,000 × 0.016</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D4)</td>
+</tr>
+<tr>
+<td>Storage amplification</td>
+<td>≈ 0.73× (ceiling ≤ 1.2×)</td>
+<td>7 GB WAL / 9.6 GB RAM (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D7, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Replicated fire accuracy</td>
+<td>≤ 2 × <code>NTP_skew_ms</code> = 200 ms at the 100 ms default</td>
+<td><a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-13">M13</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D10, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a></td>
+</tr>
+</tbody></table></div>
+<p>The blueprint states ceilings for startup (≤ 1 s cold), shutdown drain (≤ 2 s), 256 shards fixed
+at boot (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-11">P11</a>), a 99.9% per-node availability budget, and a replication RTT assumption of ≤ 5 ms
+intra-DC, unsupported beyond ≤ 50 ms (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a>).</p>
+<p>Places where the blueprint&#39;s numbers disagree with each other (stated as written, logged in the
+errata):</p>
+<ul>
+<li><strong>Per-insert p50 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-4">M4</a>).</strong> <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a> (&quot;≤ 300 ns p50&quot;, citing <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-4">M4</a>/<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-5">M5</a>) and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-16-4">§16.4</a> (&quot;≤ 300 ns amortised per
+insert, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-4">M4</a>&quot;) against the M-table&#39;s <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-4">M4</a> &quot;&lt; 100 ns&quot; (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-31">§31</a>), echoed by <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D3 and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-24-7">§24.7</a>.</li>
+<li><strong>RAM margin.</strong> <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D2: <code>100,000,000 × 96 B = 9.6 GB</code>, then &quot;× 1.25 … ≈ 11.5 GB&quot; against &quot;≤ 12 GiB&quot;.</li>
+<li><strong>Heap-top accuracy (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-6">M6</a>).</strong> <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-17-4">§17.4</a> gates on p95 under 200 µs (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-6">M6</a>); <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-31">§31</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-17-5">§17.5</a> and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-41">§41</a> say p99.</li>
+<li><strong>Bulk inserts.</strong> <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-21-4">§21.4</a> requires <code>EXPIRE_MANY</code> of 1,000,000 keys in under 100 ms, &quot;matching <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-2">M2</a>&#39;s
+WAL-inclusive throughput floor&quot;, while <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-21-2">§21.2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-21-6">§21.6</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#t-2">T2</a> and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-7">§8.7</a> cap <code>EXPIRE_MANY</code> at 100,000
+entries and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-2">M2</a> is ≥ 800,000 inserts per second (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-31">§31</a>).</li>
+</ul>
+<h2 id="ex-how-it-compares">How it compares</h2>
+<ul>
+<li><strong>Redis</strong> chose no timing wheel: a bounded active-cycle sample plus mandatory lazy-on-access,
+betting that TTL&#39;d keys stay few relative to the keyspace. That wins in a single-node,
+memory-resident keyspace where operational simplicity matters more than the asymptotics,
+which is the regime <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-2">P2</a> rejects at 100M TTL&#39;d keys (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/compare/#sec-34">§34</a>).</li>
+<li><strong>Kafka</strong> (<code>TimingWheel.scala</code>) chose an unbounded <code>DelayQueue</code> for overflow instead of a fixed
+heap-top. That is fine because its timer cardinality is bounded by broker request timeouts; this
+engine&#39;s arbitrary-TTL workload cannot make that bet, so <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-17-2">§17.2</a> fixes the capacity (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/compare/#sec-34">§34</a>).</li>
+<li><strong>Netty</strong> (<code>HashedWheelTimer</code>) chose a single-level wheel with a &quot;rounds&quot; counter in place of
+hierarchical cascading. That wins for thousands of per-channel I/O timeouts, where one level is
+simpler; at 100M keys the simplicity is unaffordable (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/compare/#sec-34">§34</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-14-7">§14.7</a>).</li>
+<li><strong>Linux kernel</strong> (<code>timer.c</code>, <code>hrtimer.c</code>) chose two entirely separate structures by accuracy
+class: a cascading wheel and a per-CPU rbtree. That wins because the two timer classes have
+disjoint call sites; this engine unifies both behind one <code>submit()</code> because Redis clients never
+distinguish accuracy classes (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/compare/#sec-34">§34</a>).</li>
+</ul>
+<h2 id="ex-building-it-the-phase-plan">Building it — the phase plan</h2>
+<p>Build card: <code>blueprints/build-cards/Key-Expiration-Engine.md</code>. Phase numbers below follow the phase
+headings (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-12">§12</a> = Phase 0 through <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-24">§24</a> = Phase 12). <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-1">§1</a> and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-2">§2</a> sometimes write &quot;Phase 16&quot;, &quot;Phase 22&quot;
+and so on for what the headings call <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-16">§16</a> (Phase 4) and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-22">§22</a> (Phase 10). &quot;Phase-1&quot; in <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-17">ADR-17</a>,
+<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-20-10">§20.10</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-23-2">§23.2</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#t-5">T5</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#t-10">T10</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#t-11">T11</a> and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#sec-37">§37</a> Alt-3 means the next release, not Phase 1 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-13">§13</a>).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>What exists afterwards</th>
+<th>The proof (§N.4)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-12">§12</a>)</td>
+<td>repo skeleton, CI, tick smoke test</td>
+<td><code>make test</code> exits 0 with exactly 1 test passing; CI green within 10 minutes</td>
+</tr>
+<tr>
+<td>1 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-13">§13</a>)</td>
+<td>clock source and the <code>MonotonicNs</code>/<code>WallNs</code> newtypes</td>
+<td>10,000,000 sequential <code>MonotonicNs::now()</code> calls non-decreasing while the mock wall clock steps back 100 times</td>
+</tr>
+<tr>
+<td>2 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-14">§14</a>)</td>
+<td>single-level hashed wheel</td>
+<td>1,000,000 insert+fire round trips in under 50 ms; a deadline at <code>Δticks = 64</code> returns <code>InsertError::PastHorizon</code></td>
+</tr>
+<tr>
+<td>3 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-15">§15</a>)</td>
+<td>sorted-heap baseline</td>
+<td>fire order over 1,000,000 random deadlines matches a sorted reference exactly</td>
+</tr>
+<tr>
+<td>4 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-16">§16</a>)</td>
+<td>hierarchical wheel with cascading</td>
+<td>100,000,000-key insert in under 30 s, identical fire order to the heap baseline over 10,000 random sequences</td>
+</tr>
+<tr>
+<td>5 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-17">§17</a>)</td>
+<td>hybrid wheel plus heap-top</td>
+<td>with <code>top_horizon = 16 ms</code>, p95 fire latency for a deadline 1 ms ahead is under 200 µs (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-6">M6</a>)</td>
+</tr>
+<tr>
+<td>6 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-18">§18</a>)</td>
+<td>active plus lazy expiration, memory-pressure feedback</td>
+<td>1,000,000 keys with TTLs over an hour all fire within ± 25 ms (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-8">M8</a>); a <code>Critical</code> pass on 10,000,000 keys in ≤ 1 s (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-10">M10</a>)</td>
+</tr>
+<tr>
+<td>7 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-19">§19</a>)</td>
+<td>engine integration and the cron-driver loop</td>
+<td>1,000,000 random-TTL submits all fire within ± 2 ticks</td>
+</tr>
+<tr>
+<td>8 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-20">§20</a>)</td>
+<td>notification sinks</td>
+<td>a permanently full subscriber only increments <code>dropped_total</code>; fire-path p99 is unaffected</td>
+</tr>
+<tr>
+<td>9 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-21">§21</a>)</td>
+<td>public API and Redis-compatible frontend</td>
+<td><code>redis-cli EXPIRE foo 10</code> returns RESP byte-identical to <code>redis-server</code></td>
+</tr>
+<tr>
+<td>10 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-22">§22</a>)</td>
+<td>WAL and crash recovery</td>
+<td><code>kill -9</code> with 100,000 deadlines recovers all of them; a 1,000,000-record replay in ≤ 5 s (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-9">M9</a>)</td>
+</tr>
+<tr>
+<td>11 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-23">§23</a>)</td>
+<td>replicated mode with HLC</td>
+<td>follower fires within <code>2 × NTP_skew_ms</code> (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-13">M13</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-12">I12</a>); zero duplicate fires on a 1-second backward clock step</td>
+</tr>
+<tr>
+<td>12 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-24">§24</a>)</td>
+<td>bulk APIs, comparative benchmarks, observability</td>
+<td>the <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-1">M1</a>–<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-14">M14</a> targets are met and CI-gated; <code>redis_compare.rs</code> matches or beats <code>redis-server</code> active-expire latency</td>
+</tr>
+</tbody></table></div>
+<p>Appendix B lists 1 week per phase for most phases and &quot;1-2 weeks&quot; for Phases 7, 9, 10 and 11, with
+Phases 1 and 3 running in parallel with 0 and 2 (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-41">§41</a>). <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-1">§1</a> gives its own estimate: 4–6 weeks for
+the Phase-0 drop &quot;(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-12">§12</a>–<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-21">§21</a>)&quot;, although that drop&#39;s list names the WAL (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-22">§22</a>) and the benchmark
+harness, and 3–5 months for the full system (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-1">§1</a>). The two are stated and not reconciled. <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-24-4">§24.4</a>
+says &quot;All twelve <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-1">M1</a>–<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#m-14">M14</a> performance targets&quot; while <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-31">§31</a> lists fourteen.</p>
+<h2 id="ex-questions-to-test-yourself">Questions to test yourself</h2>
+<ol>
+<li>Why is the heap-top&#39;s capacity fixed at 256 rather than sized to the theoretical worst-case
+arrival rate, and what mechanism absorbs the gap? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D4 gives the two figures; <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-17-2">§17.2</a>
+describes the overflow path; <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM7</a> gives the principle.</em></li>
+<li>Why does the engine&#39;s RTO stay bounded at ≤ 5 s regardless of total keyspace size, and what
+specific ADR makes that true? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/numbers/#sec-35">§35</a> D6 is the derivation; <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-10">ADR-10</a> is the cadence; <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-10">P10</a> states
+the goal.</em></li>
+<li>Explain why the active-expire cycle is bounded by wall time rather than sample count, and
+construct a concrete key distribution that would violate a sample-count bound but not a
+wall-time bound. — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM4</a> and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-5">P5</a> explain the failure; <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-6">ADR-06</a> and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-10">I10</a> give the bound.</em></li>
+<li>Trace the exact sequence of events in <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-5">§8.5</a>&#39;s worked example and explain why the cascade must
+recompute <code>Δticks</code> against the <em>current</em> <code>now</code>, not the value at insert time — what specific bug
+results if it doesn&#39;t? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-5">§8.5</a> has the trace; <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM1</a> names the bug class; <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#sec-26">§26</a> lists &quot;Cascade
+data loss&quot;.</em></li>
+<li>Why does recovery reconstruct the monotonic deadline from the wall-time-stamped WAL record rather
+than persisting the monotonic value directly, and what specific real-world event (documented in
+<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-22-8">§22.8</a>) does this design choice defend against? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-22-2">§22.2</a> gives the recovery formula and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/blueprint/#sec-22-8">§22.8</a>
+the edge case; <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-1">P1</a> and <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-5">I5</a> give the principle.</em></li>
+</ol>
+<h2 id="ex-if-you-only-remember-three-things">If you only remember three things</h2>
+<p>Deadlines live in a wheel of wheels where insert is O(1) and a small fixed-size sorted queue handles
+the soon-to-fire ones, and the two structures never hold the same deadline (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-1">§8.1</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-2">ADR-02</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-6">I6</a>).
+Scheduling runs on the monotonic clock, durability lives in the log not the wheel, and replication
+ships absolute deadlines ordered by a hybrid logical clock (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-33">MM3</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-7">P7</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-13">ADR-13</a>). Everything that
+could stall the fire path is bounded by wall time or dropped, never waited for (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-5">P5</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-10">I10</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-13">I13</a>).</p>
+<h2 id="ex-words-used-here">Words used here</h2>
+<ul>
+<li><strong>Deadline</strong>: a <code>(key, generation, MonotonicNs)</code> tuple representing one scheduled fire (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>).</li>
+<li><strong>Hierarchical timing wheel</strong>: a multi-level ring of slots; each level advances 64 times slower
+than the one below, giving O(1)-amortised insert (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-1">§8.1</a>).</li>
+<li><strong>Cascade</strong>: draining a level&#39;s current slot and re-inserting its entries one level lower when the
+cursor wraps (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-5">§8.5</a>).</li>
+<li><strong>Heap-top</strong>: the fixed-capacity (256) sorted heap holding near-term deadlines for sub-tick
+accuracy (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-4">ADR-04</a>).</li>
+<li><strong>Generation</strong>: a per-key counter that lets stale wheel entries be discarded instead of removed
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/reliability/#inv-7">I7</a>).</li>
+<li><strong>Clock domain</strong>: monotonic time for scheduling versus wall time for meaning to other processes,
+kept apart by newtypes (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#p-1">P1</a>).</li>
+<li><strong>Group commit</strong>: batching several WAL appends into one fsync, bounded by time or record count
+(<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-9">ADR-09</a>).</li>
+<li><strong>Snapshot</strong>: a point-in-time copy of shard and wheel state that pins WAL replay to a known
+position (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/trade-offs/#adr-10">ADR-10</a>).</li>
+<li><strong>HLC (hybrid logical clock)</strong>: a <code>(wall_ms, logical, node_id)</code> timestamp that combines
+wall-time meaning with causal ordering (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/architecture/#sec-8-4">§8.4</a>).</li>
+<li><strong>Sink</strong>: the pluggable trait that delivers fire notifications to a consumer (<a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/study/#sec-39">§39</a>, <a class="cite" href="/system-design-blueprints/systems/key-expiration-engine/build/#sec-20">§20</a>).</li>
+</ul>
+</div> </div> </div> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

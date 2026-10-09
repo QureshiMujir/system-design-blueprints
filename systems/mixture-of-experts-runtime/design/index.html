@@ -1,0 +1,567 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Mixture-of-Experts (MoE) Runtime — Design · Engineering Blueprints</title><meta name="description" content="Mixture-of-Experts (MoE) Runtime, lld: core types, repo tree, file inventory. Implement, from scratch in Rust, a Mixture-of-Experts (MoE) runtime that executes > MoE transformer layers: a top-k gating/router (softmax-over-topk, noisy and expert-choice > variants, auxiliary…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/mixture-of-experts-runtime/">Mixture-of-Experts (MoE) Runtime</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>Mixture-of-Experts (MoE) Runtime</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>14 phases</li> <li>~21 weeks</li> <li>4,594 lines</li> <li>blueprint #325</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/mixture-of-experts-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/mixture-of-experts-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Mixture-of-Experts (MoE) Runtime — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/mixture-of-experts-runtime/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>ExpertId(u32)
+  ownership: Copy; no heap
+  mutation: immutable after construction
+  concurrency: Send+Sync; safe to share across threads
+  persistence: serialized as u32 le in wire/checkpoint formats
+  compatibility: repr(transparent); stable ABI
+  invariant: value &lt; num_experts; violated =&gt; MoeError::InvalidExpertId
+
+TokenIdx(u32)
+  ownership: Copy; no heap
+  mutation: immutable after construction
+  concurrency: Send+Sync
+  persistence: serialized as u32 le
+  compatibility: repr(transparent); stable ABI
+  invariant: value &lt; n_tokens in current dispatch batch
+
+CapacityFactor(f32)
+  ownership: Copy
+  invariant: finite, &gt; 0.0; typical range [0.5, 2.0]
+  failure: NaN/Inf/&lt;=0 =&gt; MoeError::InvalidCapacityFactor at construction
+  persistence: stored in MoeConfig JSON as &quot;capacity_factor&quot;: float</code></pre><pre class="code"><code>DType enum
+  variants: F32, BF16, F16, I8 (quantized expert weights)
+  ownership: Copy
+  concurrency: Send+Sync
+  serialization: lowercase string in JSON config (&quot;f32&quot;, &quot;bf16&quot;, …)
+  constraint: GateLogits always F32 regardless of model dtype
+  constraint: GEMM backend must support requested dtype or return MoeError::UnsupportedDtype
+
+Device enum
+  variants: Cpu { num_threads: usize }, Cuda { ordinal: u32 }
+  ownership: Clone (cheap)
+  concurrency: Send+Sync; ordinal identifies CUDA device, not a stream
+  failure: Cuda ordinal &gt;= device count =&gt; MoeError::DeviceNotFound at init
+  persistence: not serialized in checkpoints; runtime configuration only</code></pre><pre class="code"><code>Layout struct
+  fields: offset: usize, strides: SmallVec&lt;[usize; 4]&gt;
+  ownership: Clone; no heap for rank&lt;=4 (SmallVec inline)
+  mutation: immutable after tensor view creation; new Layout per slice/transpose
+  concurrency: Send+Sync (no interior mutability)
+  invariant: strides.len() == shape.len(); offset + sum(dim_i * stride_i) &lt; storage_len
+  failure: violated stride invariant =&gt; MoeError::LayoutViolation (detected in debug mode)
+  serialization: not persisted; reconstructed from shape + contiguity assumption on load
+  rejected alt: single stride-free contiguous-only design — needed for transpose/slice in dispatch</code></pre><pre class="code"><code>Tensor struct
+  fields:
+    dtype: DType
+    shape: SmallVec&lt;[usize; 4]&gt;   // rank-0..4 inline; heap for rank&gt;4 (rare)
+    device: Device
+    layout: Layout
+    storage: Arc&lt;ArenaBlock&gt;       // ref-counted block in TensorArena
+  ownership: Arc-shared; cloning a Tensor is a view (zero-copy); exclusive mutation requires Arc::make_mut or unique handle
+  mutation semantics:
+    - Tensor is logically immutable (functional pipeline)
+    - in-place ops require caller to hold only Arc reference count == 1 (checked at runtime in debug)
+    - DispatchPlan scatter writes into pre-allocated output Tensor owned by dispatch stage
+  concurrency:
+    - multiple readers: safe (Arc)
+    - concurrent writers: forbidden; enforced by &amp;mut Tensor in all write APIs
+    - cross-thread send: Tensor: Send+Sync because ArenaBlock: Send+Sync
+  persistence: not directly serialized; weights loaded via ExpertWeights loader
+  compatibility: shape/dtype/layout are public stable fields; ArenaBlock internals opaque
+  failure modes:
+    - shape mismatch in GEMM -&gt; MoeError::ShapeMismatch { expected, got }
+    - wrong device -&gt; MoeError::DeviceMismatch
+    - storage freed before last view dropped -&gt; impossible (Arc prevents it)
+  pitfall: aliased views to same storage with overlapping writes -&gt; UB if both &amp;mut; API prevents by requiring unique Arc
+
+TensorArena struct
+  purpose: bump-allocate storage blocks; reclaim whole arena per forward pass
+  fields: blocks: Vec&lt;Box&lt;[u8]&gt;&gt;, bump_ptr: usize, device: Device
+  ownership: owned by MoeLayer; passed by &amp;mut into gate/dispatch/expert/combine stages
+  mutation: &amp;mut required; not Send (pinned to one thread/stream)
+  lifecycle: reset() at forward-pass start reclaims all blocks O(1)
+  failure: out-of-memory -&gt; MoeError::ArenaOom { requested_bytes }
+  invariant: all Tensors allocated from arena become invalid after reset(); callers must not retain Arc refs across reset boundary
+  pitfall: forgetting reset() -&gt; arena grows unboundedly; telemetry tracks arena high-water mark</code></pre><pre class="code"><code>GateLogits struct
+  fields:
+    logits: Tensor    // shape [n_tokens, num_experts], dtype F32
+    n_tokens: usize
+    num_experts: usize
+  ownership: produced by moe-gate; consumed once by top-k selection; not cloned
+  mutation: immutable after construction; gate module writes, router reads
+  concurrency: single-threaded within gate stage; passed by value to router
+  invariant: logits.shape == [n_tokens, num_experts]; dtype == F32
+  serialization: not persisted; recomputed each forward pass
+  failure: shape mismatch at construction -&gt; MoeError::ShapeMismatch</code></pre><pre class="code"><code>RoutingDecision struct
+  fields:
+    decisions: Vec&lt;[(ExpertId, f32); K]&gt;   // K = top-k; per-token expert assignments + softmax weights
+    n_tokens: usize
+    k: usize
+  ownership: produced by moe-gate router; consumed by moe-dispatch; single owner, passed by value
+  mutation: immutable after construction
+  concurrency: Send (passed across stage boundary)
+  invariant:
+    - decisions.len() == n_tokens
+    - for each token: sum of K weights == 1.0 (softmax-over-topk normalized); assert in debug
+    - ExpertId values &lt; num_experts
+    - weights &gt;= 0.0 (post-softmax)
+  tie-break: equal logits broken by ascending ExpertId (routing determinism invariant)
+  serialization: not persisted; debug-serializable to JSON for conformance fixtures
+  failure: invalid ExpertId -&gt; MoeError::InvalidExpertId; weight sum != 1.0 -&gt; MoeError::RoutingWeightError (debug only)</code></pre><pre class="code"><code>DispatchPlan struct
+  fields:
+    perm: Vec&lt;u32&gt;                 // permutation: perm[i] = original TokenIdx for dispatched slot i
+    per_expert_counts: Vec&lt;u32&gt;    // len = num_experts; count of tokens routed to each expert (post-drop)
+    dropped: BitSet                // bit i set iff TokenIdx(i) was dropped (capacity overflow)
+    capacity: Capacity             // computed = ceil(capacity_factor * n_tokens * k / num_experts)
+    n_tokens: usize
+    num_experts: usize
+  ownership: produced by moe-dispatch plan stage; consumed by scatter and a2a stages; single owner
+  mutation: immutable after plan construction; scatter reads perm; gather uses per_expert_counts
+  concurrency: Send; used across thread boundary between plan and scatter steps
+  invariants:
+    - perm.len() == sum(per_expert_counts) (total dispatched slots, not counting duplicates for k&gt;1)
+    - per_expert_counts[e] &lt;= capacity for all e (capacity invariant)
+    - dropped.len() == n_tokens
+    - dropped tokens not present in perm (token conservation)
+    - non-dropped tokens appear exactly k times in perm across all expert slots
+  serialization: debug-serializable (JSON) for conformance fixtures; not persisted in checkpoints
+  failure:
+    - per_expert_counts[e] &gt; capacity -&gt; MoeError::CapacityOverflow (should never reach construction; caught in plan step)
+    - perm contains TokenIdx &gt;= n_tokens -&gt; MoeError::InvalidTokenIdx
+  pitfall: perm uses u32 indices; n_tokens up to ~64K safe; assert n_tokens &lt;= u32::MAX at layer init</code></pre><pre class="code"><code>CombineBuffer struct
+  fields:
+    data: Tensor            // shape [n_tokens, d_model], dtype = model dtype; accumulator for combine step
+    gate_weights: Tensor    // shape [n_tokens, k], dtype F32; normalized weights for weighted sum
+    dropped_mask: BitSet    // mirrors DispatchPlan::dropped; dropped tokens get residual passthrough
+  ownership: allocated in TensorArena per forward pass; consumed by combine step to produce output Tensor
+  mutation: data written by combine gather; gate_weights read-only after dispatch plan
+  concurrency: single-threaded combine (or partitioned by token range, non-overlapping writes)
+  invariant:
+    - data.shape[0] == n_tokens; data.shape[1] == d_model
+    - gate_weights.shape == [n_tokens, k]
+    - for each non-dropped token: sum over k of gate_weights[t, :] == 1.0 (softmax-normalized, inherited from RoutingDecision)
+    - dropped token slots in data: written with residual input (passthrough); gate_weights unused for those tokens
+  failure: d_model mismatch vs input tensor -&gt; MoeError::ShapeMismatch
+  pitfall: zero-initialize data before combine scatter to avoid accumulating garbage from prior forward pass</code></pre><pre class="code"><code>ExpertWeights struct
+  fields:
+    w_in:  Tensor    // shape [d_ff, d_model] for this rank&#39;s expert shard
+    w_out: Tensor    // shape [d_model, d_ff] for this rank&#39;s expert shard
+    expert_id: ExpertId
+    ep_rank: u32     // which EP rank owns this expert shard
+    dtype: DType
+  ownership: loaded once at init; Arc-shared into expert FFN kernels; not cloned per forward pass
+  mutation: immutable during forward pass; re-loaded only on weight hot-swap (future phase)
+  concurrency: Send+Sync (Arc&lt;Tensor&gt; storage is read-only during forward)
+  sharding invariant: expert e lives on EP rank (e.value % world_size); w_in/w_out contain only this rank&#39;s slice
+  persistence: loaded from safetensors layout; key format &quot;experts.{expert_id}.w_in&quot; / &quot;experts.{expert_id}.w_out&quot;
+  compatibility: shape [d_ff, d_model] is canonical regardless of EP sharding; sharding expressed via Layout offset/stride
+  failure: missing key in checkpoint -&gt; MoeError::WeightLoadError; shape mismatch -&gt; MoeError::ShapeMismatch
+  pitfall: d_ff may differ per expert in heterogeneous MoE; validate per-expert shape at load time</code></pre><pre class="code"><code>AuxLossState struct
+  fields:
+    importance: Vec&lt;f32&gt;    // len = num_experts; sum of softmax weights routed to each expert (for importance loss)
+    load:       Vec&lt;f32&gt;    // len = num_experts; fraction of tokens routed to each expert (for load-balance loss)
+    z_logits:   Vec&lt;f32&gt;    // len = num_experts; log-sum-exp of gate logits per expert (for z-loss)
+    n_tokens:   usize
+    num_experts: usize
+  ownership: produced by moe-gate alongside RoutingDecision; consumed by backward to compute aux gradients
+  mutation: written once during gate forward; read during backward; not modified between
+  concurrency: single-threaded within gate; passed by value to loss computation
+  invariant:
+    - importance.len() == load.len() == num_experts
+    - sum(load) ~= k (each token routes to k experts; floating point tolerance 1e-4)
+    - importance[e] &gt;= 0 for all e
+  serialization: not persisted; recomputed each forward pass; logged to telemetry per step
+  failure: num_experts mismatch -&gt; MoeError::DimensionMismatch</code></pre><pre class="code"><code>EpGroup struct
+  fields:
+    rank:       u32
+    world_size: u32
+    transport:  Arc&lt;dyn Transport&gt;
+  ownership: Arc-shared across moe-comm and moe-sched; initialized once at runtime startup
+  mutation: immutable after init; transport is a trait object with interior mutability for connection state
+  concurrency: Send+Sync; multiple stages may hold Arc&lt;EpGroup&gt;
+  invariant:
+    - rank &lt; world_size
+    - expert e lives on rank (e.value % world_size); enforced at weight load and dispatch plan construction
+    - all ranks in EpGroup must agree on world_size (checked during transport handshake)
+  persistence: not serialized; reconstructed from env vars (MOE_EP_WORLD_SIZE, MOE_EP_RANK) at startup
+  failure:
+    - rank &gt;= world_size -&gt; MoeError::InvalidEpRank
+    - transport init failure -&gt; MoeError::CommInitError(String)
+  pitfall: world_size=1 (single-rank) still requires EpGroup; all-to-all becomes a no-op memcpy in InProc transport
+
+Transport trait (object-safe)
+  methods:
+    fn all_to_all(&amp;self, send: &amp;[u8], send_counts: &amp;[usize], recv: &amp;mut [u8], recv_counts: &amp;[usize]) -&gt; Result&lt;(), MoeError&gt;
+    fn all_reduce_sum_f32(&amp;self, buf: &amp;mut [f32]) -&gt; Result&lt;(), MoeError&gt;
+    fn barrier(&amp;self) -&gt; Result&lt;(), MoeError&gt;
+  variants:
+    InProcTransport  -- uses crossbeam channels; world_size &lt;= logical cores; for tests + single-node sim
+    MultiProcTransport -- shims MPI_Alltoallv / NCCL all-to-all; activated when MOE_EP_WORLD_SIZE &gt; 1 &amp;&amp; feature=&quot;mpi&quot;
+  invariant: all_to_all byte counts must be symmetric across ranks (EP consistency invariant); validated in debug mode
+  failure: bytes miscount -&gt; MoeError::A2aCountMismatch { rank, expected, got }
+  rejected alt: hard-coding MPI directly in moe-comm -&gt; breaks single-node tests; Transport trait decouples</code></pre><pre class="code"><code>MoeConfig struct
+  fields:
+    num_experts:     u32          // total experts across all EP ranks
+    k:               u32          // top-k; 1 &lt;= k &lt;= num_experts
+    capacity_factor: CapacityFactor
+    ep_size:         u32          // EP world_size; must divide num_experts
+    d_model:         usize
+    d_ff:            usize
+    dtype:           DType
+    activation:      ActivationKind  // SwiGLU | ReLU | GeLU
+    noisy_gate:      bool
+    expert_choice:   bool
+    aux_loss_coeff:  f32
+    z_loss_coeff:    f32
+    shared_expert:   bool
+  ownership: Arc-shared; loaded once from JSON config file; immutable during training/inference run
+  mutation: immutable after construction; modifying requires re-init of MoeLayer
+  concurrency: Send+Sync
+  serialization: serde JSON; all fields required except optional aux/z loss coefficients (default 0.0)
+  invariants:
+    - 1 &lt;= k &lt;= num_experts
+    - ep_size divides num_experts
+    - capacity_factor.0 &gt; 0.0
+    - expert_choice XOR noisy_gate (cannot both be true)
+  failure: constraint violation at deserialization -&gt; MoeError::ConfigError(String)</code></pre><pre class="code"><code>MoeLayer struct
+  fields:
+    config:    Arc&lt;MoeConfig&gt;
+    ep_group:  Arc&lt;EpGroup&gt;
+    experts:   Vec&lt;Arc&lt;ExpertWeights&gt;&gt;   // only this rank&#39;s local experts (len = num_experts / ep_size)
+    gate_proj: Tensor                     // W_g: shape [d_model, num_experts]; gate linear projection
+    shared_expert: Option&lt;Arc&lt;ExpertWeights&gt;&gt;
+    arena:     TensorArena               // per-layer arena; reset each forward call
+    telemetry: Arc&lt;TelemetrySink&gt;
+  ownership: owned by caller (model runtime or moe-cli); not cloned
+  mutation: &amp;mut Self required for forward() (arena reset is mutating); weight fields immutable
+  concurrency: not Send (TensorArena pinned to caller thread); wrap in Mutex&lt;MoeLayer&gt; for multi-thread callers
+  lifecycle: ::new(config, ep_group, weights, telemetry) -&gt; Result&lt;Self, MoeError&gt;; drop releases arena + weights Arc
+  public API:
+    fn forward(&amp;mut self, input: &amp;Tensor, train: bool) -&gt; Result&lt;(Tensor, Option&lt;AuxLossState&gt;), MoeError&gt;
+  invariants:
+    - input.shape == [n_tokens, config.d_model]
+    - output.shape == input.shape (token conservation)
+    - train=false: AuxLossState returned as None; aux/z loss not computed
+  failure modes:
+    - input shape violation -&gt; MoeError::ShapeMismatch
+    - arena OOM -&gt; MoeError::ArenaOom
+    - comm failure -&gt; MoeError::CommError(Box&lt;dyn Error&gt;)
+    - GEMM FFI error -&gt; MoeError::GemmError(String)</code></pre><pre class="code"><code>MoeError enum (non_exhaustive)
+  variants:
+    ShapeMismatch       { expected: SmallVec&lt;[usize;4]&gt;, got: SmallVec&lt;[usize;4]&gt; }
+    DimensionMismatch   { context: &amp;&#39;static str, expected: usize, got: usize }
+    InvalidExpertId     { id: u32, num_experts: u32 }
+    InvalidTokenIdx     { idx: u32, n_tokens: u32 }
+    InvalidCapacityFactor(f32)
+    CapacityOverflow    { expert_id: ExpertId, count: usize, capacity: usize }
+    RoutingWeightError  { token_idx: usize, weight_sum: f32 }
+    DeviceMismatch      { expected: Device, got: Device }
+    DeviceNotFound      { ordinal: u32 }
+    UnsupportedDtype    { dtype: DType, context: &amp;&#39;static str }
+    LayoutViolation     (String)
+    ArenaOom            { requested_bytes: usize, available: usize }
+    WeightLoadError     (String)
+    ConfigError         (String)
+    GemmError           (String)
+    CommInitError       (String)
+    CommError           (Box&lt;dyn std::error::Error + Send + Sync&gt;)
+    A2aCountMismatch    { rank: u32, expected: usize, got: usize }
+    InvalidEpRank       { rank: u32, world_size: u32 }
+  traits: std::error::Error, Display, Debug, Send, Sync
+  ownership: heap-allocated message strings only in leaf variants; others are Copy-friendly
+  conversion: From&lt;std::io::Error&gt; -&gt; MoeError::WeightLoadError; From&lt;serde_json::Error&gt; -&gt; MoeError::ConfigError
+  serialization: not persisted; logged via tracing::error! with structured fields at error site
+  invariant: no variant captures raw pointers or non-Send types
+  pitfall: CommError boxes dyn Error to avoid pulling comm-crate types into moe-core; keep moe-core dep-free</code></pre><pre class="code"><code>TelemetrySink trait (object-safe)
+  methods:
+    fn record_expert_utilization(&amp;self, step: u64, utils: &amp;[f32])  // utils[e] in [0,1]
+    fn record_drop_rate(&amp;self, step: u64, rate: f32)
+    fn record_routing_entropy(&amp;self, step: u64, entropy: f32)
+    fn record_stage_latency(&amp;self, step: u64, stage: StageName, nanos: u64)
+    fn flush(&amp;self)
+  implementations: NullSink (tests/benches), LogSink (tracing-based), MetricsSink (prometheus-compatible counters)
+  concurrency: &amp;self (shared ref); interior mutability behind Mutex or atomic counters
+  ownership: Arc&lt;dyn TelemetrySink&gt; passed to MoeLayer at construction
+
+StageName enum
+  variants: Gate, Dispatch, A2aSend, ExpertGemm, A2aRecv, Combine
+  ownership: Copy
+
+TelemetryReport struct
+  fields:
+    step:              u64
+    expert_utils:      Vec&lt;f32&gt;     // len = num_experts; utilization per expert
+    drop_rate:         f32          // fraction of tokens dropped this step
+    routing_entropy:   f32          // H = -sum p_e log p_e over expert routing distribution
+    stage_latencies_ns: HashMap&lt;StageName, u64&gt;
+    aux_loss:          Option&lt;f32&gt;
+    z_loss:            Option&lt;f32&gt;
+  serialization: serde JSON + CSV (for bench output); all fields public
+  ownership: value type; produced by TelemetrySink::flush aggregation; not stored long-term in runtime</code></pre><pre class="code"><code>Stream enum (moe-sched)
+  variants:
+    CpuThread { handle: Arc&lt;ThreadPool&gt; }
+    CudaStream { ptr: *mut c_void, device: u32 }   // opaque CUDA stream handle; unsafe Send impl
+  ownership: Arc-shared between overlap coordinator and individual stages
+  concurrency:
+    CpuThread: Send+Sync (ThreadPool is Arc-wrapped)
+    CudaStream: Send via unsafe impl; single consumer per stream enforced by scheduler
+  failure: CudaStream creation failure -&gt; MoeError::DeviceNotFound
+
+DoubleBufferState enum (moe-sched)
+  variants: Idle, CommActive { buf_idx: u8 }, ComputeActive { buf_idx: u8 }, BothActive
+  transitions:
+    Idle -&gt; CommActive(0) on a2a launch
+    CommActive(i) -&gt; BothActive on compute launch
+    BothActive -&gt; ComputeActive(i^1) on comm completion
+    ComputeActive(i) -&gt; Idle on compute completion
+  ownership: owned by OverlapCoordinator; not Send (single scheduler thread)
+  invariant: buf_idx in {0,1}; compute and comm never write same buffer index simultaneously
+  failure: invalid state transition -&gt; debug_assert! + MoeError::SchedulerStateError (in release: log + continue)</code></pre><pre class="code"><code>fn compute_capacity(capacity_factor: CapacityFactor, n_tokens: usize, k: u32, num_experts: u32) -&gt; Capacity
+  formula: ceil(capacity_factor.0 * (n_tokens * k as usize) as f32 / num_experts as f32)
+  return type: Capacity(usize)
+  invariants:
+    - result &gt;= 1 (minimum 1 token slot per expert regardless of factor)
+    - if capacity_factor == inf (large float) -&gt; capacity = n_tokens * k (no dropping; dense equivalent)
+  failure: overflow usize on extreme inputs -&gt; MoeError::CapacityOverflow guard before computation
+  determinism: pure function; same inputs -&gt; same output; no RNG
+
+Capacity(usize) newtype
+  ownership: Copy
+  compatibility: repr(transparent); used in DispatchPlan and CombineBuffer size assertions</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>moe-runtime/                          # repo root
+├── README.md                         # project overview, quick-start, status badges
+├── CONTRIBUTING.md                   # PR process, coding standards, DCO sign-off
+├── CODE_OF_CONDUCT.md                # contributor covenant v2.1
+├── SECURITY.md                       # vuln disclosure policy, CVE contacts, embargo SLA
+├── CHANGELOG.md                      # semver changelog (keep-a-changelog format)
+├── BLUEPRINT_LOG.md                  # per-phase completion notes, ADR register
+├── BUILD_PLAN.md                     # phase-&gt;crate dependency schedule, gate criteria
+├── LICENSE                           # Apache-2.0
+├── Makefile                          # targets: build, test, bench, fuzz, lint, fmt, doc, docker
+├── Cargo.toml                        # workspace manifest; resolver=&quot;2&quot;; release+bench profiles
+├── Cargo.lock                        # committed; reproducible CI builds
+├── rust-toolchain.toml               # channel=&quot;1.78.0&quot;; rustfmt, clippy, llvm-tools-preview
+├── clippy.toml                       # deny: unwrap_used, panic, expect_used
+├── .rustfmt.toml                     # edition=&quot;2021&quot;; max_width=100
+├── Dockerfile                        # multi-stage: rust:1.78-slim builder + debian runtime
+├── docker-compose.yml                # runner (single-node), runner-ep (4-rank loopback)
+├── .env.example                      # MOE_EP_WORLD_SIZE, MOE_BACKEND, MOE_LOG_LEVEL stubs
+├── .cargo/config.toml                # target-dir; linker flags; RUSTFLAGS for MSRV lint
+├── configs/default.toml              # capacity_factor=1.25; k=2; ep_world=1
+├── configs/ep4.toml                  # EP=4 reference config for integration tests
+├── docs/architecture.md              # ASCII diagram + narrative; kept in sync with blueprint</code></pre><pre class="diagram"><code>├── .github/workflows/
+│   ├── ci.yml                        # PR gate: fmt, clippy, test, miri (core), conformance
+│   ├── bench.yml                     # nightly: criterion JSON -&gt; PR delta comment
+│   ├── fuzz.yml                      # weekly: cargo-fuzz 24h budget
+│   ├── release.yml                   # tag-triggered: changelog, crates.io, Docker push
+│   └── security.yml                  # cargo-audit + cargo-deny on schedule + PR
+├── crates/
+│   ├── moe-core/src/
+│   │   ├── lib.rs, tensor.rs         # Tensor handle + Arena
+│   │   ├── arena.rs                  # Slab arena; align-aware alloc/free for Tensor storage
+│   │   ├── ids.rs                    # ExpertId, TokenIdx newtypes
+│   │   ├── capacity.rs               # CapacityFactor(f32) newtype; formula impl
+│   │   ├── bitset.rs                 # BitSet over TokenIdx; compact dropped-token tracking
+│   │   ├── routing.rs                # GateLogits, RoutingDecision, DispatchPlan
+│   │   ├── combine.rs                # CombineBuffer, AuxLossState
+│   │   ├── device.rs                 # Device, DType, Layout
+│   │   └── error.rs                  # MoeError enum
+│   ├── moe-gate/src/
+│   │   ├── topk.rs, softmax.rs       # dense top-k; softmax-over-topk
+│   │   ├── noisy.rs                  # noisy top-k (Shazeer 2017)
+│   │   ├── expert_choice.rs          # expert-choice routing (Zhou 2022)
+│   │   ├── aux_loss.rs, z_loss.rs    # load-balance + z-loss (ST-MoE)</code></pre><pre class="diagram"><code>│   ├── moe-dispatch/src/
+│   │   ├── capacity.rs               # Capacity (moe-core CapacityFactor -&gt; Capacity); overflow detection
+│   │   ├── plan.rs                   # DispatchPlan; BitSet dropped tracking
+│   │   ├── permute.rs                # build DispatchPlan.perm from RoutingDecision
+│   │   ├── scatter.rs, gather.rs     # token&lt;-&gt;expert contiguous buffers
+│   │   ├── drop_policy.rs            # deterministic drop (lowest gate weight first)
+│   │   └── combine.rs                # gate-weighted sum; residual passthrough
+│   ├── moe-expert/src/
+│   │   ├── weights.rs                # ExpertWeights; EP-rank sharding
+│   │   ├── ffn.rs                    # GEMM(w_in)-&gt;act-&gt;GEMM(w_out)
+│   │   ├── activation.rs             # SwiGLU, ReLU, GeLU
+│   │   ├── gemm_ffi.rs               # unsafe FFI to cblas_sgemm (CPU) / cuBLAS (CUDA)
+│   │   ├── grouped_gemm.rs           # variable-M batched GEMM orchestration; offset vector build
+│   │   └── shard.rs                  # EP sharding: rank-&gt;expert slice; boundary validation
+│   ├── moe-comm/src/
+│   │   ├── ep_group.rs               # EpGroup; rank, world_size, transport
+│   │   ├── transport.rs              # InProc | MPI | NCCL shim; capability detection
+│   │   ├── inproc.rs                 # shared-memory channel a2a for single-process EP tests
+│   │   ├── nccl.rs                   # NCCL FFI wrapper; ncclAllToAll; stream sync
+│   │   ├── tcp.rs                    # TCP fallback transport; framed send/recv (test/CI only)
+│   │   ├── a2a.rs                    # all-to-all; symmetric count protocol
+│   │   └── allreduce.rs              # aux_loss gradient aggregation
+│   ├── moe-sched/src/
+│   │   ├── stream.rs                 # Stream abstraction (CPU pool / CUDA)
+│   │   ├── pipeline.rs               # micro-batch pipeline; stage graph; dependency edges
+│   │   ├── overlap.rs                # comm/compute overlap
+│   │   ├── microbatch.rs             # micro-batch pipelining
+│   │   └── doublebuf.rs              # double-buffer a2a/GEMM interleave</code></pre><pre class="diagram"><code>│   ├── moe-runtime/src/
+│   │   ├── layer.rs                  # MoeLayer::forward orchestration
+│   │   ├── config.rs                 # MoeConfig struct
+│   │   ├── backward.rs               # backward pass hooks
+│   │   ├── weight_loader.rs          # load ExpertWeights from safetensors/npz; shard assignment
+│   │   └── shared_expert.rs          # always-active expert path
+│   ├── moe-telemetry/src/
+│   │   ├── metrics.rs                # utilization, drop rate, entropy gauges
+│   │   ├── span.rs                   # tracing::Span per pipeline stage
+│   │   ├── export.rs                 # prometheus text-format; optional OTLP sink
+│   │   ├── hooks.rs                  # hook injection aligned to moe-runtime stages
+│   │   └── report.rs                 # TelemetryReport; JSON/CSV
+│   ├── moe-cli/src/
+│   │   ├── main.rs, args.rs          # clap subcommands: run, dump-stats, validate
+│   │   ├── loader.rs, runner.rs      # config+weight load; forward + stat dump
+│   │   └── stats.rs                  # telemetry snapshot print; JSON + human-readable modes
+│   └── moe-bench/src/
+│       ├── harness.rs                # differential: runtime vs dense reference
+│       ├── fixtures.rs               # shared weight fixtures; deterministic random seed
+│       ├── report.rs                 # benchmark result aggregator; CSV + markdown output
+│       └── gate_bench.rs, dispatch_bench.rs, expert_bench.rs, a2a_bench.rs, e2e_bench.rs
+├── benchmarks/baselines/             # committed Criterion JSON baselines
+├── conformance/fixtures/             # topk_vectors, dispatch_plans, a2a_cases
+├── fuzz/fuzz_targets/                # fuzz_gate, fuzz_dispatch, fuzz_a2a
+├── examples/                         # single_layer, ep_simulation, telemetry_demo
+├── scripts/                          # setup.sh, run_conformance.sh, update_baselines.sh
+├── tools/weight_converter/           # HuggingFace -&gt; safetensors layout converter
+├── docs/adr/                         # 0001-language through 0025-packaging (one file per ADR row, §9)
+├── docs/runbooks/                    # high_drop_rate, ep_rank_divergence, gemm_failure
+├── papers/                           # shazeer2017, lepikhin2020, fedus2021, zhou2022 PDFs
+├── legal/NOTICE                      # third-party attribution (Apache-2.0)
+└── brand/logo.svg</code></pre> </section><section aria-labelledby="sec-file-inventory"> <h2 id="sec-file-inventory">File inventory <small class="muted">(Appendix A · 149 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File / Directory</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td>moe-core/</td><td></td></tr><tr><td>Cargo.toml</td><td>crate manifest; no-std compatible core types</td></tr><tr><td>src/lib.rs</td><td>re-exports all public types; feature flags</td></tr><tr><td>src/ids.rs</td><td>ExpertId(u32), TokenIdx(u32) newtypes; validation, range checks</td></tr><tr><td>src/capacity.rs</td><td>CapacityFactor(f32) newtype; formula impl</td></tr><tr><td>src/device.rs</td><td>Device enum {Cpu, Cuda(u8)}; DType {F32,BF16,F16,I8}; Layout {strides, offset}</td></tr><tr><td>src/tensor.rs</td><td>Tensor handle; storage ptr, shape, dtype, device, layout</td></tr><tr><td>src/arena.rs</td><td>Slab arena for Tensor storage; align-aware alloc/free</td></tr><tr><td>src/routing.rs</td><td>GateLogits, RoutingDecision, DispatchPlan defs</td></tr><tr><td>src/combine.rs</td><td>CombineBuffer defs; AuxLossState {importance, load}; accumulate/reset</td></tr><tr><td>src/error.rs</td><td>MoeError exhaustive enum; From impls for FFI errors</td></tr><tr><td>src/bitset.rs</td><td>BitSet over TokenIdx; compact dropped-token tracking</td></tr><tr><td>tests/types_roundtrip.rs</td><td>property tests: newtype conversions, capacity formula</td></tr><tr><td>moe-gate/</td><td></td></tr><tr><td>Cargo.toml</td><td>depends on moe-core</td></tr><tr><td>src/lib.rs</td><td>GateRouter trait; dispatch to variant impls</td></tr><tr><td>src/topk.rs</td><td>dense top-k selection; deterministic tie-break by ExpertId</td></tr><tr><td>src/softmax.rs</td><td>softmax-over-topk renormalization; fused kernel hook</td></tr><tr><td>src/noisy.rs</td><td>noisy top-k: noise projection W_noise; inference bypass flag</td></tr><tr><td>src/expert_choice.rs</td><td>expert-choice routing; per-expert budget select; no-drop guarantee</td></tr><tr><td>src/aux_loss.rs</td><td>compute f_e, p_e; fill AuxLossState; z-loss scalar</td></tr><tr><td>src/z_loss.rs</td><td>ST-MoE z-loss; coefficient α; gradient passthrough</td></tr><tr><td>tests/routing_det.rs</td><td>determinism tests: same seed → bit-identical RoutingDecision</td></tr><tr><td>tests/combine_sum.rs</td><td>gate weights sum-to-1 invariant for all K, all variants</td></tr><tr><td>benches/gate_throughput.rs</td><td>throughput at (1024,8192,8) tokens×d_model×experts</td></tr><tr><td>moe-dispatch/</td><td></td></tr><tr><td>Cargo.toml</td><td>depends on moe-core</td></tr><tr><td>src/lib.rs</td><td>Dispatcher trait; forward/combine entry points</td></tr><tr><td>src/capacity.rs</td><td>capacity check; overflow detection; drop-lowest logic</td></tr><tr><td>src/plan.rs</td><td>DispatchPlan construction; BitSet dropped tracking</td></tr><tr><td>src/permute.rs</td><td>build DispatchPlan.perm from RoutingDecision; scatter impl</td></tr><tr><td>src/scatter.rs</td><td>scatter tokens into per-expert contiguous buffers using perm</td></tr><tr><td>src/gather.rs</td><td>gather expert outputs back; reverse permutation</td></tr><tr><td>src/combine.rs</td><td>gate-weighted sum; residual passthrough for dropped tokens</td></tr><tr><td>src/drop_policy.rs</td><td>deterministic drop policy; BitSet population; telemetry hook</td></tr><tr><td>tests/token_conservation.rs</td><td>every token present exactly once in output, all drop rates</td></tr><tr><td>tests/capacity_overflow.rs</td><td>overflow paths; drop ordering; residual correctness</td></tr><tr><td>benches/dispatch_combine.rs</td><td>scatter+gather throughput at varying capacity factors</td></tr><tr><td>moe-expert/</td><td></td></tr><tr><td>Cargo.toml</td><td>depends on moe-core; feature = &quot;cuda&quot;</td></tr><tr><td>src/lib.rs</td><td>Expert trait; weight storage; forward dispatch</td></tr><tr><td>src/weights.rs</td><td>ExpertWeights load/shard; dtype; alignment for GEMM</td></tr><tr><td>src/ffn.rs</td><td>FFN: w_in GEMM → activation → w_out GEMM; shape checks</td></tr><tr><td>src/activation.rs</td><td>activation enum {GeLU, SiLU, ReLU}; fused-kernel hooks</td></tr><tr><td>src/gemm_ffi.rs</td><td>unsafe FFI to cblas_sgemm (CPU, row-major batched SGEMM) / cuBLAS (CUDA, grouped GEMM + stream handle passthrough)</td></tr><tr><td>src/grouped_gemm.rs</td><td>variable-M batched GEMM orchestration; offset vector build</td></tr><tr><td>src/shard.rs</td><td>EP sharding logic; rank→expert slice; boundary validation</td></tr><tr><td>tests/ffn_reference.rs</td><td>FFN output vs NumPy reference; BF16 tolerance bounds</td></tr><tr><td>tests/grouped_gemm.rs</td><td>grouped GEMM vs loop-of-matmul; shape edge cases</td></tr><tr><td>benches/expert_gemm.rs</td><td>grouped GEMM throughput; expert count scaling</td></tr><tr><td>moe-comm/</td><td></td></tr><tr><td>Cargo.toml</td><td>depends on moe-core; feature = &quot;nccl&quot;</td></tr><tr><td>src/lib.rs</td><td>Collective trait; EpGroup; transport selection</td></tr><tr><td>src/ep_group.rs</td><td>EpGroup construction; rank validation; world-size checks</td></tr><tr><td>src/transport.rs</td><td>Transport enum {InProc, Nccl, Tcp}; capability detection</td></tr><tr><td>src/inproc.rs</td><td>shared-memory channel a2a for single-process EP tests</td></tr><tr><td>src/nccl.rs</td><td>NCCL FFI wrapper; ncclAllToAll; stream synchronization</td></tr><tr><td>src/tcp.rs</td><td>TCP fallback; framed send/recv; blocking; test/CI use only</td></tr><tr><td>src/a2a.rs</td><td>a2a orchestration; per-rank count computation; buffer mgmt</td></tr><tr><td>src/allreduce.rs</td><td>all-reduce for aux loss aggregation across EP group</td></tr><tr><td>tests/inproc_a2a.rs</td><td>round-trip correctness; count symmetry; byte-exact check</td></tr><tr><td>tests/ep_consistency.rs</td><td>expert-e lives on rank e%world_size; ownership checks</td></tr><tr><td>benches/a2a_bandwidth.rs</td><td>a2a bandwidth at EP=1,2,4,8; latency vs message size</td></tr><tr><td>moe-sched/</td><td></td></tr><tr><td>Cargo.toml</td><td>depends on moe-core, moe-dispatch, moe-comm, moe-expert</td></tr><tr><td>src/lib.rs</td><td>Scheduler trait; pipeline config; stream handles</td></tr><tr><td>src/stream.rs</td><td>device stream pool; compute vs comm stream allocation</td></tr><tr><td>src/doublebuf.rs</td><td>DoubleBuffer&lt;T&gt; ping-pong; swap/borrow semantics</td></tr><tr><td>src/pipeline.rs</td><td>micro-batch pipeline; stage graph; dependency edges</td></tr><tr><td>src/overlap.rs</td><td>comm/compute overlap logic; event insertion; sync points</td></tr><tr><td>src/microbatch.rs</td><td>batch splitting; per-microbatch DispatchPlan vector</td></tr><tr><td>tests/overlap_correctness.rs</td><td>overlapped vs serial produce identical outputs</td></tr><tr><td>tests/double_buffer.rs</td><td>ping-pong invariants; no aliasing; race-free under loom</td></tr><tr><td>benches/pipeline_latency.rs</td><td>end-to-end latency; overlap speedup ratio measurement</td></tr><tr><td>moe-runtime/</td><td></td></tr><tr><td>Cargo.toml</td><td>depends on all moe-* crates</td></tr><tr><td>src/lib.rs</td><td>MoeLayer struct; forward/backward stubs; public API</td></tr><tr><td>src/layer.rs</td><td>MoeLayer::forward: gate→dispatch→a2a→expert→a2a→combine</td></tr><tr><td>src/config.rs</td><td>MoeConfig {num_experts, k, capacity_factor, ep_world, dtype}</td></tr><tr><td>src/backward.rs</td><td>gradient routing stubs; aux/z-loss backward accumulation</td></tr><tr><td>src/weight_loader.rs</td><td>load ExpertWeights from safetensors/npz; shard assignment</td></tr><tr><td>src/shared_expert.rs</td><td>always-active expert path (k+S routing)</td></tr><tr><td>tests/layer_forward.rs</td><td>full MoeLayer forward vs dense reference; capacity=inf k=E</td></tr><tr><td>tests/layer_determinism.rs</td><td>repeated forward passes bit-identical given same seed</td></tr><tr><td>tests/aux_loss_nonzero.rs</td><td>aux loss &gt; 0 under imbalanced routing; z-loss present</td></tr><tr><td>benches/layer_e2e.rs</td><td>end-to-end MoeLayer forward throughput; token scaling</td></tr><tr><td>moe-telemetry/</td><td></td></tr><tr><td>Cargo.toml</td><td>depends on moe-core; optional tracing feature</td></tr><tr><td>src/lib.rs</td><td>TelemetryHandle; register_layer; flush</td></tr><tr><td>src/metrics.rs</td><td>expert utilization, drop rate, routing entropy gauges</td></tr><tr><td>src/span.rs</td><td>tracing::span! wrappers per pipeline stage</td></tr><tr><td>src/export.rs</td><td>prometheus text-format; optional OTLP sink</td></tr><tr><td>src/hooks.rs</td><td>hook injection aligned to moe-runtime stages</td></tr><tr><td>src/report.rs</td><td>TelemetryReport; JSON/CSV</td></tr><tr><td>tests/metrics_emit.rs</td><td>metrics emitted on forward pass; no double-counting</td></tr><tr><td>tests/span_nesting.rs</td><td>span hierarchy; parent-child stage order</td></tr><tr><td>moe-cli/</td><td></td></tr><tr><td>Cargo.toml</td><td>depends on moe-runtime, moe-telemetry; clap feature</td></tr><tr><td>src/main.rs</td><td>CLI entry; subcommands: run, dump-stats, validate-config</td></tr><tr><td>src/args.rs</td><td>clap argument structs; config path, weight path, EP flags</td></tr><tr><td>src/loader.rs</td><td>config + weight loading; validate against schema</td></tr><tr><td>src/runner.rs</td><td>single-layer forward runner; timing; result dump</td></tr><tr><td>src/stats.rs</td><td>telemetry snapshot print; JSON and human-readable modes</td></tr><tr><td>moe-bench/</td><td></td></tr><tr><td>Cargo.toml</td><td>depends on moe-runtime, moe-gate, moe-dispatch, moe-expert</td></tr><tr><td>benches/gate_bench.rs</td><td>gate throughput; top-k variants; expert counts 8–128</td></tr><tr><td>benches/dispatch_bench.rs</td><td>scatter/gather throughput; capacity factor sweep</td></tr><tr><td>benches/expert_bench.rs</td><td>expert GEMM throughput; grouped vs batched; dtype sweep</td></tr><tr><td>benches/a2a_bench.rs</td><td>all-to-all latency; message size vs EP world size</td></tr><tr><td>benches/e2e_bench.rs</td><td>full MoeLayer criterion benchmark; token batch scaling</td></tr><tr><td>src/harness.rs</td><td>differential harness: runtime vs dense NumPy reference</td></tr><tr><td>src/fixtures.rs</td><td>shared weight fixtures; deterministic random seed</td></tr><tr><td>src/report.rs</td><td>benchmark result aggregator; CSV + markdown output</td></tr><tr><td>workspace root/</td><td></td></tr><tr><td>README.md</td><td>project overview, quick-start, status badges</td></tr><tr><td>CONTRIBUTING.md</td><td>PR process, coding standards, DCO sign-off</td></tr><tr><td>CODE_OF_CONDUCT.md</td><td>contributor covenant v2.1</td></tr><tr><td>SECURITY.md</td><td>vuln disclosure policy, CVE contacts, embargo SLA</td></tr><tr><td>CHANGELOG.md</td><td>semver changelog (keep-a-changelog format)</td></tr><tr><td>BLUEPRINT_LOG.md</td><td>per-phase completion notes, ADR register</td></tr><tr><td>BUILD_PLAN.md</td><td>phase-&gt;crate dependency schedule, gate criteria</td></tr><tr><td>LICENSE</td><td>Apache-2.0</td></tr><tr><td>Cargo.toml / Cargo.lock</td><td>workspace members; locked dep graph; committed</td></tr><tr><td>rust-toolchain.toml</td><td>channel=&quot;1.78.0&quot;; rustfmt, clippy, llvm-tools-preview</td></tr><tr><td>clippy.toml</td><td>deny: unwrap_used, panic, expect_used</td></tr><tr><td>.rustfmt.toml</td><td>edition=&quot;2021&quot;; max_width=100</td></tr><tr><td>Dockerfile</td><td>multi-stage: rust:1.78-slim builder + debian runtime</td></tr><tr><td>docker-compose.yml</td><td>runner (single-node), runner-ep (4-rank loopback)</td></tr><tr><td>.env.example</td><td>MOE_EP_WORLD_SIZE, MOE_BACKEND, MOE_LOG_LEVEL stubs</td></tr><tr><td>.cargo/config.toml</td><td>target-dir; linker flags; RUSTFLAGS for MSRV lint</td></tr><tr><td>configs/default.toml</td><td>capacity_factor=1.25; k=2; ep_world=1</td></tr><tr><td>configs/ep4.toml</td><td>EP=4 reference config for integration tests</td></tr><tr><td>docs/architecture.md</td><td>ASCII diagram + narrative; kept in sync with blueprint</td></tr><tr><td>.github/workflows/ci.yml</td><td>PR gate: fmt, clippy, test, miri (core), conformance</td></tr><tr><td>.github/workflows/bench.yml</td><td>nightly: criterion JSON -&gt; PR delta comment</td></tr><tr><td>.github/workflows/fuzz.yml</td><td>weekly: cargo-fuzz 24h budget</td></tr><tr><td>.github/workflows/release.yml</td><td>tag-triggered: changelog, crates.io, Docker push</td></tr><tr><td>.github/workflows/security.yml</td><td>cargo-audit + cargo-deny on schedule + PR</td></tr><tr><td>benchmarks/baselines/</td><td>committed Criterion JSON baselines</td></tr><tr><td>conformance/fixtures/</td><td>topk_vectors, dispatch_plans, a2a_cases</td></tr><tr><td>fuzz/fuzz_targets/</td><td>fuzz_gate, fuzz_dispatch, fuzz_a2a</td></tr><tr><td>examples/</td><td>single_layer, ep_simulation, telemetry_demo</td></tr><tr><td>scripts/</td><td>setup.sh, run_conformance.sh, update_baselines.sh</td></tr><tr><td>tools/weight_converter/</td><td>HuggingFace -&gt; safetensors layout converter</td></tr><tr><td>docs/adr/</td><td>ADR markdown files (0001 through 0025, one per ADR row, <a class="cite" href="/system-design-blueprints/systems/mixture-of-experts-runtime/trade-offs/#sec-9">§9</a>)</td></tr><tr><td>docs/runbooks/</td><td>high_drop_rate, ep_rank_divergence, gemm_failure</td></tr><tr><td>papers/</td><td>shazeer2017, lepikhin2020, fedus2021, zhou2022 PDFs</td></tr><tr><td>legal/NOTICE</td><td>third-party attribution (Apache-2.0)</td></tr><tr><td>brand/logo.svg</td><td>repo logo asset</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

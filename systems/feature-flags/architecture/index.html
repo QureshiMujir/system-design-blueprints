@@ -1,0 +1,656 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Feature Flags + A/B Testing Service — Architecture · Engineering Blueprints</title><meta name="description" content="Feature Flags + A/B Testing Service, hld: §3 overview + §8 domain model. Build, from scratch in Rust, a feature-flag and controlled-experimentation system: a deterministic flag/segment/rule evaluation engine that runs identically inside every SDK process; a control plane…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/feature-flags/">Feature Flags + A/B Testing Service</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Feature Flags + A/B Testing Service</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~18 weeks</li> <li>2,836 lines</li> <li>blueprint #167</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/feature-flags/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/feature-flags/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/feature-flags/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/feature-flags/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/feature-flags/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/feature-flags/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/feature-flags/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/feature-flags/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/feature-flags/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/feature-flags/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Feature Flags + A/B Testing Service — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: control plane, delivery and SDK evaluation
+%% legend ingest: exposure ingestion and stats pipeline
+%% legend trust: trust and protocol boundaries
+%% legend side: operator and cross-tier telemetry
+%% legend store: stores and logs
+OP([&quot;&lt;b&gt;Operator&lt;/b&gt;&lt;br/&gt;(author)&quot;])
+subgraph CP[&quot;CONTROL PLANE (trust: admin)&quot;]
+  FS[(&quot;&lt;b&gt;Flag/Exp Store (PG)&lt;/b&gt;&quot;)]
+  AL[(&quot;&lt;b&gt;Audit Log&lt;/b&gt;&lt;br/&gt;append-only, hash-chained&quot;)]
+  CC[&quot;&lt;b&gt;Config Compiler&lt;/b&gt;&lt;br/&gt;rules → ConfigDocument vN&quot;]
+  FS --&gt; CC
+  AL --&gt; CC
+end
+subgraph DS[&quot;DELIVERY SERVICE (trust: semi-trusted edge)&quot;]
+  SSE[&quot;&lt;b&gt;SSE Fan-out&lt;/b&gt;&lt;br/&gt;(concurrency boundary)&quot;]
+  POLL[&quot;&lt;b&gt;Polling Endpoint&lt;/b&gt;&lt;br/&gt;fallback, ETag/If-None-Match&quot;]
+end
+subgraph SDK1[&quot;SDK — Local Evaluator&quot;]
+  BF[&quot;&lt;b&gt;Bucketing Fn&lt;/b&gt;&lt;br/&gt;(pure, offline)&quot;]
+end
+SDK2[&quot;&lt;b&gt;SDK — Local Evaluator&lt;/b&gt;&lt;br/&gt;(host app process)&quot;]
+EC[&quot;&lt;b&gt;EXPOSURE COLLECTOR&lt;br/&gt;+ INGESTION QUEUE&lt;/b&gt;&lt;br/&gt;(persistence boundary:&lt;br/&gt;durable queue)&quot;]
+SP[&quot;&lt;b&gt;Stats Pipeline&lt;/b&gt;&lt;br/&gt;sequential test, SRM, guardrails&quot;]
+RS[(&quot;&lt;b&gt;Results Store&lt;/b&gt;&lt;br/&gt;(ClickHouse)&quot;)]
+TEL[&quot;&lt;b&gt;Telemetry&lt;/b&gt;&lt;br/&gt;metrics/traces, all tiers&quot;]
+OP -- &quot;REST/gRPC&quot; --&gt; CP
+CC -- &quot;publish&lt;br/&gt;protocol boundary:&lt;br/&gt;gRPC/queue&quot; --&gt; DS
+SSE -- &quot;network boundary&lt;br/&gt;untrusted transport&lt;br/&gt;TLS 1.3&quot; --&gt; SDK1
+POLL -- &quot;network boundary&lt;br/&gt;untrusted transport&lt;br/&gt;TLS 1.3&quot; --&gt; SDK2
+SDK1 -- &quot;exposure events&lt;br/&gt;(async, batched)&quot; --&gt; EC
+SDK2 -- &quot;exposure events&quot; --&gt; EC
+EC --&gt; SP
+SP --&gt; RS
+RS ~~~ TEL
+classDef rt stroke-width:1.5px
+classDef ingest stroke-width:1.5px
+classDef trust stroke-width:1.5px
+classDef side stroke-width:1.5px
+classDef store stroke-width:1.5px
+class CC,SSE,POLL,BF,SDK2 rt
+class EC,SP ingest
+class CP,DS trust
+class OP,TEL side
+class FS,AL,RS store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>control plane, delivery and SDK evaluation</li><li><span class="swatch ingest"></span>exposure ingestion and stats pipeline</li><li><span class="swatch trust"></span>trust and protocol boundaries</li><li><span class="swatch side"></span>operator and cross-tier telemetry</li><li><span class="swatch store"></span>stores and logs</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code> ┌────────────┐   REST/gRPC   ┌───────────────────────────────────────────┐
+ │  Operator  │──────────────▶│           CONTROL PLANE (trust: admin)     │
+ │  (author)  │               │  ┌────────────┐  ┌────────────────────┐  │
+ └────────────┘               │  │ Flag/Exp   │  │  Audit Log (append- │  │
+                               │  │ Store (PG) │  │  only, hash-chained)│  │
+                               │  └─────┬──────┘  └──────────┬─────────┘  │
+                               │        │                    │            │
+                               │  ┌─────▼────────────────────▼─────────┐  │
+                               │  │        Config Compiler             │  │
+                               │  │  (rules → ConfigDocument vN)       │  │
+                               │  └─────────────────┬───────────────────┘  │
+                               └────────────────────┼──────────────────────┘
+                                    publish (protocol boundary: gRPC/queue) │
+                          ┌──────────────────────────▼───────────────────────┐
+                          │      DELIVERY SERVICE (trust: semi-trusted edge)  │
+                          │  ┌──────────────┐   ┌───────────────────────┐    │
+                          │  │ SSE Fan-out  │   │ Polling Endpoint       │    │
+                          │  │ (concurrency │   │ (fallback, ETag/If-    │    │
+                          │  │  boundary)   │   │  None-Match)           │    │
+                          │  └──────┬───────┘   └───────────┬───────────┘    │
+                          └─────────┼───────────────────────┼────────────────┘
+                        network boundary (untrusted transport, TLS 1.3)
+                                    │                         │
+                     ┌──────────────▼───────┐   ┌─────────────▼──────────┐
+                     │  SDK — Local Evaluator │   │ SDK — Local Evaluator │
+                     │  ┌──────────────────┐  │   │  (host app process)   │
+                     │  │ Bucketing Fn      │  │   └───────────┬──────────┘
+                     │  │ (pure, offline)   │  │               │
+                     │  └──────────────────┘  │        exposure events
+                     └───────────┬────────────┘               │
+                    exposure events (async, batched)           │
+                                 │                              │
+                          ┌──────▼──────────────────────────────▼──────┐
+                          │      EXPOSURE COLLECTOR + INGESTION QUEUE   │
+                          │      (persistence boundary: durable queue)  │
+                          └──────────────────┬───────────────────────────┘
+                                             │
+                                    ┌────────▼─────────┐
+                                    │  Stats Pipeline    │
+                                    │  (sequential test, │
+                                    │   SRM, guardrails) │
+                                    └────────┬───────────┘
+                                             │
+                                    ┌────────▼─────────┐
+                                    │  Results Store     │
+                                    │  (ClickHouse)      │
+                                    └────────────────────┘
+                          ┌───────────────────────────────────────┐
+                          │  Telemetry (metrics/traces, all tiers) │
+                          └───────────────────────────────────────┘</code></pre></details>
+<p><strong>Control-plane API</strong>: the only trust boundary allowed to mutate flag/segment/experiment
+state; every mutation is authenticated, authorized, and appended to the audit log before
+it can reach the config compiler.</p>
+<p><strong>Flag/experiment store</strong>: Postgres, transactional, the single source of truth for
+authored (not yet compiled) state; <code>Flag</code>, <code>Segment</code>, <code>Experiment</code> rows keyed by
+<code>(environment_id, key)</code>.</p>
+<p><strong>Config compiler</strong>: pure transformation from authored state to an immutable
+<code>ConfigDocument</code> at a monotonically increasing <code>ConfigVersion</code>; never partially applies.</p>
+<p><strong>Delivery service (streaming + polling fallback)</strong>: stateless, holds the current
+<code>ConfigDocument</code> per environment in memory, terminates the concurrency boundary between
+one control-plane publish and N SDK connections.</p>
+<p><strong>SDK local evaluator</strong>: runs inside the host application process; holds the last-known
+<code>ConfigDocument</code>; evaluates offline; is the trust boundary between untrusted request
+attributes and the flag decision.</p>
+<p><strong>Bucketing function</strong>: a pure function of <code>(salt, unit id)</code>; no I/O, no mutable state;
+the one component whose output must never change silently.</p>
+<p><strong>Exposure-event collector</strong>: SDK-side batching and shipping of <code>ExposureEvent</code> records;
+crosses the persistence boundary into the ingestion queue.</p>
+<p><strong>Ingestion queue</strong>: durable, at-least-once, the concurrency boundary between many SDK
+producers and one stats-pipeline consumer.</p>
+<p><strong>Stats pipeline</strong>: reads exposure and goal events, computes <code>StatsResult</code> per
+experiment under a <code>SequentialBoundary</code>, runs SRM and guardrail checks.</p>
+<p><strong>Results store</strong>: ClickHouse, append-only, columnar, holds exposures, goal events, and
+computed results.</p>
+<p><strong>Audit log</strong>: append-only, hash-chained, the forensic trust boundary for &quot;who changed
+what.&quot;</p>
+<p><strong>Telemetry</strong>: metrics, traces, and structured logs emitted at every tier boundary
+crossing above (<a class="cite" href="/system-design-blueprints/systems/feature-flags/blueprint/#sec-26">§26</a> names the concrete signals).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Flag / Variant / Segment / Rule field tables</h3>
+<p><strong>Flag</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>key</td>
+<td>FlagKey</td>
+<td>unique per environment</td>
+</tr>
+<tr>
+<td>flag_type</td>
+<td>FlagType</td>
+<td>Boolean, String, Number, Json</td>
+</tr>
+<tr>
+<td>variants</td>
+<td>Vec&lt;Variant&gt;</td>
+<td>≥2 for non-boolean, 2 for boolean</td>
+</tr>
+<tr>
+<td>default_variant</td>
+<td>VariantId</td>
+<td>returned when nothing matches and flag is on</td>
+</tr>
+<tr>
+<td>off_variant</td>
+<td>VariantId</td>
+<td>returned when <code>enabled = false</code></td>
+</tr>
+<tr>
+<td>enabled</td>
+<td>bool</td>
+<td>master switch</td>
+</tr>
+<tr>
+<td>targeting</td>
+<td>Vec&lt;Rule&gt;</td>
+<td>ordered by <code>priority</code></td>
+</tr>
+<tr>
+<td>rollout</td>
+<td>Option&lt;Rollout&gt;</td>
+<td>top-level percentage split</td>
+</tr>
+<tr>
+<td>version</td>
+<td>ConfigVersion</td>
+<td>monotonic</td>
+</tr>
+</tbody></table></div>
+<p><strong>Variant</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>id</td>
+<td>VariantId</td>
+<td>stable across edits</td>
+</tr>
+<tr>
+<td>name</td>
+<td>String</td>
+<td>human label</td>
+</tr>
+<tr>
+<td>value</td>
+<td>Value</td>
+<td>typed to <code>flag_type</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Segment</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>key</td>
+<td>String</td>
+<td>unique per environment</td>
+</tr>
+<tr>
+<td>clauses</td>
+<td>Vec&lt;Clause&gt;</td>
+<td>OR-combined</td>
+</tr>
+<tr>
+<td>included / excluded</td>
+<td>Vec&lt;UnitId&gt;</td>
+<td>explicit overrides, included wins over excluded only per <a class="cite" href="/system-design-blueprints/systems/feature-flags/architecture/#sec-8-2">§8.2</a> precedence</td>
+</tr>
+</tbody></table></div>
+<p><strong>Rule</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>clauses</td>
+<td>Vec&lt;Clause&gt;</td>
+<td>AND-combined</td>
+</tr>
+<tr>
+<td>priority</td>
+<td>i32</td>
+<td>first-match-wins ordering</td>
+</tr>
+<tr>
+<td>variant or rollout</td>
+<td>VariantId | Rollout</td>
+<td>exactly one set</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Targeting-rule grammar (EBNF)</h3>
+<pre class="diagram"><code>rule        := clause_list , priority ;
+clause_list := clause , { &quot;AND&quot; , clause } ;
+clause      := attribute , operator , value_list , [ &quot;NEGATE&quot; ] ;
+operator    := &quot;EQ&quot; | &quot;NEQ&quot; | &quot;IN&quot; | &quot;GT&quot; | &quot;LT&quot; | &quot;CONTAINS&quot;
+             | &quot;STARTS_WITH&quot; | &quot;ENDS_WITH&quot; | &quot;MATCHES&quot; | &quot;SEGMENT_MATCH&quot;
+             | &quot;SEMVER_EQ&quot; | &quot;SEMVER_GT&quot; | &quot;SEMVER_LT&quot;
+             | &quot;DATE_BEFORE&quot; | &quot;DATE_AFTER&quot; ;
+attribute   := identifier ;
+value_list  := value , { &quot;,&quot; , value } ;
+value       := string | number | boolean | semver | date ;</code></pre>
+<p><strong>Operator / type-coercion table</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operator</th>
+<th>Valid types</th>
+<th>Coercion</th>
+<th>Missing attribute</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>EQ / NEQ</td>
+<td>any</td>
+<td>none</td>
+<td>false unless NEGATE</td>
+</tr>
+<tr>
+<td>IN</td>
+<td>any</td>
+<td>none</td>
+<td>false unless NEGATE</td>
+</tr>
+<tr>
+<td>GT / LT</td>
+<td>number, semver, date</td>
+<td>numeric compare</td>
+<td>false unless NEGATE</td>
+</tr>
+<tr>
+<td>CONTAINS/STARTS_WITH/ENDS_WITH</td>
+<td>string</td>
+<td>none</td>
+<td>false unless NEGATE</td>
+</tr>
+<tr>
+<td>MATCHES</td>
+<td>string (RE2-class regex)</td>
+<td>none</td>
+<td>false unless NEGATE</td>
+</tr>
+<tr>
+<td>SEGMENT_MATCH</td>
+<td>segment key</td>
+<td>resolves to Segment</td>
+<td>evaluated against segment&#39;s own clauses</td>
+</tr>
+<tr>
+<td>SEMVER_*</td>
+<td>string parsed as semver</td>
+<td>invalid string → non-match</td>
+<td>false unless NEGATE</td>
+</tr>
+<tr>
+<td>DATE_*</td>
+<td>string parsed as RFC 3339</td>
+<td>invalid string → non-match</td>
+<td>false unless NEGATE</td>
+</tr>
+</tbody></table></div>
+<p><strong>Evaluation-order precedence</strong>: clauses within a rule are AND-combined, evaluated
+left-to-right with short-circuit on first false; clauses within a segment are
+OR-combined; rules within a flag are walked by descending <code>priority</code>, first full match
+wins (<a class="cite" href="/system-design-blueprints/systems/feature-flags/reliability/#inv-6">I6</a>); an unknown <code>operator</code> value evaluates to non-match per P10/<a class="cite" href="/system-design-blueprints/systems/feature-flags/reliability/#inv-7">I7</a>.</p>
+<h3 id="sec-8-3">8.3 Deterministic bucketing model</h3>
+<p>Given salt <code>s</code>, unit id <code>u</code>, and rollout entries with weights <code>w_1..w_k</code> summing to
+<code>W = 100000</code>:</p>
+<pre class="diagram"><code>h(s, u)  =  MurmurHash3_32( s || &quot;.&quot; || u )
+bucket(s, u)  =  h(s, u) mod 100000</code></pre>
+<p>Variant assignment: accumulate weights <code>A_i = Σ_{j≤i} w_j</code>; assign variant <code>i</code> where
+<code>A_{i-1} ≤ bucket(s,u) &lt; A_i</code>.</p>
+<p><strong>Worked example — stability under weight change.</strong> <code>s = &quot;exp-42&quot;</code>, <code>u = &quot;user-777&quot;</code>,
+<code>h(s,u) mod 100000 = 61,204</code>. Weights <code>[50000, 50000]</code> (50/50): <code>A_1=50000</code>, bucket
+61204 falls in <code>[50000, 100000)</code> → variant 2. Weights change to <code>[40000, 60000]</code>
+(rebalance toward variant 2): <code>A_1=40000</code>, bucket 61204 still falls in <code>[40000, 100000)</code> → variant 2 — <strong>unchanged</strong>, because bucket 61204 never crossed a boundary
+that moved away from it. A user near the old boundary (e.g. bucket 45000) <em>would</em> move
+from variant 1 to variant 2 — this is the documented, acceptable &quot;boundary users
+move&quot; cost of weight changes, not a bug.</p>
+<p><strong>Worked example — reshuffle under salt change.</strong> Same <code>u</code>, new salt <code>s&#39; = &quot;exp-42-v2&quot;</code>: <code>h(s&#39;, u) mod 100000 = 8,431</code> → a completely uncorrelated bucket,
+landing in variant 1 under the same <code>[50000,50000]</code> split. Changing the salt is the
+only supported way to intentionally re-randomize a population (<a class="cite" href="/system-design-blueprints/systems/feature-flags/trade-offs/#sec-9">§9</a> experiment lifecycle,
+&quot;restart&quot;).</p>
+<h3 id="sec-8-4">8.4 Config-document wire format and versioning</h3>
+<p><code>ConfigDocument { version: ConfigVersion(u64), environment_id, flags: [...], segments: [...], compiled_at }</code>, Protocol-Buffers-encoded, gzip-compressed over the
+wire (<a class="cite" href="/system-design-blueprints/systems/feature-flags/trade-offs/#adr-9">ADR-09</a>). <code>ConfigVersion</code> is a per-environment monotonic sequence assigned by the
+compiler under a DB-serialized transaction (<a class="cite" href="/system-design-blueprints/systems/feature-flags/reliability/#inv-11">I11</a>); SDKs detect staleness via
+<code>If-None-Match: &lt;version&gt;</code> on polling and via a version field on every streamed delta.</p>
+<h3 id="sec-8-5">8.5 Exposure-event record layout</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>timestamp</td>
+<td>SystemTime</td>
+<td>client clock, corrected against server skew (<a class="cite" href="/system-design-blueprints/systems/feature-flags/reliability/#sec-25">§25</a> <a class="cite" href="/system-design-blueprints/systems/feature-flags/reliability/#fm-8">FM-8</a>)</td>
+</tr>
+<tr>
+<td>unit_id</td>
+<td>UnitId</td>
+<td>the randomization unit</td>
+</tr>
+<tr>
+<td>flag_key</td>
+<td>FlagKey</td>
+<td></td>
+</tr>
+<tr>
+<td>experiment_id</td>
+<td>Option&lt;ExperimentId&gt;</td>
+<td>absent if not experiment-bound</td>
+</tr>
+<tr>
+<td>variant_id</td>
+<td>VariantId</td>
+<td></td>
+</tr>
+<tr>
+<td>config_version</td>
+<td>ConfigVersion</td>
+<td>for cross-referencing which ruleset produced this</td>
+</tr>
+<tr>
+<td>dedup_key</td>
+<td>(unit_id, flag_key, window)</td>
+<td>bounds duplicate suppression (P5)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Experiment lifecycle — state-transition table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Guard</th>
+<th>Failure Edge</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Draft</td>
+<td><code>start</code></td>
+<td>Running</td>
+<td>≥1 guardrail metric declared (P6)</td>
+<td>reject: <code>NoGuardrailDeclared</code></td>
+</tr>
+<tr>
+<td>Running</td>
+<td><code>srm_detected</code></td>
+<td>Peeking-Blocked</td>
+<td>chi-square p &lt; 0.001</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Running</td>
+<td><code>conclude</code></td>
+<td>Concluded</td>
+<td>sequential boundary crossed OR fixed-horizon reached</td>
+<td>reject if neither: <code>PrematureConclusion</code></td>
+</tr>
+<tr>
+<td>Peeking-Blocked</td>
+<td><code>srm_resolved</code></td>
+<td>Running</td>
+<td>root cause fixed, re-verified</td>
+<td>reject: <code>SRMUnresolved</code></td>
+</tr>
+<tr>
+<td>Peeking-Blocked</td>
+<td><code>abort</code></td>
+<td>Concluded (invalid)</td>
+<td>operator override</td>
+<td>flagged <code>invalid_results=true</code></td>
+</tr>
+<tr>
+<td>Concluded</td>
+<td><code>roll_out</code></td>
+<td>Rolled-Out</td>
+<td>winning variant becomes the flag default</td>
+<td>reject if no winner: <code>NoSignificantResult</code></td>
+</tr>
+<tr>
+<td>Concluded</td>
+<td><code>revert</code></td>
+<td>Reverted</td>
+<td>control variant restored as default</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Running</td>
+<td><code>pause</code></td>
+<td>Draft</td>
+<td>manual pause</td>
+<td>assignments frozen, not deleted</td>
+</tr>
+<tr>
+<td>any</td>
+<td><code>emergency_stop</code></td>
+<td>Concluded (invalid)</td>
+<td>kill-switch invoked on bound flag</td>
+<td>always audited <code>emergency=true</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 Statistics model — display equations</h3>
+<p><strong>Variance estimation</strong> (per-variant sample mean/variance for a continuous metric):</p>
+<pre class="diagram"><code>x̄_v = (1/n_v) Σ x_i,      s_v² = (1/(n_v - 1)) Σ (x_i - x̄_v)²</code></pre>
+<p><strong>CUPED adjustment</strong> (Deng et al. 2013), using pre-experiment covariate <code>Y</code>:</p>
+<pre class="diagram"><code>X_cuped = X - θ(Y - Ȳ),     θ = Cov(X, Y) / Var(Y)</code></pre>
+<p>reducing post-adjustment variance to <code>Var(X_cuped) = Var(X)(1 - ρ²)</code> where <code>ρ</code> is the
+correlation between <code>X</code> and <code>Y</code> — the mechanism by which CUPED shortens
+days-to-significance without inflating Type-I error.</p>
+<p><strong>Sequential-test boundary</strong> (time-uniform confidence sequence, Howard et al. 2021
+form, mixture-based per Johari et al. 2017):</p>
+<pre class="diagram"><code>CS_t = [ θ̂_t ± ( σ̂_t / √n_t ) · √( 2 (n_t ψ + 1) / n_t² · ln( (n_t ψ + 1) / α² ) ) ]</code></pre>
+<p>where <code>θ̂_t</code> is the running effect estimate, <code>ψ</code> a tuning parameter for the mixing
+distribution, and <code>α</code> the desired always-valid Type-I error rate. An experiment may be
+concluded the instant <code>0 ∉ CS_t</code>, at any <code>t</code>, with the Type-I error still bounded by
+<code>α</code> — the property naive fixed-horizon t-tests do not have under repeated peeking.</p>
+<h3 id="sec-8-8">8.8 Worked evaluation trace</h3>
+<p>Context <code>{unit_id: &quot;u-9&quot;, country: &quot;US&quot;, plan: &quot;pro&quot;}</code>; flag <code>checkout-v2</code> enabled,
+rule R1 <code>{country EQ &quot;US&quot; AND plan EQ &quot;pro&quot;}</code> priority 10 → variant <code>treatment</code>; rule R2
+<code>{country EQ &quot;US&quot;}</code> priority 5 → 50/50 rollout. Evaluation: flag enabled → walk rules
+descending priority → R1 (priority 10) clauses both match → return <code>treatment</code>,
+<code>EvaluationReason::TargetMatch{rule_id: R1}</code>. R2 never evaluated (first-match-wins, <a class="cite" href="/system-design-blueprints/systems/feature-flags/reliability/#inv-6">I6</a>).</p>
+<h3 id="sec-8-9">8.9 Malformed-rule examples</h3>
+<p><code>{attribute: &quot;plan&quot;, operator: &quot;SEGMENT_MATCH&quot;, values: [&quot;nonexistent-seg&quot;]}</code> — segment
+key does not resolve → clause is non-match (P10), not an error. <code>{operator: &quot;FUTURE_OP_V9&quot;}</code> from a newer control plane read by an older SDK — unrecognized operator
+→ non-match (<a class="cite" href="/system-design-blueprints/systems/feature-flags/reliability/#inv-7">I7</a>). Rollout weights <code>[30000, 30000]</code> summing to 60,000 — rejected at
+save time (<a class="cite" href="/system-design-blueprints/systems/feature-flags/reliability/#inv-13">I13</a>), never reaches an SDK.</p>
+<h3 id="sec-8-10">8.10 Failure-path example</h3>
+<p>Delivery service publishes <code>ConfigVersion(118)</code> but the SDK&#39;s TCP write for the
+streaming delta times out mid-flight. SDK detects an incomplete frame (length-prefixed
+delta parse failure), discards the partial delta, and requests a full document
+resend at its last-known-good version rather than applying a corrupt partial state —
+preserving <a class="cite" href="/system-design-blueprints/systems/feature-flags/reliability/#inv-3">I3</a>.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

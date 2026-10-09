@@ -1,0 +1,223 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Hybrid Row/Column Storage Engine — Reliability · Engineering Blueprints</title><meta name="description" content="Hybrid Row/Column Storage Engine, invariants, threats, failure modes. Build a from-scratch, single-node, embeddable HTAP storage engine in Rust that keeps every table in BOTH a write-optimized row store and a read-optimized column store, unified by a delta/main…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/">Hybrid Row/Column Storage Engine</a> </li><li> <span aria-current="page">Reliability</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Hybrid Row/Column Storage Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~38 weeks</li> <li>3,056 lines</li> <li>blueprint #317</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/reliability/" aria-current="page" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/hybrid-row-column-storage-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Hybrid Row/Column Storage Engine — Reliability">  <p class="note">Rows link by id — <code>#inv-N</code>, <code>#t-N</code>, <code>#fm-N</code> — so an explainer citation such as <code>FM-3</code> lands on its row.</p> <section aria-labelledby="sec-7"> <h2 id="sec-7">Invariants — what must never be false (§7) <small class="muted">· 12</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">Invariants — what must never be false</caption><thead><tr><th scope="col">ID</th><th scope="col">Statement (one line)</th><th scope="col">Enforced in</th><th scope="col">Detect</th><th scope="col">Recover</th></tr></thead><tbody><tr id="inv-1"><td><a class="row-anchor" href="#inv-1">INV-WAL</a></td><td>dirty page not flushed before its log durable: <code>pageLSN ≤ flushedLSN</code> at write-out</td><td>hy-page evict, hy-wal</td><td>flush hook assert; recovery torn check</td><td>redo from WAL</td></tr><tr id="inv-2"><td><a class="row-anchor" href="#inv-2">INV-DUR</a></td><td>Commit acked ⇒ Commit record fsynced</td><td>hy-txn commit / hy-wal</td><td>crash-replay differential</td><td>redo replays</td></tr><tr id="inv-3"><td><a class="row-anchor" href="#inv-3">INV-MULTISET</a></td><td>delta ∪ main = exactly one visible row multiset per Snapshot</td><td>hy-store read path, TupleMover</td><td>row-count conservation probe</td><td>rebuild from WAL</td></tr><tr id="inv-4"><td><a class="row-anchor" href="#inv-4">INV-IMMUT</a></td><td>published MAIN RowGroup bytes never mutated</td><td>hy-col, TupleMover swap</td><td>content hash on republish</td><td>re-derive from delta</td></tr><tr id="inv-5"><td><a class="row-anchor" href="#inv-5">INV-VIS</a></td><td>SI predicate: ≤1 version of a logical row visible per Snapshot</td><td>hy-txn <code>visible()</code></td><td>version-chain walk</td><td>n/a (read-only)</td></tr><tr id="inv-6"><td><a class="row-anchor" href="#inv-6">INV-ZONE</a></td><td>ZoneMap has zero false negatives (never skips a matching segment)</td><td>hy-col scan prune</td><td>exhaustive vs pruned scan</td><td>rebuild ZoneMap</td></tr><tr id="inv-7"><td><a class="row-anchor" href="#inv-7">INV-SWAP</a></td><td>delta→main swap atomic w.r.t. readers (pre- xor post-, never torn)</td><td>hy-store TupleMover</td><td>concurrent-reader stress</td><td>retry/abort merge</td></tr><tr id="inv-8"><td><a class="row-anchor" href="#inv-8">INV-VAC</a></td><td>Vacuum reclaims only versions older than <code>oldest_live</code></td><td>hy-txn Vacuum</td><td>watermark assert pre-free</td><td>n/a (no undo)</td></tr><tr id="inv-9"><td><a class="row-anchor" href="#inv-9">INV-REC</a></td><td>recovery ⇒ all-committed-applied / no-uncommitted-visible</td><td>hy-wal Recovery</td><td>fault-injection replay</td><td>the recovery itself</td></tr><tr id="inv-10"><td><a class="row-anchor" href="#inv-10">INV-IDX</a></td><td>every index RowId resolves to a live or properly-versioned tuple</td><td>hy-index, hy-row, Vacuum</td><td>full index→heap walk</td><td>rebuild index from heap</td></tr><tr id="inv-11"><td><a class="row-anchor" href="#inv-11">INV-ENC</a></td><td><code>decode(encode(x)) == x</code> bit-exactly for every <code>Encoding</code> × <code>DataType</code> × null pattern</td><td>hy-col encoders, Compressor</td><td>round-trip proptest + fuzz <code>fuzz_decode</code></td><td>re-encode from source rows</td></tr><tr id="inv-12"><td><a class="row-anchor" href="#inv-12">INV-LSN</a></td><td>WAL Lsn strictly monotone; no two records share an Lsn; <code>page.lsn ≤ wal.tail</code> after flush</td><td>hy-wal LogWriter, Recovery</td><td>monotonicity assert on analysis scan</td><td>truncate-at-violation, recovery re-derives</td></tr></tbody></table></div> </section><section class="prose"><h2 id="sec-threat">Threat Model</h2>
+<p>Scope: a single-node, embeddable storage engine. The primary adversary is <strong>untrusted on-disk
+bytes</strong> — pages, WAL records, and column segments that may be corrupt (hardware/media faults,
+partial writes) or adversarial (a tampered data directory). Secondary: <strong>untrusted input rows</strong>
+(via the API/<code>hydb</code> CLI) and <strong>operator error</strong>. Out of scope (other projects own them): network
+attackers (no protocol, 33/64), authn/authz/multi-tenant isolation, distributed/Byzantine actors
+(36/86/102), side-channel/timing attacks. We do <strong>not</strong> assume the data directory is a security
+boundary against a privileged local user; we assume the OS enforces file permissions.</p>
+<h3 id="sec-26-1">26.1 Trust boundaries</h3>
+<pre class="diagram"><code>  trusted: in-RAM engine types (Page after decode, Tuple, ColumnBatch, Snapshot)
+  ----------------------------------- ON-DISK FORMAT BOUNDARY -----------------------------------
+  UNTRUSTED bytes: segment files (hy-page), WAL file (hy-wal), column segment blobs (hy-col),
+                   the manifest/catalog (hy-catalog)
+  ----------------------------------- API / CLI INPUT BOUNDARY ----------------------------------
+  UNTRUSTED input: caller-supplied rows, keys, predicates, ScanSpec, CLI args</code></pre>
+<ul>
+<li><strong>Rule:</strong> every byte crossing the on-disk boundary is validated before becoming a trusted type — no <code>unsafe</code> transmute without prior checksum + bounds + tag check. Decode is total (<code>from_bytes</code> returns <code>Result</code>, never panics on any input; panics on adversarial bytes are bugs, Phase 13 fuzz gate). The MVCC <code>visible(h,snap)</code> predicate is the single gate for data exposure; no read path bypasses it.</li>
+</ul>
+<h3 id="sec-26-2">26.2 Security properties (durability/atomicity as security)</h3>
+<p>Property → enforced by: <strong>Integrity</strong> (read = last committed write or typed error, never silently wrong) → CRC32C + pageLSN; <strong>Atomicity</strong> (all-or-nothing across row+delta+main) → WAL log-before-data + ARIES/CLR; <strong>Durability</strong> (committed survives crash) → <code>flush(lsn)</code> before ack + group commit; <strong>Isolation</strong> (no uncommitted/GC&#39;d-early version) → <code>visible()</code> + Vacuum watermark; <strong>Recoverability</strong> (column store rebuildable from WAL+row/delta) → <code>ColumnFlush</code> + idempotent redo.</p>
+<h3 id="sec-26-3">26.3 Threat catalog</h3>
+<h4 id="sec-threat-t1-corrupt-torn-pages">T1 — Corrupt / torn pages</h4>
+<ul>
+<li><strong>Vector / detect:</strong> partial 4 KiB write (power loss), bit rot, sector reorder; CRC32C over page body in <code>PageHeader</code> (verified on every buffer-pool load) + <code>pageLSN ≤ WAL tail</code> sanity.</li>
+<li><strong>Mitigate / recover / telemetry:</strong> log-before-data makes the page redo-reconstructible from <code>recLSN</code>; optional double-write buffer (<code>torn_page_guard</code>); if unrecoverable and not in DPT, quarantine + <code>ErrorKind::Corruption{page}</code>. Counters <code>page.checksum_fail</code>, <code>page.torn_repaired</code>.</li>
+</ul>
+<h4 id="sec-threat-t2-malformed-column-segments">T2 — Malformed column segments</h4>
+<ul>
+<li><strong>Vector / detect:</strong> bad encoding length, out-of-range dict code, <code>BitPacked{bits}&gt;64</code>, RLE run overflowing <code>n_rows</code>, FoR delta exceeding <code>bits</code>, offset past segment end; per-segment CRC32C + bounds-checked decoders validate every offset/length vs segment size + <code>n_rows</code> (dict codes <code>&lt; dict.len()</code>).</li>
+<li><strong>Mitigate / recover / telemetry:</strong> decoders return <code>Result</code>, a failed segment fails only its <code>RowGroup</code> scan (never reads neighbor memory); fuzz target per <code>Encoding</code> (Phase 13); rebuild via forced re-merge from delta+WAL. <code>col.decode_reject{encoding}</code>, <code>col.segment_checksum_fail</code>.</li>
+</ul>
+<h4 id="sec-threat-t3-wal-tampering-truncation">T3 — WAL tampering / truncation</h4>
+<ul>
+<li><strong>Vector / detect:</strong> truncated tail, flipped bytes, injected record, reordered LSN; per-record CRC32C + length prefix + monotone <code>Lsn</code> + known-variant tag (exhaustive match rejects unknown tags).</li>
+<li><strong>Mitigate / recover / telemetry:</strong> <strong>clean truncation point</strong> — first bad-CRC/length/non-monotone record defines EOL, all after discarded (unfinished group commit); a <code>Commit</code> with a bad payload CRC is treated as not committed; redo to the truncation point, undo losers with CLRs. <code>wal.truncated_bytes</code>, <code>wal.checksum_fail_at_lsn</code>. (Durability also assumes fsync truly persists — the documented PostgreSQL &quot;fsyncgate&quot; (2018) showed an fsync EIO can be reported once and lost; we treat an fsync error as fatal and refuse to ack, never retry-and-assume-durable.)</li>
+</ul>
+<h4 id="sec-threat-t4-resource-exhaustion-dos">T4 — Resource exhaustion (DoS)</h4>
+<ul>
+<li>Sub-vector → cap: huge tuple → <code>max_tuple_bytes</code> reject at insert; delta overflow → <code>delta_max_{rows,bytes}</code> forced merge + backpressure (<code>DeltaFull</code> above hard cap); unbounded chains (long reader) → Vacuum watermark + chain-length alert + <code>txn_age_max</code> refusal; pathological scan → <code>scan_max_rowgroups</code> + cancellation token; ColumnBatch/hash-agg blowup → batch ≤ 2048 + <code>agg_mem_budget</code> spill; huge-WAL recovery → <code>checkpoint_interval</code> bounds redo span. Telemetry: <code>delta.fill_ratio</code>, <code>vacuum.oldest_snapshot_age</code>, <code>txn.aborted_overflow</code>.</li>
+</ul>
+<h4 id="sec-threat-t5-mvcc-visibility-leaks">T5 — MVCC visibility leaks</h4>
+<ul>
+<li><strong>Vector / mitigate:</strong> a bug exposing uncommitted/aborted/prematurely-GC&#39;d versions; single <code>visible(h,snap)</code> predicate is the <em>only</em> visibility check (get, scan, delta-merge, mover all route through it), Vacuum never reclaims a version newer than the oldest live Snapshot (watermark), aborted txn ids stay in active-set logic until cleaned.</li>
+<li><strong>Test / telemetry:</strong> proptest random interleavings assert SI (no dirty read, no lost-update-vs-SI, no torn delta/main read) + differential vs SQLite serial history; <code>mvcc.visibility_invariant_fail</code> = 0 (CI gate).</li>
+</ul>
+<h4 id="sec-threat-t6-decoder-parser-panics-on-adversarial-bytes">T6 — Decoder / parser panics on adversarial bytes</h4>
+<ul>
+<li><strong>Vector / mitigate:</strong> OOB index, <code>unwrap</code>/arithmetic panic, infinite loop (RLE run=0, cyclic <code>next_version</code>), allocation panic (length → huge <code>Vec</code>); decode paths deny <code>unwrap_used</code>, gate allocation by validated length ≤ segment/page size, bound the <code>next_version</code> walk by a visited-budget.</li>
+<li><strong>Fuzz / telemetry:</strong> Phase 13 targets for page/WAL/<code>Encoding</code>/BTree-node decode; <code>decode.error{kind}</code>, any fuzz panic = release blocker.</li>
+</ul>
+<h4 id="sec-threat-t7-integer-overflow-in-offsets-lengths-ids">T7 — Integer overflow in offsets / lengths / ids</h4>
+<ul>
+<li><strong>Vector / mitigate:</strong> slot off+len wrap, <code>n_rows*width</code> overflow, <code>Lsn</code>/<code>TxnId</code> wrap; <code>checked_*</code>/<code>saturating_*</code> on all untrusted math (overflow ⇒ <code>ErrorKind::Corruption</code>), CI <code>-C overflow-checks=on</code> + overflow test profile; <code>TxnId</code>/<code>Lsn</code> u64 (no realistic single-node wrap, documented).</li>
+</ul>
+<h4 id="sec-threat-t8-supply-chain-risk">T8 — Supply-chain risk</h4>
+<ul>
+<li><strong>Mitigate / telemetry:</strong> <code>cargo-deny</code> (license allowlist, <code>cargo-audit</code> advisories, banned/dup gates), minimal justified dep set, no proc-macro/network crates in the core, <code>--locked</code> + vendored lockfile; CI fails on any new advisory or non-allowlisted license.</li>
+</ul>
+<h4 id="sec-threat-t9-operator-mistakes">T9 — Operator mistakes</h4>
+<ul>
+<li><strong>Vector / detect:</strong> deleting/renaming a segment, <code>hydb recover</code> against the wrong dir, mixing two DBs&#39; segments, partial restore; a signed <strong>manifest</strong> (<code>hy-catalog</code>) lists every live <code>SegmentId</code> + CRC + per-DB UUID, startup verifies manifest ↔ files (missing/extra/mismatch ⇒ refuse to open), each segment header embeds the DB UUID (cross-DB mixing rejected).</li>
+<li><strong>Mitigate / recover / telemetry:</strong> <code>hydb recover</code> idempotent + dry-run; <code>compact</code>/<code>checkpoint</code> never delete a referenced segment; a missing-but-reconstructible segment re-merges from WAL+delta, else fail loud. <code>manifest.mismatch{kind}</code>, <code>open.refused</code>.</li>
+</ul>
+<h4 id="sec-threat-t10-stale-format-reader-version-mismatch">T10 — Stale format reader / version mismatch</h4>
+<ul>
+<li><strong>Vector / detect:</strong> an older engine binary opens a data directory written by a newer format version (bumped <code>PageHeader.format_ver</code>, <code>WalFileHeader.wal_ver</code>, or <code>SegmentHeader.format_ver</code>); without a version gate the older reader may silently misparse newer layout bytes as valid old-format data; detected by the per-unit magic+version check at byte 0 of every persisted unit (<code>b&quot;HYPG&quot;</code>, <code>b&quot;HYWL&quot;</code>, <code>b&quot;HYCS&quot;</code>, <code>b&quot;HYMF&quot;</code>).</li>
+<li><strong>Mitigate / recover / telemetry:</strong> FMT-1 invariant (Compatibility Guarantees): <code>ErrorKind::FormatTooNew { found, supported }</code>, exit 75, never partial-parse; WAL reader refuses <code>wal_ver &gt; N</code> before analysis begins; <code>MANIFEST</code> version gate at open; all per-unit magic+version checks run before any byte interpretation. Metric <code>open.format_too_new</code>. Recovery: roll back to a prior engine binary or run <code>hydb recover --upgrade</code> (Compatibility Guarantees) with the new binary before opening.</li>
+</ul>
+<h3 id="sec-26-4">26.4 Cross-cutting controls &amp; residual risk</h3>
+<ul>
+<li><strong>Checksums everywhere:</strong> CRC32C (HW-accelerated) on pages, WAL records, segments, manifest — first defense for T1/T2/T3/T9. <strong>Defense in depth:</strong> checksum (detect) → bounds-checked decode (contain) → WAL redo / re-merge (recover) → quarantine + loud error (fail safe); never read-through corruption silently.</li>
+<li><strong>Residual risk (accepted):</strong> undetected multi-bit corruption inside a CRC collision window (~2⁻³²/segment); a privileged local user can delete the data dir (OS-level, out of scope); no encryption at rest (defer to FS/LUKS). <strong>CI security gates (block release):</strong> zero fuzz panics, zero <code>mvcc.visibility_invariant_fail</code>, clean <code>cargo-audit</code>/<code>cargo-deny</code>, overflow-checks profile green.</li>
+</ul>
+<hr>
+</section><section aria-labelledby="sec-failure"> <h2 id="sec-failure">Failure modes &amp; recovery <small class="muted">· 8</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">Failure modes &amp; recovery</caption><thead><tr><th scope="col">Field</th><th scope="col">Crash <em>before</em> <code>Commit</code> record fsync&#39;d</th><th scope="col">Crash <em>after</em> <code>Commit</code> fsync&#39;d</th></tr></thead><tbody><tr id="fm-1"><td><a class="row-anchor" href="#fm-1">Symptom</a></td><td>Txn&#39;s writes absent post-restart</td><td>Txn&#39;s writes present post-restart</td></tr><tr id="fm-2"><td><a class="row-anchor" href="#fm-2">Root cause</a></td><td>Loser txn; never durable</td><td>Winner txn; durability honored</td></tr><tr id="fm-3"><td><a class="row-anchor" href="#fm-3">Detection</a></td><td>Analysis: txn in ATT, no <code>Commit</code> → loser</td><td>Analysis: <code>Commit{ts}</code> seen → winner</td></tr><tr id="fm-4"><td><a class="row-anchor" href="#fm-4">Auto recovery</a></td><td>Undo: walk losers backward, emit <code>Clr{undo_next}</code> per reverted change</td><td>Redo from <code>recLSN</code>; pageLSN gates idempotency</td></tr><tr id="fm-5"><td><a class="row-anchor" href="#fm-5">Manual</a></td><td>none</td><td>none</td></tr><tr id="fm-6"><td><a class="row-anchor" href="#fm-6">Operator</a></td><td>confirm recovery LSN reached <code>Wal::durable_lsn</code></td><td>same</td></tr><tr id="fm-7"><td><a class="row-anchor" href="#fm-7">Forensic</a></td><td>WAL tail dump (<code>hydb recover --dump-att</code>)</td><td>redo trace, DPT snapshot</td></tr><tr id="fm-8"><td><a class="row-anchor" href="#fm-8">Long-term</a></td><td>group-commit fsync barrier before ack; never ack pre-fsync</td><td>checksum every <code>Commit</code> record</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

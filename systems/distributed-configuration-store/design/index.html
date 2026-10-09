@@ -1,0 +1,463 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Configuration Store — Design · Engineering Blueprints</title><meta name="description" content="Distributed Configuration Store, lld: core types, repo tree, file inventory. - NOT a general document/relational DB - NOT eventually-consistent (all reads linearizable by default) - NOT a secrets manager (project 270); store non-secret config only - NOT a message queue - NOT…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/distributed-configuration-store/">Distributed Configuration Store</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Distributed Configuration Store</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~45 weeks</li> <li>2,812 lines</li> <li>blueprint #271</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-configuration-store/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-configuration-store/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-configuration-store/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-configuration-store/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-configuration-store/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-configuration-store/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-configuration-store/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-configuration-store/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-configuration-store/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-configuration-store/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Configuration Store — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/distributed-configuration-store/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>// Key — opaque byte sequence; comparison is lexicographic
+pub struct Key(Vec&lt;u8&gt;);
+impl Key { pub fn prefix_end(&amp;self) -&gt; Key; }   // next key after all keys with this prefix
+
+// Revision — global monotonic; sub=0 for single-op txn
+pub struct Revision { pub main: i64, pub sub: i64 }
+impl Ord for Revision { /* lexicographic (main, sub) */ }
+
+// KeyValue — the value stored per key at a revision
+pub struct KeyValue {
+    pub key: Key, pub create_revision: i64, pub mod_revision: i64,
+    pub version: i64, pub value: Vec&lt;u8&gt;, pub lease: i64,
+}
+
+// Event — one mutation event, emitted by the apply loop
+pub enum EventType { Put, Delete }
+pub struct Event { pub ty: EventType, pub kv: KeyValue, pub prev_kv: Option&lt;KeyValue&gt; }
+
+// Request / Response types
+pub struct RangeRequest  { pub key: Key, pub range_end: Vec&lt;u8&gt;, pub revision: i64,
+                            pub limit: i64, pub sort: SortOrder, pub count_only: bool }
+pub struct RangeResponse { pub header: ResponseHeader, pub kvs: Vec&lt;KeyValue&gt;,
+                            pub more: bool, pub count: i64 }
+pub struct PutRequest    { pub key: Key, pub value: Vec&lt;u8&gt;, pub lease: i64,
+                            pub prev_kv: bool, pub ignore_value: bool }
+pub struct DeleteRangeRequest { pub key: Key, pub range_end: Vec&lt;u8&gt;, pub prev_kv: bool }
+pub struct ResponseHeader { pub cluster_id: u64, pub member_id: u64,
+                             pub revision: i64, pub raft_term: u64 }
+
+// Transaction
+pub struct TxnRequest  { pub compare: Vec&lt;Compare&gt;, pub success: Vec&lt;Op&gt;, pub failure: Vec&lt;Op&gt; }
+pub struct TxnResponse { pub header: ResponseHeader, pub succeeded: bool, pub responses: Vec&lt;Response&gt; }
+pub struct Compare     { pub target: CompareTarget, pub key: Key,
+                          pub result: CompareResult, pub value: Vec&lt;u8&gt; }
+pub enum CompareTarget  { Version, Create, Mod, Value, Lease }
+pub enum CompareResult  { Equal, Greater, Less, NotEqual }
+pub enum Op             { Range(RangeRequest), Put(PutRequest),
+                          Delete(DeleteRangeRequest), Txn(Box&lt;TxnRequest&gt;) }
+
+// Error taxonomy
+pub enum DcsError {
+    NotLeader { leader_hint: Option&lt;u64&gt; },  KeyNotFound,  Compacted { compact_revision: i64 },
+    FutureRev { current: i64 },  LeaseNotFound,  LeaseExpired,
+    AuthDenied { reason: String },  ValidationFailed { msg: String },
+    Io(std::io::Error),  Raft(RaftError),
+}</code></pre><pre class="code"><code>pub enum Role { Follower, Candidate, Leader }
+pub struct LogEntry    { pub term: u64, pub index: u64, pub data: EntryKind }
+pub enum EntryKind     { Normal(Vec&lt;u8&gt;), ConfChange(ConfChange), Empty }
+pub struct HardState   { pub term: u64, pub vote: u64, pub commit: u64 }
+pub struct SoftState   { pub lead: u64, pub raft_state: Role }
+pub struct Ready {
+    pub entries: Vec&lt;LogEntry&gt;,            // must persist to WAL before sending messages
+    pub hard_state: Option&lt;HardState&gt;,     // persist if Some
+    pub committed_entries: Vec&lt;LogEntry&gt;,  // apply to state machine
+    pub messages: Vec&lt;Message&gt;,            // send to peers
+    pub snapshot: Option&lt;Snapshot&gt;,        // install if Some
+}
+pub enum Message {
+    AppendEntries  { term, leader_id, prev_log_index, prev_log_term, entries, leader_commit },
+    AppendResp     { term, follower_id, index, reject: bool, reject_hint },
+    RequestVote    { term, candidate_id, last_log_index, last_log_term, pre_vote: bool },
+    VoteResp       { term, voter_id, granted: bool, pre_vote: bool },
+    InstallSnapshot{ term, leader_id, snapshot: Snapshot },
+    ReadIndex      { term, request_ctx: Vec&lt;u8&gt; },
+    ReadIndexResp  { term, request_ctx: Vec&lt;u8&gt;, index: u64 },
+    Heartbeat      { term, leader_id, commit },
+    HeartbeatResp  { term, follower_id },
+}</code></pre><pre class="code"><code>pub struct TreeIndex(BTreeMap&lt;Key, KeyIndex&gt;);  // guarded by RwLock in production
+pub struct KeyIndex  { pub key: Key, pub modified: Revision, pub generations: Vec&lt;Generation&gt; }
+pub struct Generation{ pub created: Revision, pub version: i64, pub revs: Vec&lt;Revision&gt; }
+pub trait Backend: Send + Sync {
+    fn read_tx(&amp;self)  -&gt; Box&lt;dyn ReadTx + &#39;_&gt;;
+    fn write_tx(&amp;mut self) -&gt; Box&lt;dyn WriteTx + &#39;_&gt;;
+    fn size_bytes(&amp;self) -&gt; u64;
+}
+pub trait ReadTx  { fn get(&amp;self, bucket: &amp;str, key: &amp;[u8]) -&gt; Option&lt;Vec&lt;u8&gt;&gt;; fn range(…) → Vec&lt;(K,V)&gt;; }
+pub trait WriteTx { fn put(&amp;mut self, bucket: &amp;str, key: &amp;[u8], val: &amp;[u8]); fn delete(…); fn commit(self); }
+// Bucket names (constants): &quot;key&quot; (rev→KV bytes), &quot;meta&quot; (compact_rev, cluster_id), &quot;members&quot;</code></pre><pre class="code"><code>pub struct WatchId(i64);
+pub struct WatchRequest { pub id: WatchId, pub key: Key, pub range_end: Vec&lt;u8&gt;,
+                           pub start_revision: i64, pub prev_kv: bool, pub filters: WatchFilters }
+pub struct WatchFilters  { pub no_put: bool, pub no_delete: bool }
+pub struct WatchResponse { pub watch_id: WatchId, pub events: Vec&lt;Event&gt;,
+                            pub header: ResponseHeader, pub compact_revision: i64,
+                            pub canceled: bool, pub cancel_reason: String }</code></pre><pre class="code"><code>pub struct LeaseId(i64);
+pub struct Lease { pub id: LeaseId, pub granted_ttl: i64, pub remaining_ttl: i64,
+                    pub keys: BTreeSet&lt;Key&gt; }
+pub struct LeaseCheckpoint { pub id: LeaseId, pub remaining_ttl: i64 }  // log entry payload</code></pre><pre class="code"><code>pub enum Layer { Default, Env, Service, Instance }  // ascending precedence
+pub enum ValueType { Bool, Int, Float, Str, Json, Bytes }
+pub struct FieldDef   { pub name: String, pub ty: ValueType, pub required: bool,
+                         pub default: Option&lt;Vec&lt;u8&gt;&gt;, pub constraints: Vec&lt;Constraint&gt; }
+pub struct ConfigSchema { pub prefix: Key, pub fields: Vec&lt;FieldDef&gt; }
+pub enum Constraint   { MinInt(i64), MaxInt(i64), Regex(String), OneOf(Vec&lt;Vec&lt;u8&gt;&gt;) }</code></pre><pre class="code"><code>// KvService (tonic-generated trait impl)
+async fn put(req: PutRequest)                  -&gt; Result&lt;PutResponse, Status&gt;;
+async fn range(req: RangeRequest)              -&gt; Result&lt;RangeResponse, Status&gt;;
+async fn delete_range(req: DeleteRangeRequest) -&gt; Result&lt;DeleteRangeResponse, Status&gt;;
+async fn txn(req: TxnRequest)                  -&gt; Result&lt;TxnResponse, Status&gt;;
+// WatchService
+async fn watch(stream: WatchRequestStream)     -&gt; WatchResponseStream;
+// LeaseService
+async fn lease_grant(req: LeaseGrantRequest)   -&gt; Result&lt;LeaseGrantResponse, Status&gt;;
+async fn lease_keep_alive(stream: …)           -&gt; LeaseKeepAliveResponseStream;
+async fn lease_revoke(req: LeaseRevokeRequest) -&gt; Result&lt;LeaseRevokeResponse, Status&gt;;
+// MaintenanceService
+async fn compact(req: CompactionRequest)       -&gt; Result&lt;CompactionResponse, Status&gt;;
+async fn defrag(req: DefragmentRequest)        -&gt; Result&lt;DefragmentResponse, Status&gt;;
+async fn status(req: StatusRequest)            -&gt; Result&lt;StatusResponse, Status&gt;;
+async fn snapshot(req: SnapshotRequest)        -&gt; SnapshotResponseStream;
+async fn move_leader(req: MoveLeaderRequest)   -&gt; Result&lt;MoveLeaderResponse, Status&gt;;</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>dcs/                                  # workspace root
+├── Cargo.toml                        # [workspace] members, resolver=2, profile.release
+├── Cargo.lock                        # pinned; committed for reproducibility
+├── rust-toolchain.toml               # channel=stable, MSRV=1.78
+├── Makefile                          # targets: build test lint fuzz bench cluster-up cluster-down
+├── Dockerfile                        # multi-stage: builder(rust:1.78) → runtime(debian-slim)
+├── docker-compose.yml                # 3-node dcsd cluster + prometheus + grafana
+├── README.md                         # project overview, quick-start, architecture diagram
+├── CONTRIBUTING.md                   # PR workflow, coding standards, DCO sign-off
+├── CODE_OF_CONDUCT.md                # Contributor Covenant v2.1
+├── SECURITY.md                       # vulnerability disclosure policy
+├── CHANGELOG.md                      # semver changelog
+├── BLUEPRINT_LOG.md                    # session-by-session implementation log
+├── BUILD_PLAN.md                     # current phase, next step (updated each session)
+├── LICENSE                           # Apache 2.0
+├── .github/
+│   └── workflows/
+│       └── ci.yml                    # push trigger; build+test+clippy matrix (ADR-A09)
+│</code></pre><pre class="diagram"><code>├── crates/
+│   ├── dcs-core/                     # domain types, no IO
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs                # crate root; re-exports
+│   │       ├── key.rs                # Key(Vec&lt;u8&gt;), KeyRange, prefix_end()
+│   │       ├── revision.rs           # Revision{main,sub}, Ord impl
+│   │       ├── kv.rs                 # KeyValue, EventType, Event, ResponseHeader
+│   │       ├── request.rs            # RangeRequest, PutRequest, DeleteRangeRequest
+│   │       ├── txn.rs                # TxnRequest, Compare, CompareTarget, Op, TxnResponse
+│   │       ├── lease.rs              # LeaseId, Lease (value type)
+│   │       ├── watch.rs              # WatchId, WatchRequest, WatchResponse, WatchFilters
+│   │       └── error.rs              # DcsError enum, From impls
+│   │
+│   ├── dcs-wal/                      # WAL + snapshot file format
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── segment.rs            # Segment: create, append, read-back, CRC32 verify
+│   │       ├── record.rs             # Record framing: [len:u32][crc:u32][payload]
+│   │       ├── wal.rs                # Wal: open/create, append_entries, append_state, replay
+│   │       ├── snapshot.rs           # Snapshot file: header + compressed state machine bytes
+│   │       └── repair.rs             # tail truncation on torn write recovery
+│   │</code></pre><pre class="diagram"><code>│   ├── dcs-mvcc/                     # MVCC state machine
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── key_index.rs          # KeyIndex, Generation, revision lookup
+│   │       ├── tree_index.rs         # TreeIndex: BTreeMap&lt;Key, KeyIndex&gt;
+│   │       ├── backend.rs            # Backend trait; BoltBackend (B-tree pages)
+│   │       ├── bucket.rs             # Bucket: key→value byte store within backend
+│   │       ├── store.rs              # KvStore: put/get/range/delete, revision management
+│   │       ├── watchable.rs          # WatchableStore wrapper; event notification surface
+│   │       └── compaction.rs         # compact(rev): prune treeIndex + backend below rev |
+│   │
+│   ├── dcs-raft/                     # consensus core, no IO
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── raft.rs               # RaftNode: tick/step/ready, role transitions
+│   │       ├── log.rs                # RaftLog: in-memory entries + committed/applied idx
+│   │       ├── progress.rs           # Progress per follower: next/match idx, state
+│   │       ├── read_only.rs          # ReadOnly: pending ReadIndex requests queue
+│   │       ├── message.rs            # Message enum: AppendEntries/Resp, Vote/Resp, etc.
+│   │       ├── config.rs             # Config: election_timeout, heartbeat_interval, max_size
+│   │       ├── joint_conf.rs         # JointConfig: C_old + C_new for membership change
+│   │       └── quorum.rs             # quorum_of(n), has_quorum(votes, conf)
+│   │</code></pre><pre class="diagram"><code>│   ├── dcs-server/                   # node orchestrator
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── node.rs               # DcsNode: owns raft/mvcc/wal/watch/lease; drive loop
+│   │       ├── apply.rs              # apply_loop: drain Ready.committed_entries → mvcc
+│   │       ├── read_index.rs         # linearizable_read(): send ReadIndex, await apply
+│   │       ├── peer_transport.rs     # RaftTransport: send/recv Raft messages to peers (gRPC)
+│   │       ├── compactor.rs          # background task: compact on schedule / on trigger
+│   │       ├── snapshotter.rs        # save/load snapshot; coordinate with raft log GC
+│   │       └── metrics.rs            # prometheus registry; node-level metrics
+│   │
+│   ├── dcs-watch/                    # watch engine
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── watcher.rs            # Watcher: WatchId, channel, filters, start_revision
+│   │       ├── registry.rs           # WatchRegistry: register/cancel/lookup by range
+│   │       ├── fan_out.rs            # notify(events): match watchers, enqueue, backpressure
+│   │       ├── syncer.rs             # WatchSyncer: replay events from start_revision to head
+│   │       └── stream.rs             # WatchStream: gRPC streaming adapter
+│   │
+│   ├── dcs-lease/                    # lease subsystem
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── manager.rs            # LeaseManager: grant/revoke/keepalive/tick
+│   │       ├── expiry.rs             # expiry_loop: periodic tick, fire RevokeLease proposals
+│   │       ├── checkpoint.rs         # LeaseCheckpoint log entry; leader handoff logic
+│   │       └── binding.rs            # attach/detach key↔lease; lookup keys_by_lease
+│   │
+│   ├── dcs-schema/                   # config semantics
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── schema.rs             # ConfigSchema, FieldDef, ValueType enum
+│   │       ├── registry.rs           # SchemaRegistry: register/lookup schema by key prefix
+│   │       ├── validator.rs          # validate(key, value, schema) → Result
+│   │       ├── layer.rs              # Layer enum, layer_prefix(layer, key)
+│   │       └── resolver.rs           # resolve(service, env, instance, key) → effective value
+│   │</code></pre><pre class="diagram"><code>│   ├── dcs-api/                      # gRPC/HTTP surface
+│   │   ├── Cargo.toml
+│   │   ├── proto/
+│   │   │   ├── kv.proto              # KV service: Put/Range/DeleteRange/Txn
+│   │   │   ├── watch.proto           # Watch service: streaming WatchRequest/Response
+│   │   │   ├── lease.proto           # Lease service: Grant/KeepAlive/Revoke/TimeToLive
+│   │   │   ├── auth.proto            # Auth service: Authenticate/UserAdd/RoleAdd/RoleGrant
+│   │   │   └── maintenance.proto     # Maintenance: Compact/Defrag/Status/Snapshot/MoveLeader
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── kv_handler.rs         # KvService impl: route to node.propose / read
+│   │       ├── watch_handler.rs      # WatchService impl: streaming adapter
+│   │       ├── lease_handler.rs      # LeaseService impl
+│   │       ├── auth_handler.rs       # AuthService impl: RBAC check + token
+│   │       ├── maintenance_handler.rs# MaintenanceService impl
+│   │       ├── middleware.rs         # rate limit, auth token validate, request size cap
+│   │       └── server.rs             # GrpcServer: bind, TLS, serve
+│   │
+│   └── dcs-cli/                      # binaries
+│       ├── Cargo.toml
+│       └── src/
+│           ├── main.rs               # top-level: dispatch dcsd or dcsctl based on argv[0]
+│           ├── dcsd/
+│           │   ├── mod.rs
+│           │   └── config.rs         # DcsdConfig: data-dir, advertise-url, peer-urls, cluster-token
+│           └── dcsctl/
+│               ├── mod.rs
+│               ├── put.rs            # dcsctl put &lt;key&gt; &lt;value&gt; [--lease &lt;id&gt;]
+│               ├── get.rs            # dcsctl get &lt;key&gt; [--rev &lt;r&gt;] [--prefix]
+│               ├── watch.rs          # dcsctl watch &lt;key/prefix&gt;
+│               ├── txn.rs            # dcsctl txn (interactive or --from-file)
+│               ├── lease.rs          # dcsctl lease grant/keepalive/revoke
+│               ├── member.rs         # dcsctl member add/remove/list
+│               ├── snapshot.rs       # dcsctl snapshot save/restore
+│               └── endpoint.rs       # dcsctl endpoint status/health
+│</code></pre><pre class="diagram"><code>├── proto/                            # canonical .proto sources (also in dcs-api/proto)
+│
+├── benchmarks/
+│   ├── put_throughput.rs             # criterion: sustained put ops/s
+│   ├── range_scan.rs                 # criterion: range over 100k keys
+│   ├── watch_fan_out.rs              # criterion: 1000-watcher event fan-out latency
+│   └── txn_cas.rs                    # criterion: compare-and-swap throughput
+│
+├── conformance/
+│   ├── linearizability/
+│   │   ├── checker.py                # porcupine driver: parse dcsctl log → check
+│   │   └── ops.json                  # fixture: put/get operations with timestamps
+│   ├── txn/
+│   │   ├── valid_cas.json            # fixture: valid CAS txn expected response
+│   │   ├── malformed_depth.json      # fixture: txn nesting &gt; 3 → error
+│   │   └── value_gt_compare.json     # fixture: value &quot;&gt;&quot; compare → error
+│   ├── watch/
+│   │   ├── compacted_resume.json     # fixture: watch at compacted rev → error + resume
+│   │   └── large_batch_frag.json     # fixture: 500-event batch → fragmented responses
+│   └── lease/
+│       ├── expiry_revoke.json        # fixture: lease TTL expires → keys deleted
+│       └── keepalive_extend.json     # fixture: keepalive before expiry → keys survive
+│
+├── fuzz/
+│   ├── fuzz_txn_decode/              # cargo-fuzz target: txn proto decode
+│   ├── fuzz_wal_replay/              # cargo-fuzz target: WAL segment replay
+│   ├── fuzz_watch_decode/            # cargo-fuzz target: WatchRequest decode
+│   └── fuzz_range_request/           # cargo-fuzz target: range request validation
+│
+├── examples/
+│   ├── service_discovery.rs          # register with lease; watch for peers
+│   ├── leader_election.rs            # CAS on single key with lease
+│   ├── dynamic_reload.rs             # watch + config reload on change
+│   └── layered_config.rs             # resolve effective config across layers
+│</code></pre><pre class="diagram"><code>├── docs/
+│   ├── architecture.md               # narrative of the architecture diagram
+│   ├── adr/
+│   │   ├── adr-001-language.md       # A01: Rust over Go/C++/Java
+│   │   ├── adr-002-consensus.md      # A03: Raft over Paxos/ZAB
+│   │   └── …                         # one .md per ADR row above
+│   ├── runbooks/
+│   │   ├── leader-election.md        # force leader re-election procedure
+│   │   ├── compaction.md             # manual compact + defrag procedure
+│   │   ├── snapshot-restore.md       # restore from snapshot
+│   │   ├── member-add.md             # add node to cluster
+│   │   └── incident-response.md      # general triage checklist
+│   ├── threat-model.md               # attack surface, mitigations
+│   ├── performance/
+│   │   ├── benchmarks.md             # criterion output, p50/p99 tables
+│   │   └── tuning.md                 # fsync policy, batch size, election timeout
+│   └── failure-analysis/
+│       ├── split-brain.md            # partition scenarios
+│       └── revision-compaction.md    # compaction + watch interaction
+│
+├── scripts/
+│   ├── gen-certs.sh                  # generate dev mTLS certs with rcgen
+│   ├── cluster-up.sh                 # start 3-node docker-compose cluster
+│   ├── chaos-partition.sh            # iptables partition node-2 from node-1
+│   └── bench-run.sh                  # run full benchmark suite, upload results
+│
+├── tools/
+│   ├── wal-inspector/                # CLI: dump WAL segments in human-readable form
+│   └── revision-audit/               # CLI: verify treeIndex consistency
+│
+├── notes/                            # reading notes, design scratch pads
+├── papers/                           # PDFs of referenced papers
+├── legal/                            # CLA, third-party notices
+└── brand/                            # logo, color palette (if applicable)</code></pre> </section><section aria-labelledby="sec-file-inventory"> <h2 id="sec-file-inventory">File inventory <small class="muted">(Appendix A · 152 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>Cargo.toml</code></td><td>Workspace manifest; all 10 member crates; resolver=2</td></tr><tr><td><code>Cargo.lock</code></td><td>Pinned dependency versions; committed for reproducibility</td></tr><tr><td><code>rust-toolchain.toml</code></td><td>Stable channel; MSRV 1.78; rustfmt + clippy components</td></tr><tr><td><code>Makefile</code></td><td>build / test / lint / fuzz / bench / cluster-up / cluster-down targets</td></tr><tr><td><code>Dockerfile</code></td><td>Multi-stage Rust build → debian-slim runtime image</td></tr><tr><td><code>docker-compose.yml</code></td><td>3-node dcsd cluster + Prometheus + Grafana</td></tr><tr><td><code>README.md</code></td><td>Project overview; quickstart; architecture diagram</td></tr><tr><td><code>CONTRIBUTING.md</code></td><td>PR workflow; coding standards; DCO sign-off requirement</td></tr><tr><td><code>CODE_OF_CONDUCT.md</code></td><td>Contributor Covenant v2.1</td></tr><tr><td><code>SECURITY.md</code></td><td>Vulnerability disclosure policy; security contact</td></tr><tr><td><code>CHANGELOG.md</code></td><td>Semver changelog; one entry per release</td></tr><tr><td><code>BLUEPRINT_LOG.md</code></td><td>Session-by-session implementation log</td></tr><tr><td><code>BUILD_PLAN.md</code></td><td>Current phase; next step; blocking issues</td></tr><tr><td><code>LICENSE</code></td><td>Apache 2.0</td></tr><tr><td><code>crates/dcs-core/Cargo.toml</code></td><td>dcs-core crate manifest; zero internal deps (foundation crate)</td></tr><tr><td><code>crates/dcs-core/src/lib.rs</code></td><td>Crate root; re-exports Key, Revision, KeyValue, request/txn/lease/watch/error types</td></tr><tr><td><code>crates/dcs-core/src/key.rs</code></td><td>Key type; prefix_end(); lexicographic ordering</td></tr><tr><td><code>crates/dcs-core/src/revision.rs</code></td><td>Revision{main,sub}; Ord; ZERO const</td></tr><tr><td><code>crates/dcs-core/src/kv.rs</code></td><td>KeyValue; EventType; Event; ResponseHeader</td></tr><tr><td><code>crates/dcs-core/src/request.rs</code></td><td>RangeRequest; PutRequest; DeleteRangeRequest; SortOrder</td></tr><tr><td><code>crates/dcs-core/src/txn.rs</code></td><td>TxnRequest; Compare; CompareTarget; CompareResult; Op; TxnResponse</td></tr><tr><td><code>crates/dcs-core/src/lease.rs</code></td><td>LeaseId; Lease value type</td></tr><tr><td><code>crates/dcs-core/src/watch.rs</code></td><td>WatchId; WatchRequest; WatchResponse; WatchFilters</td></tr><tr><td><code>crates/dcs-core/src/error.rs</code></td><td>DcsError enum; std::error::Error impl; From impls</td></tr><tr><td><code>crates/dcs-wal/Cargo.toml</code></td><td>dcs-wal crate manifest; deps: dcs-core, crc32fast, zstd</td></tr><tr><td><code>crates/dcs-wal/src/lib.rs</code></td><td>Crate root; re-exports Wal, Segment, Record, Snapshot types</td></tr><tr><td><code>crates/dcs-wal/src/record.rs</code></td><td>WAL record framing: length + CRC32 + payload</td></tr><tr><td><code>crates/dcs-wal/src/segment.rs</code></td><td>WAL segment: create/append/read-back; 64 MB rotation</td></tr><tr><td><code>crates/dcs-wal/src/wal.rs</code></td><td>Wal: open/create; append_entries; append_state; replay; purge_before</td></tr><tr><td><code>crates/dcs-wal/src/snapshot.rs</code></td><td>Snapshot file: header + zstd payload; save/load; CRC verify</td></tr><tr><td><code>crates/dcs-wal/src/repair.rs</code></td><td>Tail truncation on torn write; CRC mismatch recovery</td></tr><tr><td><code>crates/dcs-mvcc/Cargo.toml</code></td><td>dcs-mvcc crate manifest; deps: dcs-core</td></tr><tr><td><code>crates/dcs-mvcc/src/lib.rs</code></td><td>Crate root; re-exports KvStore, TreeIndex, Backend trait, WatchableStore</td></tr><tr><td><code>crates/dcs-mvcc/src/key_index.rs</code></td><td>KeyIndex; Generation; revision lookup by generation</td></tr><tr><td><code>crates/dcs-mvcc/src/tree_index.rs</code></td><td>TreeIndex: RwLock&lt;BTreeMap&gt;; get/range at revision</td></tr><tr><td><code>crates/dcs-mvcc/src/backend.rs</code></td><td>Backend trait; ReadTx/WriteTx traits; bucket layout</td></tr><tr><td><code>crates/dcs-mvcc/src/bucket.rs</code></td><td>In-memory BTreeMap bucket; WriteTx atomic commit</td></tr><tr><td><code>crates/dcs-mvcc/src/store.rs</code></td><td>KvStore: put/get/range/delete; revision management; apply_txn</td></tr><tr><td><code>crates/dcs-mvcc/src/watchable.rs</code></td><td>WatchableStore: wraps KvStore; emits Events on apply</td></tr><tr><td><code>crates/dcs-mvcc/src/compaction.rs</code></td><td>compact(rev): prune treeIndex + backend; update compact_revision</td></tr><tr><td><code>crates/dcs-raft/Cargo.toml</code></td><td>dcs-raft crate manifest; deps: dcs-core; no IO deps by design (P2)</td></tr><tr><td><code>crates/dcs-raft/src/lib.rs</code></td><td>Crate root; re-exports RaftNode, Ready, Message, Config, Role</td></tr><tr><td><code>crates/dcs-raft/src/raft.rs</code></td><td>RaftNode: tick/step/ready; role transitions; election; replication</td></tr><tr><td><code>crates/dcs-raft/src/log.rs</code></td><td>RaftLog: unstable entries; committed/applied indexes; conflict detection</td></tr><tr><td><code>crates/dcs-raft/src/progress.rs</code></td><td>Progress per follower: next/match index; probe/replicate/snapshot states</td></tr><tr><td><code>crates/dcs-raft/src/read_only.rs</code></td><td>ReadOnly: pending ReadIndex requests; advance on quorum heartbeat</td></tr><tr><td><code>crates/dcs-raft/src/message.rs</code></td><td>Message enum: all Raft RPC variants</td></tr><tr><td><code>crates/dcs-raft/src/config.rs</code></td><td>Config: election_timeout; heartbeat_interval; max sizes</td></tr><tr><td><code>crates/dcs-raft/src/joint_conf.rs</code></td><td>JointConfig: C_old + C_new; joint quorum calculation</td></tr><tr><td><code>crates/dcs-raft/src/quorum.rs</code></td><td>quorum_of(n); has_quorum(votes, config)</td></tr><tr><td><code>crates/dcs-server/Cargo.toml</code></td><td>dcs-server crate manifest; deps: dcs-raft, dcs-mvcc, dcs-wal, dcs-watch, dcs-lease, dcs-schema, tokio</td></tr><tr><td><code>crates/dcs-server/src/lib.rs</code></td><td>Crate root; re-exports DcsNode and node orchestration surface</td></tr><tr><td><code>crates/dcs-server/src/node.rs</code></td><td>DcsNode: drive loop; tick/step/ready; owns all subsystems</td></tr><tr><td><code>crates/dcs-server/src/apply.rs</code></td><td>apply_loop: drain committed entries; decode KvOp; call MVCC apply</td></tr><tr><td><code>crates/dcs-server/src/read_index.rs</code></td><td>linearizable_read: send ReadIndex; await apply_index; call store.range</td></tr><tr><td><code>crates/dcs-server/src/peer_transport.rs</code></td><td>gRPC channel per peer; Message serialize/send/recv</td></tr><tr><td><code>crates/dcs-server/src/compactor.rs</code></td><td>Background compaction task; CompactionPolicy; schedule</td></tr><tr><td><code>crates/dcs-server/src/snapshotter.rs</code></td><td>create_snapshot; save/load; coordinate with WAL purge</td></tr><tr><td><code>crates/dcs-server/src/metrics.rs</code></td><td>Prometheus registry; register all node-level metrics</td></tr><tr><td><code>crates/dcs-watch/Cargo.toml</code></td><td>dcs-watch crate manifest; deps: dcs-core, dcs-mvcc, tokio</td></tr><tr><td><code>crates/dcs-watch/src/lib.rs</code></td><td>Crate root; re-exports Watcher, WatchRegistry, fan-out surface</td></tr><tr><td><code>crates/dcs-watch/src/watcher.rs</code></td><td>Watcher struct: channel; filters; start_revision</td></tr><tr><td><code>crates/dcs-watch/src/registry.rs</code></td><td>WatchRegistry: register/cancel/lookup by key range</td></tr><tr><td><code>crates/dcs-watch/src/fan_out.rs</code></td><td>notify(events): match watchers; try_send; backpressure cancel</td></tr><tr><td><code>crates/dcs-watch/src/syncer.rs</code></td><td>WatchSyncer: replay historical events from start_revision</td></tr><tr><td><code>crates/dcs-watch/src/stream.rs</code></td><td>gRPC streaming adapter for WatchService</td></tr><tr><td><code>crates/dcs-lease/Cargo.toml</code></td><td>dcs-lease crate manifest; deps: dcs-core</td></tr><tr><td><code>crates/dcs-lease/src/lib.rs</code></td><td>Crate root; re-exports LeaseManager and lease binding surface</td></tr><tr><td><code>crates/dcs-lease/src/manager.rs</code></td><td>LeaseManager: grant/revoke/keepalive; lease storage</td></tr><tr><td><code>crates/dcs-lease/src/expiry.rs</code></td><td>expiry_loop: tick-based TTL countdown; RevokeLease proposal</td></tr><tr><td><code>crates/dcs-lease/src/checkpoint.rs</code></td><td>LeaseCheckpoint log entry; leader handoff TTL preservation</td></tr><tr><td><code>crates/dcs-lease/src/binding.rs</code></td><td>attach/detach key↔lease; keys_by_lease lookup</td></tr><tr><td><code>crates/dcs-schema/Cargo.toml</code></td><td>dcs-schema crate manifest; deps: dcs-core, dcs-mvcc</td></tr><tr><td><code>crates/dcs-schema/src/lib.rs</code></td><td>Crate root; re-exports ConfigSchema, SchemaRegistry, resolver surface</td></tr><tr><td><code>crates/dcs-schema/src/schema.rs</code></td><td>ConfigSchema; FieldDef; ValueType; Constraint</td></tr><tr><td><code>crates/dcs-schema/src/registry.rs</code></td><td>SchemaRegistry: longest-prefix match; persistence in MVCC</td></tr><tr><td><code>crates/dcs-schema/src/validator.rs</code></td><td>validate(key, value, schema): type parse + constraint check</td></tr><tr><td><code>crates/dcs-schema/src/layer.rs</code></td><td>Layer enum; layer_prefix: maps layer → key namespace prefix</td></tr><tr><td><code>crates/dcs-schema/src/resolver.rs</code></td><td>resolve: 4-layer parallel MVCC reads; merge by precedence; cache</td></tr><tr><td><code>crates/dcs-api/Cargo.toml</code></td><td>dcs-api crate manifest; deps: dcs-server, tonic, prost</td></tr><tr><td><code>crates/dcs-api/proto/kv.proto</code></td><td>KV gRPC service: Put/Range/DeleteRange/Txn</td></tr><tr><td><code>crates/dcs-api/proto/watch.proto</code></td><td>Watch gRPC service: bidirectional streaming WatchRequest/Response</td></tr><tr><td><code>crates/dcs-api/proto/lease.proto</code></td><td>Lease gRPC service: Grant/KeepAlive/Revoke/TimeToLive</td></tr><tr><td><code>crates/dcs-api/proto/auth.proto</code></td><td>Auth gRPC service: Authenticate/UserAdd/RoleAdd/RoleGrant</td></tr><tr><td><code>crates/dcs-api/proto/maintenance.proto</code></td><td>Maintenance gRPC: Compact/Defrag/Status/Snapshot/MoveLeader</td></tr><tr><td><code>crates/dcs-api/src/lib.rs</code></td><td>Crate root; re-exports service handlers and GrpcServer</td></tr><tr><td><code>crates/dcs-api/src/kv_handler.rs</code></td><td>KvService impl: route to propose or linearizable_read</td></tr><tr><td><code>crates/dcs-api/src/watch_handler.rs</code></td><td>WatchService impl: streaming adapter → WatchRegistry</td></tr><tr><td><code>crates/dcs-api/src/lease_handler.rs</code></td><td>LeaseService impl: delegates to LeaseManager</td></tr><tr><td><code>crates/dcs-api/src/auth_handler.rs</code></td><td>AuthService impl: token issue/validate; RBAC storage</td></tr><tr><td><code>crates/dcs-api/src/maintenance_handler.rs</code></td><td>MaintenanceService impl: compact/defrag/status/snapshot/move-leader</td></tr><tr><td><code>crates/dcs-api/src/middleware.rs</code></td><td>Rate limiting; auth token validation; request size cap</td></tr><tr><td><code>crates/dcs-api/src/server.rs</code></td><td>GrpcServer: bind; TLS; serve; graceful shutdown</td></tr><tr><td><code>crates/dcs-cli/Cargo.toml</code></td><td>dcs-cli crate manifest; deps: dcs-server, dcs-api, clap</td></tr><tr><td><code>crates/dcs-cli/src/main.rs</code></td><td>Top-level dispatch: dcsd or dcsctl</td></tr><tr><td><code>crates/dcs-cli/src/dcsd/mod.rs</code></td><td>dcsd module entry: loads DcsdConfig, constructs and drives DcsNode</td></tr><tr><td><code>crates/dcs-cli/src/dcsd/config.rs</code></td><td>DcsdConfig: data-dir; advertise-url; peer-urls; cluster-token</td></tr><tr><td><code>crates/dcs-cli/src/dcsctl/mod.rs</code></td><td>dcsctl module entry: argv subcommand dispatch to put/get/watch/txn/lease/member/snapshot/endpoint</td></tr><tr><td><code>crates/dcs-cli/src/dcsctl/put.rs</code></td><td>dcsctl put: key value; --lease; --prev-kv</td></tr><tr><td><code>crates/dcs-cli/src/dcsctl/get.rs</code></td><td>dcsctl get: key; --rev; --prefix; --count-only</td></tr><tr><td><code>crates/dcs-cli/src/dcsctl/watch.rs</code></td><td>dcsctl watch: key/prefix; --start-revision</td></tr><tr><td><code>crates/dcs-cli/src/dcsctl/txn.rs</code></td><td>dcsctl txn: interactive or --from-file</td></tr><tr><td><code>crates/dcs-cli/src/dcsctl/lease.rs</code></td><td>dcsctl lease: grant/keepalive/revoke/timetolive</td></tr><tr><td><code>crates/dcs-cli/src/dcsctl/member.rs</code></td><td>dcsctl member: add/remove/list</td></tr><tr><td><code>crates/dcs-cli/src/dcsctl/snapshot.rs</code></td><td>dcsctl snapshot: save path / restore path</td></tr><tr><td><code>crates/dcs-cli/src/dcsctl/endpoint.rs</code></td><td>dcsctl endpoint: status/health</td></tr><tr><td><code>proto/</code></td><td>Canonical .proto sources; mirrored into <code>dcs-api/proto/</code> at build time for codegen</td></tr><tr><td><code>benchmarks/put_throughput.rs</code></td><td>Criterion: sustained put ops/s target</td></tr><tr><td><code>benchmarks/range_scan.rs</code></td><td>Criterion: range over 100k keys p99</td></tr><tr><td><code>benchmarks/watch_fan_out.rs</code></td><td>Criterion: 1000-watcher event fan-out latency</td></tr><tr><td><code>benchmarks/txn_cas.rs</code></td><td>Criterion: compare-and-swap throughput</td></tr><tr><td><code>conformance/linearizability/checker.py</code></td><td>porcupine driver: parse dcsctl log → check linearizability</td></tr><tr><td><code>conformance/linearizability/ops.json</code></td><td>10k op history fixture for porcupine</td></tr><tr><td><code>conformance/txn/valid_cas.json</code></td><td>Valid CAS txn expected response</td></tr><tr><td><code>conformance/txn/malformed_depth.json</code></td><td>Txn depth=4 → ValidationFailed</td></tr><tr><td><code>conformance/txn/value_gt_compare.json</code></td><td>value &gt; compare → ValidationFailed</td></tr><tr><td><code>conformance/watch/compacted_resume.json</code></td><td>Watch at compacted rev → Compacted error + resume</td></tr><tr><td><code>conformance/watch/large_batch_frag.json</code></td><td>500-event batch → fragmented responses</td></tr><tr><td><code>conformance/lease/expiry_revoke.json</code></td><td>Lease TTL expires → keys deleted</td></tr><tr><td><code>conformance/lease/keepalive_extend.json</code></td><td>Keepalive before expiry → keys survive</td></tr><tr><td><code>fuzz/fuzz_txn_decode/</code></td><td>cargo-fuzz target: random bytes → TxnRequest decode; no panic</td></tr><tr><td><code>fuzz/fuzz_wal_replay/</code></td><td>cargo-fuzz target: random WAL segment → no panic</td></tr><tr><td><code>fuzz/fuzz_watch_decode/</code></td><td>cargo-fuzz target: random WatchRequest → no panic</td></tr><tr><td><code>fuzz/fuzz_range_request/</code></td><td>cargo-fuzz target: random RangeRequest → no panic</td></tr><tr><td><code>examples/service_discovery.rs</code></td><td>Register service with lease; watch for peer changes</td></tr><tr><td><code>examples/leader_election.rs</code></td><td>CAS txn + lease for leader election pattern</td></tr><tr><td><code>examples/dynamic_reload.rs</code></td><td>Watch key prefix; reload config on event</td></tr><tr><td><code>examples/layered_config.rs</code></td><td>Resolve effective config across 4 layers</td></tr><tr><td><code>docs/architecture.md</code></td><td>Narrative architecture document</td></tr><tr><td><code>docs/adr/adr-001-language.md</code></td><td>ADR A01: Rust over Go/C++/Java</td></tr><tr><td><code>docs/adr/adr-002-consensus.md</code></td><td>ADR A03: Raft over Paxos/ZAB</td></tr><tr><td><code>docs/runbooks/leader-election.md</code></td><td>Force leader re-election; transfer leadership procedure</td></tr><tr><td><code>docs/runbooks/compaction.md</code></td><td>Manual compact + defrag procedure</td></tr><tr><td><code>docs/runbooks/snapshot-restore.md</code></td><td>Step-by-step snapshot restore</td></tr><tr><td><code>docs/runbooks/member-add.md</code></td><td>Add node to cluster: ConfChange procedure</td></tr><tr><td><code>docs/runbooks/incident-response.md</code></td><td>General triage checklist</td></tr><tr><td><code>docs/threat-model.md</code></td><td>Attack surface; mitigations; threat table</td></tr><tr><td><code>docs/performance/benchmarks.md</code></td><td>Criterion output; p50/p99 tables; regression history</td></tr><tr><td><code>docs/performance/tuning.md</code></td><td>fsync policy; batch size; election timeout tuning</td></tr><tr><td><code>docs/failure-analysis/split-brain.md</code></td><td>Partition scenarios; recovery</td></tr><tr><td><code>docs/failure-analysis/revision-compaction.md</code></td><td>Compaction + watch interaction; recovery</td></tr><tr><td><code>scripts/gen-certs.sh</code></td><td>Generate dev mTLS certs with rcgen</td></tr><tr><td><code>scripts/cluster-up.sh</code></td><td>Start 3-node docker-compose cluster</td></tr><tr><td><code>scripts/chaos-partition.sh</code></td><td>iptables partition node-2 from node-1</td></tr><tr><td><code>scripts/bench-run.sh</code></td><td>Run full benchmark suite</td></tr><tr><td><code>tools/wal-inspector/</code></td><td>CLI: dump WAL segments in human-readable form</td></tr><tr><td><code>tools/revision-audit/</code></td><td>CLI: cross-check treeIndex against backend</td></tr><tr><td><code>notes/</code></td><td>Reading notes; design scratch pads</td></tr><tr><td><code>papers/</code></td><td>PDFs of referenced papers</td></tr><tr><td><code>legal/</code></td><td>CLA; third-party notices</td></tr><tr><td><code>brand/</code></td><td>Logo; color palette</td></tr><tr><td><code>.github/workflows/ci.yml</code></td><td>CI pipeline: build → test → lint → fuzz → bench → docker</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

@@ -1,0 +1,781 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>PDF Parser + Renderer from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="PDF Parser + Renderer from Scratch, hld: §3 overview + §8 domain model. A library + CLI that parses, resolves, interprets, and rasterizes PDF documents end-to-end, from raw bytes to RGBA bitmaps, with no external PDF engine."><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/graphics-media-games/">Graphics, Media &amp; Games</a> </li><li> <a href="/system-design-blueprints/systems/pdf-parser-renderer/">PDF Parser + Renderer from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:320"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/graphics-media-games/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Graphics, Media &amp; Games</span></a> </p> <h1>PDF Parser + Renderer from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~36 weeks</li> <li>2,717 lines</li> <li>blueprint #386</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/pdf-parser-renderer/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/pdf-parser-renderer/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/pdf-parser-renderer/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/pdf-parser-renderer/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/pdf-parser-renderer/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/pdf-parser-renderer/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/pdf-parser-renderer/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/pdf-parser-renderer/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/pdf-parser-renderer/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/pdf-parser-renderer/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:PDF Parser + Renderer from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical pipeline diagram</h3>
+<pre class="diagram"><code>PDF bytes (untrusted, random-access mmap/slice)
+                │
+                ▼
+┌──────────────────────────────────────┐
+│  lexer  (byte scanner / tokenizer)   │
+│  whitespace, delimiters, numbers,    │
+│  names, strings, comments, keywords  │
+└──────────────────────────────────────┘
+                │ tokens
+                ▼
+┌──────────────────────────────────────┐
+│  cos  (COS object parser)            │
+│  9 kinds + indirect ref N G R        │
+│  nesting caps, defensive bounds      │
+└──────────────────────────────────────┘
+                │ Object / lazy refs
+                ▼
+┌──────────────────────────────────────────────────┐
+│  xref  (resolver)                                │
+│  classic table | xref stream (/XRef)             │
+│  object stream (/ObjStm) | scan-rebuild          │
+│  merge via /Prev chain → XrefTable               │
+└──────────────────────────────────────────────────┘
+                │ resolve(ObjId) → Object (cached)
+                ▼
+┌──────────────────────────────────────────────────┐
+│  doc  (document model)                           │
+│  Trailer → Catalog → PageTree → Page             │
+│  /Kids,/Count, attribute inheritance             │
+└──────────────────────────────────────────────────┘
+                │ Page{contents, resources, mediabox}
+                ▼
+┌──────────────────────────────────────────────────┐
+│  Resource resolver  (per page/XObject scope)     │
+│  /Font /XObject /ColorSpace /ExtGState           │
+│  /Pattern /Shading /ProcSet                      │
+└──────────────────────────────────────────────────┘
+                │ concat /Contents → decode via filters
+                ▼
+┌──────────────────────────────────────────────────┐
+│  filters  (decode pipeline)                      │
+│  Flate|LZW|A85|AHx|RL|DCT|CCITT + predictor     │
+└──────────────────────────────────────────────────┘
+                │ decoded content bytes
+                ▼
+┌──────────────────────────────────────────────────┐
+│  content lexer → operator interpreter            │
+│  (postfix stack machine, op budget)              │
+└──────────────────────────────────────────────────┘</code></pre>
+<p><em>(…continued — rendering layer)</em></p>
+<pre class="diagram"><code>                │ operator dispatch
+                ▼
+┌──────────────────────────────────────────────────┐
+│  graphics state machine                          │
+│  CTM stack | clip stack | color | text state     │
+│  q / Q save-restore discipline                   │
+└──────────────────────────────────────────────────┘
+   │ paths          │ text            │ images
+   ▼                ▼                 ▼
+┌──────────┐  ┌────────────────┐  ┌─────────────────┐
+│ path     │  │ text engine    │  │ image pipeline  │
+│ builder  │  │ Tj TJ &#39; &quot;      │  │ Do/BI..EI       │
+│ m l c re │  │ font loader    │  │ image_mask/SMask│
+└────┬─────┘  │ T1/TT/T0/CID  │  │ DCT/CCITT       │
+     │        └──────┬─────────┘  └──────┬──────────┘
+     │               │ glyph src          │ pixels
+     ▼               ▼                    │
+┌────────────────────────────────┐        │
+│  raster  (shared w/ #385)      │◄───────┘
+│  flatten → scanline → AA mask  │ (blit)
+└───────────────┬────────────────┘
+                │ coverage + color
+                ▼
+┌──────────────────────────────────────────────────┐
+│  page compositor                                 │
+│  alpha + separable blend modes + /Rotate         │
+└──────────────────────────────────────────────────┘
+                │
+                ▼
+      Page bitmap (RGBA8 / Gray8)
+                │
+                ▼
+      api / cli  (PNG, text, object dump)</code></pre>
+<h3 id="sec-3-2">3.2 Per-box descriptions</h3>
+<p><strong>lexer.</strong> Byte-oriented zero-copy scanner over a <code>&amp;[u8]</code>. Classifies bytes into whitespace (NUL TAB LF FF CR SP), delimiters (<code>( ) &lt; &gt; [ ] { } / %</code>), and regular characters. Emits tokens: integers, reals, literal strings (balanced-paren with escapes + octal), hex strings, names (<code>/</code> + <code>#</code>-escapes), array/dict open/close, <code>stream</code>/<code>endstream</code>/<code>obj</code>/<code>endobj</code>/<code>R</code>/keyword. No allocation for token bodies — slices into the source. Trust boundary: every read bounds-checked against the buffer end; never trusts a declared length.</p>
+<p><strong>cos.</strong> Recursive-descent parser turning tokens into <code>Object</code>. Handles all 9 kinds plus the 3-token reference lookahead <code>N G R</code> vs the integer <code>N</code>. Enforces nesting caps (array/dict depth ≤ <code>MAX_NEST</code>) to stop stack-exhaustion attacks. Stream objects parse the dict, then read from after the <code>stream</code> keyword EOL marker for <code>/Length</code> bytes (with reconciliation if <code>/Length</code> lies). Does not decode stream bytes — that is <code>filters</code>.</p>
+<p><strong>xref (resolver).</strong> The random-access heart. Reads <code>startxref</code> from the file tail, parses the classic <code>xref</code> table (subsections of 20-byte entries) or a PDF 1.5 xref <strong>stream</strong> (<code>/Type /XRef</code>, <code>/W</code>, <code>/Index</code>), follows the <code>/Prev</code> chain merging older entries under newer, and resolves object-stream members (<code>/ObjStm</code>). On any inconsistency (bad offset, missing object, malformed table) it triggers <strong>rebuild</strong>: a linear scan for <code>N G obj</code> markers reconstructs the table. Exposes <code>resolve(ObjId) → Result&lt;Object&gt;</code> backed by a cache, with cycle detection.</p>
+<p><strong>doc (document model).</strong> Navigates the logical hierarchy: trailer <code>/Root</code> → <code>Catalog</code> → <code>/Pages</code> page tree. Walks <code>/Kids</code>/<code>/Count</code>, materializes leaf <code>Page</code> nodes, applies <strong>attribute inheritance</strong> (<code>/Resources</code>, <code>/MediaBox</code>, <code>/CropBox</code>, <code>/Rotate</code> inherited down the tree). Detects cyclic/over-deep page trees. Produces a flat page index for random page access.</p>
+<p><strong>Resource resolver.</strong> Given a page (or nested form/Type3 scope), resolves the <code>/Resources</code> dictionary&#39;s sub-dictionaries — <code>/Font</code>, <code>/XObject</code>, <code>/ColorSpace</code>, <code>/ExtGState</code>, <code>/Pattern</code>, <code>/Shading</code>, <code>/ProcSet</code>. Resource scope is <strong>stacked</strong>: a form XObject inherits the parent resources unless it declares its own. Name lookups (<code>/F1</code>, <code>/Im0</code>) resolve to indirect objects; missing entries fall back with telemetry.</p>
+<p><strong>filters.</strong> A composable decode chain. Each <code>Filter</code> consumes raw bytes + <code>/DecodeParms</code> and yields decoded bytes. Chains apply in array order. Includes FlateDecode (DEFLATE + zlib header) with PNG/TIFF predictors, LZWDecode (variable-width codes, early-change), ASCII85Decode, ASCIIHexDecode, RunLengthDecode, DCTDecode (delegated to JPEG decoder, yields raw samples), CCITTFaxDecode (G3/G4). Enforces a decompression-ratio cap (zip-bomb guard).</p>
+<p><strong>content lexer + interpreter.</strong> A second tokenizer over decoded content bytes (reuses <code>lexer</code> primitives but treats operators as keywords). The interpreter is a postfix stack machine: operands push onto an operand stack; an operator keyword pops its arity and dispatches. Unknown operators are skipped (operand stack cleared) per the compatibility rule. An operator budget caps total executed operators.</p>
+<p><strong>graphics state machine.</strong> The mutable rendering context: current transformation matrix (CTM), clip path, fill/stroke color + color space, line width/cap/join/miter/dash, alpha (CA/ca), blend mode, and a nested <code>TextState</code>. <code>q</code> pushes a copy; <code>Q</code> pops. Stack underflow on <code>Q</code> is clamped (never negative) with telemetry. The CTM maps user space → device space; composed with the page&#39;s rotation/flip transform.</p>
+<p><strong>path builder.</strong> Accumulates the current path from construction operators (<code>m l c v y re h</code>). Beziers stored as control points; flattened later. Painting operators (<code>S s f f* B b n</code>) hand the path to the rasterizer with the active winding rule and paint (fill vs stroke vs clip). <code>W</code>/<code>W*</code> set a pending clip applied at the next path-painting op.</p>
+<p><strong>text engine.</strong> Maintains text-space matrices (<code>Tm</code> text matrix, <code>Tlm</code> line matrix) and text state (font, size, spacing, leading, scale, rise, render mode). Showing operators (<code>Tj TJ &#39; &quot;</code>) decode the string into character codes via the font&#39;s encoding/CMap, look up glyph IDs and advance widths, position each glyph via the text-rendering matrix, and emit glyph outlines (or Type3 sub-content) to the rasterizer. Owns font loading and glyph sourcing.</p>
+<p><strong>font loader.</strong> Builds a <code>Font</code> from a font dictionary: simple (Type1/TrueType/Type3) or composite (Type0). Loads embedded programs (<code>/FontFile</code> Type1, <code>/FontFile2</code> TrueType via #385, <code>/FontFile3</code> CFF/OpenType), builds the code→glyph mapping (encoding + <code>/Differences</code>, or CMap + <code>/CIDToGIDMap</code>), and width tables (<code>/Widths</code> or <code>/W</code>/<code>/DW</code>). Falls back to Standard-14 metrics when unembedded.</p>
+<p><strong>image pipeline.</strong> Handles image XObjects (<code>/Subtype /Image</code>) and inline images (<code>BI … ID … EI</code>). Decodes sample data through the filter chain, interprets bits-per-component + color space → RGBA, applies <code>/ImageMask</code> (1-bit stencil), <code>/SMask</code> (soft alpha), and color-key masking. Blits into device space honoring the CTM (with bilinear/nearest sampling).</p>
+<p><strong>raster (shared with #385).</strong> Flattens Bézier curves to line segments (adaptive tolerance), runs a scanline sweep accumulating <strong>signed-area coverage</strong> per pixel for anti-aliasing, applies the winding rule, intersects with the clip mask, and produces a coverage buffer the compositor blends with the paint. Reused verbatim from #385 for glyph fills.</p>
+<p><strong>page compositor.</strong> Blends coverage × color into the destination bitmap using the active alpha and blend mode (Normal, Multiply, Screen, Overlay, Darken, Lighten, …). Applies page <code>/Rotate</code> and the y-flip (PDF origin bottom-left → image origin top-left). Emits the final <code>Gray8</code>/<code>RGBA8</code> buffer.</p>
+<p><strong>api / cli.</strong> The public surface: open a document, enumerate pages, render a page at a DPI/scale to a bitmap, extract text, dump objects. The CLI wraps these for shell use and batch pipelines.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Physical file structure</h3>
+<pre class="diagram"><code>%PDF-1.7                          ← header (version), may have binary comment line
+%âãÏÓ                              ← binary marker (≥4 bytes &gt;127) hints binary-safe
+1 0 obj                           ← body: indirect objects
+  &lt;&lt; /Type /Catalog /Pages 2 0 R &gt;&gt;
+endobj
+2 0 obj
+  &lt;&lt; /Type /Pages /Kids [3 0 R] /Count 1 &gt;&gt;
+endobj
+3 0 obj
+  &lt;&lt; /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]
+     /Contents 4 0 R /Resources &lt;&lt; /Font &lt;&lt; /F1 5 0 R &gt;&gt; &gt;&gt; &gt;&gt;
+endobj
+4 0 obj &lt;&lt; /Length 44 &gt;&gt;
+stream
+BT /F1 24 Tf 72 720 Td (Hello, PDF) Tj ET
+endstream
+endobj
+5 0 obj &lt;&lt; /Type /Font /Subtype /Type1 /BaseFont /Helvetica &gt;&gt; endobj
+xref                              ← cross-reference table
+0 6
+0000000000 65535 f               ← object 0 is always free, gen 65535
+0000000009 00000 n
+0000000074 00000 n
+0000000147 00000 n
+0000000300 00000 n
+0000000395 00000 n
+trailer
+  &lt;&lt; /Size 6 /Root 1 0 R &gt;&gt;
+startxref
+467                              ← byte offset of the `xref` keyword
+%%EOF</code></pre>
+<ul>
+<li><strong>Header:</strong> <code>%PDF-M.m</code> in the first 1024 bytes (scan, not strictly offset 0). Version may be overridden by <code>/Version</code> in the catalog.</li>
+<li><strong>Body:</strong> <code>N G obj … endobj</code> indirect objects in any order.</li>
+<li><strong>Classic xref:</strong> <code>xref</code>, then subsections <code>start count</code> followed by <code>count</code> 20-byte entries: <code>nnnnnnnnnn ggggg X\r\n</code> where <code>X</code> = <code>n</code> (in-use) or <code>f</code> (free); each entry is <strong>exactly 20 bytes</strong> (offset(10) SP gen(5) SP type(1) EOL(2)).</li>
+<li><strong>Trailer:</strong> dict with <code>/Size</code> (1 + max obj num), <code>/Root</code> (catalog ref), <code>/Prev</code> (offset of previous xref, incremental), <code>/Info</code>, <code>/ID</code> <code>[&lt;a&gt;&lt;b&gt;]</code>, <code>/Encrypt</code>.</li>
+<li><strong><code>startxref</code>:</strong> byte offset of the last xref section (or xref stream).</li>
+<li><strong><code>%%EOF</code>:</strong> end marker (may have trailing bytes after it in the wild — tolerate).</li>
+<li><strong>Incremental update:</strong> new body objects + new xref (with <code>/Prev</code> → old xref) + new trailer appended after the original <code>%%EOF</code>. Multiple updates chain via <code>/Prev</code>.</li>
+<li><strong>Linearized PDF:</strong> first object is a linearization dict; first page + hint streams placed early for fast web view; structurally a normal PDF (hints are advisory only).</li>
+</ul>
+<h3 id="sec-8-2">8.2 COS object grammar (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>object       = boolean | integer | real | string | name
+             | array | dictionary | stream | null | reference ;
+
+boolean      = &quot;true&quot; | &quot;false&quot; ;
+integer      = [ &quot;+&quot; | &quot;-&quot; ] digit { digit } ;
+real         = [ &quot;+&quot; | &quot;-&quot; ] ( digit { digit } &quot;.&quot; { digit }
+                             | &quot;.&quot; digit { digit } ) ;
+null         = &quot;null&quot; ;
+
+string       = literal_string | hex_string ;
+literal_string = &quot;(&quot; { lit_char | balanced_parens | escape } &quot;)&quot; ;
+escape       = &quot;\&quot; ( &quot;n&quot;|&quot;r&quot;|&quot;t&quot;|&quot;b&quot;|&quot;f&quot;|&quot;(&quot;|&quot;)&quot;|&quot;\&quot;
+                   | octal3 | line_continuation ) ;
+hex_string   = &quot;&lt;&quot; { hex_digit | whitespace } &quot;&gt;&quot; ;   (* odd count → pad 0 *)
+
+name         = &quot;/&quot; { name_char | &quot;#&quot; hex_digit hex_digit } ;
+
+array        = &quot;[&quot; { object } &quot;]&quot; ;
+dictionary   = &quot;&lt;&lt;&quot; { name object } &quot;&gt;&gt;&quot; ;            (* keys are names *)
+
+stream       = dictionary &quot;stream&quot; ( CRLF | LF ) raw_bytes ( EOL )? &quot;endstream&quot; ;
+               (* raw_bytes length = /Length (reconciled); never trust blindly *)
+
+reference    = integer integer &quot;R&quot; ;                  (* object num, gen, R *)
+indirect_obj = integer integer &quot;obj&quot; object &quot;endobj&quot; ;</code></pre>
+<p><strong>Lexer notes:</strong> <code>%</code> begins a comment to EOL (except inside strings/streams). Whitespace = <code>{NUL,TAB,LF,FF,CR,SP}</code>. Delimiters = <code>(){}&lt;&gt;[]/%</code>. A number followed by another number followed by <code>R</code> is a reference; the parser needs 2-token lookahead to disambiguate <code>3 0 R</code> (ref) from <code>3 0</code> (two integers, e.g. in an array). <code>&lt;</code> may start a hex string or (<code>&lt;&lt;</code>) a dict — peek the next byte.</p>
+<h3 id="sec-8-3">8.3 Cross-reference streams (PDF 1.5+)</h3>
+<p>A stream object replacing the classic table:</p>
+<pre class="diagram"><code>&lt;&lt; /Type /XRef /Size N /Root ... /W [w1 w2 w3] /Index [s1 c1 s2 c2 ...]
+   /Prev offset /Filter /FlateDecode /Length L &gt;&gt;
+stream
+&lt;binary fields, each entry = w1+w2+w3 bytes&gt;
+endstream</code></pre>
+<ul>
+<li><code>/W</code> = byte widths of the 3 fields per entry: <code>[type, field2, field3]</code>.</li>
+<li><strong>Field types:</strong> <code>0</code> = free (field2 = next free obj, field3 = gen); <code>1</code> = in-use (field2 = byte offset, field3 = gen); <code>2</code> = compressed (field2 = ObjStm object number, field3 = index within stream).</li>
+<li><code>/Index</code> = <code>[start count …]</code> pairs naming which object numbers the table covers (default <code>[0 Size]</code>).</li>
+<li>A field width of 0 means a default value (type defaults to 1).</li>
+</ul>
+<h3 id="sec-8-4">8.4 Object streams (ObjStm)</h3>
+<pre class="diagram"><code>&lt;&lt; /Type /ObjStm /N n /First f /Length L [/Extends prev] /Filter ... &gt;&gt;
+stream
+&lt;n pairs: objnum offset&gt; ... (offsets relative to /First)
+&lt;object 1 bytes&gt;&lt;object 2 bytes&gt;...
+endstream</code></pre>
+<ul>
+<li>Holds <code>n</code> non-stream objects packed together (compressed once → space saving).</li>
+<li><code>/N</code> = object count; <code>/First</code> = byte offset (in decoded stream) where the first object body begins; the header is <code>n</code> <code>(objnum offset)</code> integer pairs.</li>
+<li><strong>Rule:</strong> an ObjStm may not contain stream objects, the <code>/Encrypt</code> dict, or another ObjStm; gen number of compressed objects is implicitly 0.</li>
+</ul>
+<h3 id="sec-8-5">8.5 Document hierarchy</h3>
+<pre class="diagram"><code>Trailer ──/Root──► Catalog ──/Pages──► PageTree(root) ──/Kids──► [ Pages | Page ... ]
+                     │                                                  │
+                     ├─/Names ─ name trees (Dests, EmbeddedFiles ...)   │
+                     ├─/AcroForm ─ form fields (render appearances)     │
+                     ├─/Metadata ─ XMP stream                           ▼
+                     └─/OpenAction ─ (REFUSED — never executed)       Page leaf
+                                                                   /Contents /Resources
+                                                                   /MediaBox /CropBox /Rotate</code></pre>
+<ul>
+<li><strong>Catalog:</strong> <code>/Type /Catalog</code>, <code>/Pages</code> (required), <code>/Names</code>, <code>/AcroForm</code>, <code>/Metadata</code>, <code>/OpenAction</code> (parsed, refused), <code>/Version</code>, <code>/OCProperties</code> (optional content).</li>
+<li><strong>Page tree node (<code>/Pages</code>):</strong> <code>/Type /Pages</code>, <code>/Kids</code> (array of refs), <code>/Count</code> (total leaf pages), <code>/Parent</code>. Intermediate nodes may carry <strong>inheritable</strong> attributes.</li>
+<li><strong>Page leaf (<code>/Page</code>):</strong> <code>/Type /Page</code>, <code>/Parent</code>, <code>/Contents</code> (stream or array of streams), <code>/Resources</code>, <code>/MediaBox</code>, <code>/CropBox</code>, <code>/Rotate</code> (0/90/180/270), <code>/Annots</code>, <code>/Group</code> (transparency).</li>
+<li><strong>Inheritance:</strong> <code>/Resources</code>, <code>/MediaBox</code>, <code>/CropBox</code>, <code>/Rotate</code> flow from ancestors to a page if not set locally. Resolve by walking <code>/Parent</code> upward.</li>
+</ul>
+<h3 id="sec-8-6">8.6 Content-stream operator tables</h3>
+<p><strong>Graphics state</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Op</th>
+<th>Operands</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>q</code></td>
+<td>—</td>
+<td>push graphics state</td>
+</tr>
+<tr>
+<td><code>Q</code></td>
+<td>—</td>
+<td>pop graphics state</td>
+</tr>
+<tr>
+<td><code>cm</code></td>
+<td>a b c d e f</td>
+<td>concat matrix to CTM</td>
+</tr>
+<tr>
+<td><code>w</code></td>
+<td>width</td>
+<td>set line width</td>
+</tr>
+<tr>
+<td><code>J</code></td>
+<td>cap</td>
+<td>line cap (0 butt,1 round,2 square)</td>
+</tr>
+<tr>
+<td><code>j</code></td>
+<td>join</td>
+<td>line join (0 miter,1 round,2 bevel)</td>
+</tr>
+<tr>
+<td><code>M</code></td>
+<td>limit</td>
+<td>miter limit</td>
+</tr>
+<tr>
+<td><code>d</code></td>
+<td>array phase</td>
+<td>dash pattern</td>
+</tr>
+<tr>
+<td><code>ri</code></td>
+<td>intent</td>
+<td>rendering intent</td>
+</tr>
+<tr>
+<td><code>i</code></td>
+<td>flatness</td>
+<td>flatness tolerance</td>
+</tr>
+<tr>
+<td><code>gs</code></td>
+<td>name</td>
+<td>apply ExtGState dict</td>
+</tr>
+</tbody></table></div>
+<p><strong>Path construction</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Op</th>
+<th>Operands</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>m</code></td>
+<td>x y</td>
+<td>moveto (new subpath)</td>
+</tr>
+<tr>
+<td><code>l</code></td>
+<td>x y</td>
+<td>lineto</td>
+</tr>
+<tr>
+<td><code>c</code></td>
+<td>x1 y1 x2 y2 x3 y3</td>
+<td>cubic Bézier</td>
+</tr>
+<tr>
+<td><code>v</code></td>
+<td>x2 y2 x3 y3</td>
+<td>Bézier (first ctrl = current pt)</td>
+</tr>
+<tr>
+<td><code>y</code></td>
+<td>x1 y1 x3 y3</td>
+<td>Bézier (second ctrl = endpoint)</td>
+</tr>
+<tr>
+<td><code>re</code></td>
+<td>x y w h</td>
+<td>append rectangle</td>
+</tr>
+<tr>
+<td><code>h</code></td>
+<td>—</td>
+<td>closepath</td>
+</tr>
+</tbody></table></div>
+<p><strong>Path painting</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Op</th>
+<th>Meaning</th>
+<th>Op</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>S</code></td>
+<td>stroke</td>
+<td><code>s</code></td>
+<td>closepath + stroke</td>
+</tr>
+<tr>
+<td><code>f</code> / <code>F</code></td>
+<td>fill (non-zero)</td>
+<td><code>f*</code></td>
+<td>fill (even-odd)</td>
+</tr>
+<tr>
+<td><code>B</code></td>
+<td>fill + stroke (NZ)</td>
+<td><code>B*</code></td>
+<td>fill + stroke (EO)</td>
+</tr>
+<tr>
+<td><code>b</code></td>
+<td>close+fill+stroke (NZ)</td>
+<td><code>b*</code></td>
+<td>close+fill+stroke (EO)</td>
+</tr>
+<tr>
+<td><code>n</code></td>
+<td>no-op paint (apply pending clip)</td>
+<td></td>
+<td></td>
+</tr>
+</tbody></table></div>
+<p><strong>Clipping</strong> — <code>W</code> (non-zero clip), <code>W*</code> (even-odd clip); set pending clip, applied at next path-paint op.</p>
+<p><strong>Color</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Op</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>CS</code> / <code>cs</code></td>
+<td>set stroke / fill color space</td>
+</tr>
+<tr>
+<td><code>SC</code> / <code>sc</code></td>
+<td>set color (components)</td>
+</tr>
+<tr>
+<td><code>SCN</code> / <code>scn</code></td>
+<td>set color (components, + pattern name)</td>
+</tr>
+<tr>
+<td><code>G</code> / <code>g</code></td>
+<td>DeviceGray stroke / fill</td>
+</tr>
+<tr>
+<td><code>RG</code> / <code>rg</code></td>
+<td>DeviceRGB stroke / fill</td>
+</tr>
+<tr>
+<td><code>K</code> / <code>k</code></td>
+<td>DeviceCMYK stroke / fill</td>
+</tr>
+</tbody></table></div>
+<p><strong>Text object</strong> — <code>BT</code> (begin, <code>Tm</code>=<code>Tlm</code>=identity), <code>ET</code> (end).</p>
+<p><strong>Text state</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Op</th>
+<th>Operands</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Tc</code></td>
+<td>spacing</td>
+<td>char spacing</td>
+</tr>
+<tr>
+<td><code>Tw</code></td>
+<td>spacing</td>
+<td>word spacing (applies to code 32)</td>
+</tr>
+<tr>
+<td><code>Tz</code></td>
+<td>scale</td>
+<td>horizontal scale %</td>
+</tr>
+<tr>
+<td><code>TL</code></td>
+<td>leading</td>
+<td>text leading</td>
+</tr>
+<tr>
+<td><code>Tf</code></td>
+<td>font size</td>
+<td>set font + size</td>
+</tr>
+<tr>
+<td><code>Tr</code></td>
+<td>mode</td>
+<td>render mode (0 fill,1 stroke,2 f+s,3 invisible,4–7 +clip)</td>
+</tr>
+<tr>
+<td><code>Ts</code></td>
+<td>rise</td>
+<td>text rise</td>
+</tr>
+</tbody></table></div>
+<p><strong>Text positioning</strong> — <code>Td</code> (move by tx ty), <code>TD</code> (move + set leading), <code>Tm</code> (set text matrix), <code>T*</code> (next line).</p>
+<p><strong>Text showing</strong> — <code>Tj</code> (show string), <code>TJ</code> (array: strings + numeric adjustments in thousandths of em), <code>&#39;</code> (next line + show), <code>&quot;</code> (set Tw Tc + next line + show).</p>
+<p><strong>Type3 glyph</strong> — <code>d0</code> (set glyph width), <code>d1</code> (set width + bbox, color from text).</p>
+<p><strong>Shading</strong> — <code>sh</code> (paint shading across clip region).</p>
+<p><strong>Inline image</strong> — <code>BI</code> (begin dict) … <code>ID</code> (image data follows) … <code>EI</code> (end).</p>
+<p><strong>XObject</strong> — <code>Do</code> (paint named XObject: form or image).</p>
+<p><strong>Marked content</strong> — <code>BMC</code>/<code>BDC</code> (begin), <code>EMC</code> (end), <code>MP</code>/<code>DP</code> (point). Affect logical structure/optional content only; rendering ignores unless OCG hidden.</p>
+<p><strong>Compatibility</strong> — <code>BX</code>/<code>EX</code> (begin/end compatibility section: unknown operators inside are silently ignored).</p>
+<h3 id="sec-8-7">8.7 Fonts</h3>
+<p><strong>Simple fonts</strong> (<code>/Subtype /Type1 | /TrueType | /Type3</code>, single-byte codes 0–255):</p>
+<ul>
+<li><code>/BaseFont</code>, <code>/FirstChar</code>, <code>/LastChar</code>, <code>/Widths</code> (array, indexed by code−FirstChar, in glyph-space /1000).</li>
+<li><code>/Encoding</code> = base (<code>/StandardEncoding</code>,<code>/WinAnsiEncoding</code>,<code>/MacRomanEncoding</code>) optionally with <code>/Differences [code /name …]</code>.</li>
+<li><code>/FontDescriptor</code> → <code>/Flags</code>, <code>/FontBBox</code>, <code>/ItalicAngle</code>, <code>/Ascent</code>, <code>/Descent</code>, <code>/CapHeight</code>, <code>/StemV</code>, and one of <code>/FontFile</code> (Type1), <code>/FontFile2</code> (TrueType), <code>/FontFile3</code> (CFF/OpenType).</li>
+<li><strong>Type3:</strong> <code>/FontMatrix</code>, <code>/CharProcs</code> (name → content stream defining each glyph), <code>/Encoding</code>, <code>/Resources</code>; glyphs are mini content streams (recursion-capped).</li>
+</ul>
+<p><strong>Composite fonts</strong> (<code>/Subtype /Type0</code>, multi-byte codes):</p>
+<ul>
+<li><code>/Encoding</code> = <code>/Identity-H</code>/<code>/Identity-V</code> (code = 2-byte CID) or a named/embedded CMap (code → CID).</li>
+<li><code>/DescendantFonts [ &lt;CIDFont&gt; ]</code> where CIDFont is <code>/CIDFontType0</code> (CFF) or <code>/CIDFontType2</code> (TrueType) with <code>/CIDSystemInfo</code>, <code>/CIDToGIDMap</code> (<code>/Identity</code> or a stream), <code>/W</code> (per-CID widths), <code>/DW</code> (default width).</li>
+<li><code>/ToUnicode</code> = a CMap stream mapping codes → Unicode for <strong>text extraction</strong> (not rendering).</li>
+</ul>
+<p><strong>Standard-14:</strong> Helvetica (×4), Times (×4), Courier (×4), Symbol, ZapfDingbats — metrics built-in (AFM tables) so unembedded standard fonts render with correct widths via a substitute outline.</p>
+<h3 id="sec-8-8">8.8 Color spaces</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Members</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Device</td>
+<td>DeviceGray, DeviceRGB, DeviceCMYK</td>
+<td>direct component values</td>
+</tr>
+<tr>
+<td>CIE-based</td>
+<td>CalGray, CalRGB, Lab, ICCBased</td>
+<td>ICCBased carries an embedded profile (<code>/N</code> components) + <code>/Alternate</code></td>
+</tr>
+<tr>
+<td>Special</td>
+<td>Indexed (<code>[/Indexed base hival lookup]</code>), Separation (<code>[/Separation name alt tintFn]</code>), DeviceN (<code>[/DeviceN names alt tintFn]</code>), Pattern (<code>[/Pattern]</code> or <code>[/Pattern base]</code>)</td>
+<td>Indexed = palette; Separation/DeviceN = tint transform via a function; Pattern = tiling or shading paint</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li><strong>Tint transforms</strong> (Separation/DeviceN) use PDF functions: Type 0 (sampled), 2 (exponential), 3 (stitching), 4 (PostScript calculator — interpreted in a tiny sandboxed VM, no file/IO ops).</li>
+</ul>
+<h3 id="sec-8-9">8.9 Coordinate system</h3>
+<ul>
+<li><strong>Default user space:</strong> origin bottom-left, +x right, +y up, unit = 1/72 inch.</li>
+<li><strong>CTM</strong> maps user → device space; built by <code>cm</code> concatenation atop the initial device transform.</li>
+<li><strong>Initial device transform:</strong> flips y (device origin top-left) and scales by DPI/72; rotates per page <code>/Rotate</code>.</li>
+<li><strong>Text space:</strong> <code>Trm = [Tfs·Th 0 0 Tfs 0 Trise] × Tm × CTM</code> (text rendering matrix); glyph space → text space via the font matrix (Type3) or /1000 scaling (others).</li>
+</ul>
+<h3 id="sec-8-10">8.10 Worked examples</h3>
+<p><strong>(a) Minimal &quot;Hello&quot; PDF</strong> — see <a class="cite" href="/system-design-blueprints/systems/pdf-parser-renderer/architecture/#sec-8-1">§8.1</a> (full object listing). Rendering path: open → tail scan <code>startxref 467</code> → parse xref → trailer <code>/Root 1 0 R</code> → catalog <code>/Pages 2 0 R</code> → page tree → page 3 <code>/Contents 4 0 R</code> → decode stream (no filter) → interpret <code>BT /F1 24 Tf 72 720 Td (Hello, PDF) Tj ET</code> → load Helvetica (Std-14) → place 10 glyphs at advancing x from (72,720) → rasterize → page bitmap.</p>
+<p><strong>(b) Filled rectangle + text content stream</strong></p>
+<pre class="diagram"><code>q
+1 0 0 RG 0 0 1 rg            % stroke red, fill blue
+2 w                          % line width 2
+100 100 200 150 re           % rectangle
+B                            % fill + stroke
+BT /F1 18 Tf 120 130 Td (Box) Tj ET
+Q</code></pre>
+<p><strong>(c) Composite-font CJK snippet</strong> (Type0, Identity-H)</p>
+<pre class="diagram"><code>BT /F2 20 Tf 100 700 Td &lt;4E0B6587&gt; Tj ET
+% F2: Type0 /Encoding /Identity-H, descendant CIDFontType2,
+% codes 4E0B,6587 are CIDs → /CIDToGIDMap → glyph IDs in embedded TrueType</code></pre>
+<p><strong>(d) Malformed examples + repair path</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Defect</th>
+<th>Symptom</th>
+<th>Repair</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Missing/wrong <code>/Length</code></td>
+<td><code>endstream</code> not at declared offset</td>
+<td>scan forward for <code>endstream</code>, use real length (<a class="cite" href="/system-design-blueprints/systems/pdf-parser-renderer/reliability/#inv-4">I4</a>)</td>
+</tr>
+<tr>
+<td>Broken xref offset</td>
+<td>object not at offset → wrong/garbage parse</td>
+<td>rebuild xref by scanning <code>N G obj</code> (<a class="cite" href="/system-design-blueprints/systems/pdf-parser-renderer/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/pdf-parser-renderer/build/#sec-25">§25</a>)</td>
+</tr>
+<tr>
+<td>Circular <code>/Pages</code></td>
+<td>infinite traversal</td>
+<td>visited-set + depth cap, truncate (<a class="cite" href="/system-design-blueprints/systems/pdf-parser-renderer/reliability/#inv-7">I7</a>)</td>
+</tr>
+<tr>
+<td>Wrong generation number</td>
+<td><code>(num,gen)</code> mismatch</td>
+<td>accept by num if gen mismatch is the only candidate (lenient quirk)</td>
+</tr>
+<tr>
+<td>Truncated stream (file ends mid-stream)</td>
+<td>EOF before <code>endstream</code></td>
+<td>clamp to file end, mark stream partial, gray fallback</td>
+</tr>
+<tr>
+<td><code>startxref</code> points past EOF</td>
+<td>cannot find xref</td>
+<td>full rebuild</td>
+</tr>
+<tr>
+<td>Two <code>/Root</code>s (incremental)</td>
+<td>ambiguity</td>
+<td>newest trailer wins (<a class="cite" href="/system-design-blueprints/systems/pdf-parser-renderer/reliability/#inv-3">I3</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-11">8.11 Operand-stack state table (content interpreter)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Input</th>
+<th>Action</th>
+<th>Next</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Idle</code></td>
+<td>operand token</td>
+<td>push operand</td>
+<td><code>Idle</code></td>
+</tr>
+<tr>
+<td><code>Idle</code></td>
+<td>known operator</td>
+<td>pop arity, validate types, dispatch</td>
+<td><code>Idle</code> (stack cleared)</td>
+</tr>
+<tr>
+<td><code>Idle</code></td>
+<td>unknown operator</td>
+<td>clear operand stack, count <code>bad_op</code></td>
+<td><code>Idle</code></td>
+</tr>
+<tr>
+<td><code>Idle</code></td>
+<td><code>BI</code></td>
+<td>begin inline-image dict parse</td>
+<td><code>InlineDict</code></td>
+</tr>
+<tr>
+<td><code>InlineDict</code></td>
+<td><code>ID</code></td>
+<td>switch to binary image data read</td>
+<td><code>InlineData</code></td>
+</tr>
+<tr>
+<td><code>InlineData</code></td>
+<td>bytes until <code>EI</code> (whitespace-bounded)</td>
+<td>capture image bytes</td>
+<td><code>Idle</code></td>
+</tr>
+<tr>
+<td><code>Idle</code></td>
+<td><code>BT</code></td>
+<td>set <code>Tm=Tlm=identity</code>, enter text</td>
+<td><code>Text</code></td>
+</tr>
+<tr>
+<td><code>Text</code></td>
+<td>text op</td>
+<td>update text state/matrices, show</td>
+<td><code>Text</code></td>
+</tr>
+<tr>
+<td><code>Text</code></td>
+<td><code>ET</code></td>
+<td>exit text object</td>
+<td><code>Idle</code></td>
+</tr>
+<tr>
+<td>any</td>
+<td>operand overflow (&gt; arity cap)</td>
+<td>drop excess, telemetry</td>
+<td>same</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Untrusted input is hostile.</strong> Every byte read is attacker-controlled. Bounds-check every offset, length, index, and count; never trust a declared <code>/Length</code>, <code>/Size</code>, <code>/N</code>, <code>/W</code>, or array length. <em>Tradeoff:</em> extra branches per access. <em>Operational:</em> zero memory-safety CVEs is the bar. <em>Violation:</em> a single unchecked offset = OOB read → infoleak or crash (the entire poppler/pdfium CVE history).</li><li id="p-2"><strong>Lazy object resolution.</strong> Parse objects on demand by xref offset; cache the resolved <code>Object</code> keyed by <code>(num,gen)</code>. <em>Tradeoff:</em> cache memory vs re-parse cost. <em>Operational:</em> opening a 1000-page file must not parse all pages. <em>Violation:</em> eager full-document parse blows memory and latency on huge files; cannot stream.</li><li id="p-3"><strong>Recover, don&#39;t crash.</strong> Real PDFs are broken — wrong <code>/Length</code>, dangling xref offsets, missing <code>endobj</code>. On structural failure, <strong>rebuild by scanning</strong> for <code>N G obj</code> markers and reconcile. <em>Tradeoff:</em> repaired files may render imperfectly. <em>Operational:</em> emit <code>xref_rebuilds</code> telemetry. <em>Violation:</em> refusing broken files makes the renderer useless (the vast majority of in-the-wild PDFs have minor corruption).</li><li id="p-4"><strong>Determinism.</strong> Same bytes + same render params → bit-identical pixels. No wall-clock, no RNG, no thread-order dependence in the pixel path. <em>Tradeoff:</em> limits some parallel raster strategies. <em>Operational:</em> enables golden-image differential testing. <em>Violation:</em> flaky tests, irreproducible bug reports, untrustworthy archival rendering.</li><li id="p-5"><strong>Bounded resources.</strong> Cap decompression ratio, recursion depth, operator count, object count, pixel count. <em>Tradeoff:</em> may reject pathological-but-legitimate files (rare). <em>Operational:</em> every cap is configurable + emits telemetry on hit. <em>Violation:</em> a 10 KB zip-bomb PDF allocates 50 GB → OOM kill = DoS.</li><li id="p-6"><strong>No code execution.</strong> Never run <code>/JS</code>, <code>/JavaScript</code>, <code>/Launch</code>, <code>/OpenAction</code>, <code>/SubmitForm</code>, <code>/ImportData</code>, <code>/GoToR</code>, <code>/URI</code>. Parse them as data, refuse to act. <em>Tradeoff:</em> no interactive behavior. <em>Operational:</em> log <code>actions_refused</code>. <em>Violation:</em> the dominant PDF attack class (malicious actions) becomes live; remote code/data exfiltration.</li><li id="p-7"><strong>Separation of model vs render.</strong> <code>doc</code>/<code>cos</code>/<code>xref</code> produce a pure object/document model; <code>content</code>/<code>graphics</code>/<code>raster</code> consume it. <em>Tradeoff:</em> an extra layer. <em>Operational:</em> parser bugs vs render bugs are independently testable (object dump vs golden image). <em>Violation:</em> tangled code where a font bug corrupts xref state.</li><li id="p-8"><strong>Filters as a composable pipeline.</strong> Each codec is a <code>Filter</code> decode stage; chains compose in array order with per-stage <code>/DecodeParms</code>. <em>Tradeoff:</em> indirection. <em>Operational:</em> add a codec without touching the parser. <em>Violation:</em> hardcoded filter handling can&#39;t express <code>[/ASCII85Decode /FlateDecode]</code> chains; breaks real files.</li><li id="p-9"><strong>Graphics state is a stack discipline.</strong> <code>q</code> pushes, <code>Q</code> pops a full gstate copy; clip and CTM travel with it. <em>Tradeoff:</em> per-<code>q</code> copy cost (mitigate with copy-on-write). <em>Operational:</em> track <code>q</code>/<code>Q</code> balance; clamp underflow. <em>Violation:</em> unbalanced <code>q</code>/<code>Q</code> (common in broken content) corrupts the CTM/clip for the rest of the page → garbage output.</li><li id="p-10"><strong>Color managed but pragmatic.</strong> Implement device + CIE + ICCBased + Indexed + Separation/DeviceN; do <strong>not</strong> require a full external CMM — minimal internal ICC interpretation + heuristics. <em>Tradeoff:</em> not pixel-perfect ICC fidelity. <em>Operational:</em> <code>colorspace_fallbacks</code> metric. <em>Violation:</em> demanding full ICC blocks rendering of most files for marginal accuracy.</li><li id="p-11"><strong>Observability of every rejected/repaired object.</strong> Every dropped object, repaired xref, unsupported filter, missing glyph, clamped stack is counted + traceable. <em>Tradeoff:</em> telemetry overhead. <em>Operational:</em> &quot;why is this page blank?&quot; answerable from metrics. <em>Violation:</em> silent failures = undebuggable render farm.</li><li id="p-12"><strong>Spec-conformance over leniency, but lenient where real files demand.</strong> Default to ISO 32000 behavior; add tolerant fallbacks only for documented real-world breakage, each behind a recorded quirk. <em>Tradeoff:</em> maintaining a quirks list. <em>Operational:</em> quirks are logged so we know which files needed them. <em>Violation:</em> either rigid (rejects real files) or chaotically lenient (renders garbage as if correct).</li><li id="p-13"><strong>Fixed-point, integer-exact raster core.</strong> Scanline coverage uses 26.6 fixed-point; winding accumulation is integer-exact. <em>Tradeoff:</em> fixed-point edge cases. <em>Operational:</em> determinism + speed. <em>Violation:</em> float coverage → platform-dependent rounding → non-deterministic edges.</li><li id="p-14"><strong>Codec crates are vendored and audited.</strong> FlateDecode/LZW/CCITT/JPEG implemented in-tree or as audited dependencies; never link a memory-unsafe C codec into the hot path. <em>Tradeoff:</em> more code to own. <em>Operational:</em> fuzzed independently. <em>Violation:</em> a JPEG/JBIG2 heap overflow in a C dep reintroduces the exact CVE class we chose Rust to avoid.</li><li id="p-15"><strong>Scope refusal is explicit.</strong> Unsupported features (JBIG2, JPX, XFA) return a typed <code>Unsupported*</code> outcome with telemetry and a graceful visual fallback (gray box), never a silent wrong render. <em>Tradeoff:</em> visible gaps. <em>Operational:</em> <code>unsupported_filter</code> counts drive the blueprint. <em>Violation:</em> pretending to support a codec produces corrupted images users trust.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

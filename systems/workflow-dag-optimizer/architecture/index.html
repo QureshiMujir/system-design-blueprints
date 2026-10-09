@@ -1,0 +1,478 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Workflow DAG Optimizer — Architecture · Engineering Blueprints</title><meta name="description" content="Workflow DAG Optimizer, hld: §3 overview + §8 domain model. Build, from scratch, a cost-based optimizer and resource-aware scheduler for workflow DAGs — directed acyclic graphs of tasks (units of computation) connected by typed data/control edges. Input: a…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/workflow-dag-optimizer/">Workflow DAG Optimizer</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Workflow DAG Optimizer</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~54 weeks</li> <li>2,887 lines</li> <li>blueprint #295</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/workflow-dag-optimizer/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/workflow-dag-optimizer/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/workflow-dag-optimizer/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/workflow-dag-optimizer/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/workflow-dag-optimizer/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/workflow-dag-optimizer/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/workflow-dag-optimizer/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/workflow-dag-optimizer/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/workflow-dag-optimizer/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/workflow-dag-optimizer/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Workflow DAG Optimizer — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical architecture diagram</h3>
+<p><strong>Part A — ingest pipeline</strong> (untrusted text → analyzed canonical IR; persistence flanks it):</p>
+<pre class="diagram"><code>  workflow author                                            operator / control plane
+       |                                                                |
+   .wdl source                                          gRPC PlanRequest / CLI args
+       |                                                                |
+       v                                                                v
++----------------+      +------------------+      +-----------------------------+
+|  FRONTEND      |      |  CONTROL/CLI/SVC |      |     PERSISTENCE LAYER       |
+|  dagopt-parse  |      |  dagopt-cli      |      | +------------+ +----------+  |
+|  lexer-&gt;parser |-----&gt;|  dagopt-svc      |&lt;----&gt;| | result     | | replay   |  |
+|  spans/diag    | IR0  |  request router  |      | | cache (CA) | | log(app) |  |
++-------+--------+      +---------+--------+      | | dagopt-    | | dagopt-  |  |
+        | IR0 (typed)             | plan/explain  | | cache      | | replay   |  |
+        v                         |               | +-----+------+ +----+-----+  |
++-----------------+               |               +-------|------------|--------+
+|  VALIDATE       |  == VALIDATION/TRUST BOUNDARY ==       | digests    | snaps
+|  dagopt-validate|  (right of here trusts IR shape)       v            v
+|  acyclic/types  |  IR1 (validated)
+|  resource decl  |------+
++-----------------+      |
+                         v
+                +-------------------+
+                |  CANONICALIZE     |  stable IDs, sorted edges,
+                |  dagopt-canon     |  structural hashes (fingerprints)
+                +---------+---------+
+                          | IR2 (canonical)
+                          v
+                +-------------------+      +--------------------+
+                |  ANALYZE          |-----&gt;|  ANALYSIS CACHE    |
+                |  dagopt-analysis  |&lt;-----|  topo/critpath/dom |
+                |  topo,crit,dom,liv|      |  reach/liveness    |
+                +---------+---------+      +--------------------+
+                          | facts → (Part B)</code></pre>
+<p><strong>Part B — optimizer core → schedule → emit → execute → observe</strong> (consumes IR2 + facts):</p>
+<pre class="diagram"><code>                facts + IR2
+                          v
+        +------------------------------------------------------------+
+        |                      OPTIMIZER CORE                         |
+        |  +----------------+   +----------------+   +-------------+  |
+        |  | REWRITE ENGINE |&lt;-&gt;|   E-GRAPH      |   |  COST MODEL |  |
+        |  | dagopt-rewrite |   | equiv classes  |   | dagopt-cost |  |
+        |  | pattern match  |   | saturation     |   | stats iface |  |
+        |  | rule registry  |   | (dagopt-search)|   | estimates   |  |
+        |  +-------+--------+   +-------+--------+   +------+------+  |
+        |          +---------------+----------------------+          |
+        |                          v                                 |
+        |                 +-----------------+                        |
+        |                 |  SEARCH/EXTRACT |  greedy + DP + B&amp;B;    |
+        |                 |  dagopt-search  |  min-cost extraction   |
+        |                 +--------+--------+                        |
+        +--------------------------|---------------------------------+
+                                   | optimized plan (IR3)
+                                   v
+                       +-------------------+    +--------------------+
+                       |  SCHEDULER        |&lt;--&gt;|  RESOURCE POOLS    |
+                       |  dagopt-sched     |    | cpu/mem/io/affinity|
+                       |  list-sched/pack  |    | concurrency limits |
+                       +---------+---------+    +--------------------+
+                                 | scheduled plan (IR4)
+                                 v
+                       +-------------------+
+                       |  EMITTER          |  serialize ExecPlan,
+                       |  dagopt-plan      |  ScheduleTable; tokens
+                       +---------+---------+
+                                 | ExecPlan + Executor handshake
+                                 v
+        == EXECUTION BOUNDARY (we hand off; executor runs) ==
+                       +-------------------+    +--------------------+
+                       |  EXECUTOR IFACE   |&lt;--&gt;|  SIMULATED EXEC    |
+                       |  dagopt-plan      |    | (testkit) / real   |
+                       |  submit/poll/ack  |    | executor (extern)  |
+                       +---------+---------+    +--------------------+
+                                 | run events / result digests
+                                 v
+                       +-------------------+
+                       |  OBSERVABILITY    |  metrics, spans, logs,
+                       |  dagopt-obs       |  explain, plan diff
+                       +-------------------+</code></pre>
+<h3 id="sec-3-2">3.2 Per-box detail</h3>
+<p><strong>FRONTEND (dagopt-parse).</strong> Owns the lexer and recursive-descent parser for WDL-lite. Produces IR0, a typed but unvalidated DAG carrying source spans on every node/edge for diagnostics. Responsibilities: tokenization, grammar enforcement, building the node/edge/port structures, attaching declared resource profiles. Boundary: untrusted text in, structurally-typed IR out. Failure mode: parse errors with span and recovery (skip-to-next-task). It performs no graph-global checks (that is VALIDATE&#39;s job) so a single concern owns each guarantee.</p>
+<p><strong>CONTROL/CLI/SVC (dagopt-cli, dagopt-svc).</strong> The request surface. CLI parses args, loads <code>.wdl</code>, drives the pipeline, prints <code>explain</code>/<code>diff</code>. SVC is the gRPC server: receives <code>PlanRequest{ dag, constraints, stats_snapshot }</code>, returns <code>PlanResponse{ plan, schedule, explain, cost }</code>. It owns request lifecycle, deadlines, concurrency limiting (a bounded planning worker pool), and backpressure to clients. It is the only component that talks to the network.</p>
+<p><strong>VALIDATION/TRUST BOUNDARY.</strong> Everything to the right trusts that IR is acyclic, port-typed, and resource-well-formed. The boundary is enforced by <code>dagopt-validate</code>; bypassing it (e.g., constructing IR programmatically) requires calling <code>Dag::validate()</code> which returns <code>ValidatedDag</code>, a newtype the rest of the system requires. This makes the trust boundary type-enforced, not convention.</p>
+<p><strong>VALIDATE (dagopt-validate).</strong> Global graph checks: cycle detection (DFS/Kahn), port type unification across every edge, resource declarations within pool capacity, no dangling ports, exactly-one producer per artifact (single-assignment of artifacts). Emits IR1 (<code>ValidatedDag</code>). Detects: cycles (with the offending back-edge path), type mismatches (producer/consumer port types), over-subscription. Recovery: rejection with a structured <code>ValidationError</code> enumerating all violations (not just the first).</p>
+<p><strong>CANONICALIZE (dagopt-canon).</strong> Rewrites IR1 to IR2: assigns stable, content-derived node IDs; sorts edges and node inputs deterministically; computes a Merkle-style structural hash per node (<code>fingerprint = H(kind, sorted(input_fingerprints), params)</code>). Two structurally-identical subgraphs get identical fingerprints — the foundation of common-subgraph elimination and the result cache. Boundary: determinism — same IR1 always yields byte-identical IR2.</p>
+<p><strong>ANALYZE (dagopt-analysis) + ANALYSIS CACHE.</strong> Computes derived facts memoized by IR2 fingerprint: topological order, per-node earliest/latest start (critical path), dominator tree, reachability bitsets, artifact liveness (when each artifact may be freed). Facts are immutable and attached to IR2. The cache keys on <code>(dag_fingerprint, analysis_kind)</code> so re-planning an unchanged subgraph reuses analysis.</p>
+<p><strong>OPTIMIZER CORE — REWRITE ENGINE (dagopt-rewrite).</strong> Pattern matcher over IR2; rule registry of validity-preserving rewrites (fusion, dead-task elimination, common-subgraph elimination, constant/branch folding, predicate pushdown). In greedy mode it applies rules to a fix-point. Feeds the e-graph in saturation mode. Each rule declares a precondition (a pattern + a guard) and a rewrite (a new subgraph), and a proof obligation that outputs are semantically equal to inputs.</p>
+<p><strong>OPTIMIZER CORE — E-GRAPH (dagopt-search).</strong> An equivalence graph (e-graph): e-classes group provably-equivalent subgraphs, e-nodes are operators whose children are e-classes. Rules are applied non-destructively to saturation (or a budget), so phase-ordering is avoided: all rewrite orders are represented simultaneously. Extraction picks the min-cost representative per e-class.</p>
+<p><strong>OPTIMIZER CORE — COST MODEL (dagopt-cost).</strong> Pluggable <code>StatsProvider</code> supplies per-task estimates (runtime, memory, IO, cardinality of fan-out). Cost is propagated bottom-up over the DAG; the model returns a <code>Cost</code> vector (cpu_secs, wall_secs, mem_bytes, io_bytes) and a scalar objective (weighted). Costs are monotone where possible so DP pruning is sound.</p>
+<p><strong>SEARCH/EXTRACT (dagopt-search).</strong> Three strategies: greedy fix-point (fast, no optimality), memoized DP over equivalence classes (System-R-style, optimal within the explored space), branch-and-bound (prune by cost lower bound). For e-graphs, extraction is a min-cost DAG selection (greedy or ILP-lite). Output: IR3, the chosen optimized plan.</p>
+<p><strong>SCHEDULER (dagopt-sched) + RESOURCE POOLS.</strong> Second optimization problem: given IR3 and resource pools (CPU/mem/IO capacities, concurrency limits, affinity constraints), assign each task a start time and a resource, minimizing makespan subject to constraints. Uses list scheduling on critical-path priority + bin-packing. Output: IR4, a scheduled plan with a <code>ScheduleTable</code>.</p>
+<p><strong>EMITTER (dagopt-plan).</strong> Serializes IR4 to a stable <code>ExecPlan</code> wire format and performs the executor handshake. Issues backpressure tokens (the executor admits work only up to outstanding-token budget). Boundary: execution — beyond here, the executor (not us) runs tasks.</p>
+<p><strong>EXECUTOR IFACE (dagopt-plan) + SIMULATED EXEC.</strong> The <code>Executor</code> trait: <code>submit(task) -&gt; TaskHandle</code>, <code>poll(handle) -&gt; TaskState</code>, <code>ack(result_digest)</code>. A simulated executor in testkit drives deterministic tests and benchmarks; real executors are external and out of scope.</p>
+<p><strong>PERSISTENCE — RESULT CACHE (dagopt-cache).</strong> Content-addressed store keyed by task fingerprint → result digest. Enables memoization across runs and incremental re-planning: an unchanged subgraph with a cached result need not be re-scheduled.</p>
+<p><strong>PERSISTENCE — REPLAY LOG (dagopt-replay).</strong> Append-only log of plan inputs (DAG fingerprint, stats snapshot, constraints, RNG seed) and chosen plan. Enables deterministic replay, regression fixtures, and plan-diff over time.</p>
+<p><strong>OBSERVABILITY (dagopt-obs).</strong> Metrics (planning latency, e-graph size, rules applied, cache hit rate), tracing spans per stage, structured logs, the <code>explain</code> renderer, and plan-diff. The single place operators look to understand why a plan was chosen.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 WDL-lite grammar (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>workflow      = &quot;workflow&quot; ident &quot;{&quot; { decl } &quot;}&quot; ;
+decl          = task_decl | edge_decl | pool_decl | param_decl ;
+param_decl    = &quot;param&quot; ident &quot;:&quot; type [ &quot;=&quot; literal ] ;
+pool_decl     = &quot;pool&quot; ident &quot;{&quot; &quot;cpu&quot; &quot;=&quot; int &quot;,&quot; &quot;mem&quot; &quot;=&quot; bytes
+                [ &quot;,&quot; &quot;io&quot; &quot;=&quot; int ] [ &quot;,&quot; &quot;concurrency&quot; &quot;=&quot; int ] &quot;}&quot; ;
+task_decl     = &quot;task&quot; ident &quot;{&quot; 
+                  &quot;op&quot; &quot;=&quot; string &quot;;&quot;
+                  [ &quot;in&quot; &quot;(&quot; port_list &quot;)&quot; &quot;;&quot; ]
+                  [ &quot;out&quot; &quot;(&quot; port_list &quot;)&quot; &quot;;&quot; ]
+                  [ &quot;pool&quot; &quot;=&quot; ident &quot;;&quot; ]
+                  [ &quot;cost&quot; &quot;{&quot; cost_hint &quot;}&quot; ]
+                  [ &quot;pure&quot; &quot;;&quot; ]            (* enables CSE/cache *)
+                  [ &quot;map&quot; &quot;over&quot; ident &quot;;&quot; ] (* bounded fan-out *)
+                &quot;}&quot; ;
+port_list     = port { &quot;,&quot; port } ;
+port          = ident &quot;:&quot; type ;
+edge_decl     = &quot;edge&quot; ref &quot;-&gt;&quot; ref &quot;;&quot; ;
+ref           = ident &quot;.&quot; ident ;          (* task.port *)
+cost_hint     = { (&quot;runtime&quot;|&quot;mem&quot;|&quot;io&quot;) &quot;=&quot; number &quot;;&quot; } ;
+type          = &quot;int&quot; | &quot;float&quot; | &quot;bool&quot; | &quot;string&quot; | &quot;bytes&quot;
+              | &quot;array&quot; &quot;&lt;&quot; type &quot;&gt;&quot; | &quot;record&quot; &quot;{&quot; port_list &quot;}&quot; ;
+bytes         = int ( &quot;B&quot; | &quot;KiB&quot; | &quot;MiB&quot; | &quot;GiB&quot; ) ;
+literal       = int | float | string | bool ;
+ident         = letter { letter | digit | &quot;_&quot; } ;</code></pre>
+<h3 id="sec-8-2">8.2 DAG IR — typed node/edge model</h3>
+<pre class="diagram"><code>NodeKind  ::= Source        // external input, no in-ports
+            | Task          // opaque op, in/out ports, resource profile
+            | Map           // fan-out: applies child over an array artifact
+            | Reduce        // fan-in: folds an array of artifacts
+            | Barrier       // sync point, no transform
+            | Sink          // terminal output
+            | Const         // compile-time-known value (folding target)
+
+Node      = { id: NodeId, kind: NodeKind, op: OpId, params: ParamMap,
+              in: [Port], out: [Port], pool: PoolId?, pure: bool,
+              span: Span, fingerprint: Fp }
+
+Port      = { name: Sym, ty: Type, node: NodeId, idx: u16 }
+
+Edge      = { from: (NodeId, PortIdx), to: (NodeId, PortIdx), artifact: ArtifactId }
+
+Artifact  = { id: ArtifactId, ty: Type, producer: (NodeId,PortIdx),
+              consumers: [(NodeId,PortIdx)], size_est: u64, digest: Digest? }</code></pre>
+<p>Type lattice (for unification): <code>⊥ &lt; {int,float,bool,string,bytes} &lt; array&lt;T&gt; &lt; record{...} &lt; ⊤</code>. Unification fails on incompatible base types; <code>array&lt;T&gt;</code>/<code>record</code> unify structurally.</p>
+<h3 id="sec-8-3">8.3 Rewrite-rule representation</h3>
+<pre class="diagram"><code>Rule      = { name: Sym, pattern: Pattern, guard: Guard, rewrite: Rewrite,
+              cost_delta: CostHint, proof: ProofTag }
+Pattern   = tree of PNode; PNode = Op(OpId,[Pattern]) | Var(VarId) | AnyPure
+Guard     = predicate over bindings (e.g., is_pure(?t), types_eq(?a,?b))
+Rewrite   = constructor of new subgraph from bindings
+ProofTag  = Algebraic | Identity | DeadCode | Dedup | Fold | Pushdown</code></pre>
+<p>Example rules (illustrative, not exhaustive):</p>
+<ul>
+<li><strong>Fusion</strong>: <code>Task(f, Task(g, ?x))</code> where both <code>pure</code> and <code>pool</code> compatible ⇒ <code>Task(f∘g, ?x)</code> — <code>ProofTag=Algebraic</code>, fewer scheduling units.</li>
+<li><strong>Dead-task elimination</strong>: <code>?t</code> with no live out-edge and <code>pure</code> ⇒ delete — <code>DeadCode</code>.</li>
+<li><strong>Common-subgraph elimination</strong>: two nodes with equal fingerprint and <code>pure</code> ⇒ merge, redirect consumers — <code>Dedup</code>.</li>
+<li><strong>Constant folding</strong>: <code>Task(f, Const(c))</code> and <code>f</code> pure ⇒ <code>Const(f(c))</code> — <code>Fold</code>.</li>
+<li><strong>Branch folding</strong>: <code>Map over Const([...])</code> with known length ⇒ unrolled fixed fan-out — <code>Fold</code>.</li>
+<li><strong>Predicate pushdown</strong>: <code>Filter(p, Task(t, ?x))</code> where <code>p</code> independent of <code>t</code> ⇒ <code>Task(t, Filter(p, ?x))</code> — <code>Pushdown</code>, shrinks intermediate artifact.</li>
+</ul>
+<h3 id="sec-8-4">8.4 Cost model inputs</h3>
+<pre class="diagram"><code>StatsProvider:
+  task_runtime(op, params, input_sizes) -&gt; Secs
+  task_mem(op, params, input_sizes)     -&gt; Bytes
+  task_io(op, params, input_sizes)      -&gt; Bytes
+  fanout_cardinality(map_node)          -&gt; u64    // est. array length
+  selectivity(filter_op)                -&gt; f64    // 0..1
+Cost = { cpu_secs: f64, wall_secs: f64, mem_bytes: u64, io_bytes: u64 }
+objective(cost, weights) -&gt; f64          // weighted scalar, default wall-dominant</code></pre>
+<p>Cost propagation: leaf cost from stats; internal node cost = own + combined children (sum for sequential, max for parallel branches on wall_secs). Monotone components declared per dimension (cpu/io monotone; wall non-monotone under caching).</p>
+<h3 id="sec-8-5">8.5 Task/run lifecycle state machine</h3>
+<pre class="diagram"><code>            +---------+    schedule    +-----------+   submit   +---------+
+            | PLANNED |---------------&gt;| SCHEDULED |-----------&gt;| RUNNING |
+            +---------+                +-----------+            +----+----+
+                 |                           | cache hit             |
+                 | dead-code                 v                       | done
+                 v                     +-----------+                 v
+            +---------+                |  CACHED   |            +-----------+
+            | ELIMINATED|              +-----------+            | SUCCEEDED |
+            +---------+                      |                  +-----------+
+                                             | (result reused)         |
+                                             +----------+--------------+
+                                                        v
+                                                 (artifact live)
+   RUNNING --fail--&gt; FAILED --retry?--&gt; SCHEDULED ; RUNNING --timeout--&gt; FAILED</code></pre>
+<p>State-transition table:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Guard</th>
+<th>Side effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>PLANNED</td>
+<td>schedule</td>
+<td>SCHEDULED</td>
+<td>resource available</td>
+<td>reserve slot</td>
+</tr>
+<tr>
+<td>PLANNED</td>
+<td>dead-code</td>
+<td>ELIMINATED</td>
+<td>no live out</td>
+<td>drop node</td>
+</tr>
+<tr>
+<td>SCHEDULED</td>
+<td>cache hit</td>
+<td>CACHED</td>
+<td>fingerprint in cache</td>
+<td>reuse digest</td>
+</tr>
+<tr>
+<td>SCHEDULED</td>
+<td>submit</td>
+<td>RUNNING</td>
+<td>token available</td>
+<td>consume token</td>
+</tr>
+<tr>
+<td>RUNNING</td>
+<td>done</td>
+<td>SUCCEEDED</td>
+<td>—</td>
+<td>write digest, release token</td>
+</tr>
+<tr>
+<td>RUNNING</td>
+<td>fail</td>
+<td>FAILED</td>
+<td>—</td>
+<td>record error</td>
+</tr>
+<tr>
+<td>FAILED</td>
+<td>retry</td>
+<td>SCHEDULED</td>
+<td>retries &lt; max</td>
+<td>backoff</td>
+</tr>
+<tr>
+<td>RUNNING</td>
+<td>timeout</td>
+<td>FAILED</td>
+<td>wall &gt; limit</td>
+<td>cancel</td>
+</tr>
+<tr>
+<td>CACHED</td>
+<td>reuse</td>
+<td>SUCCEEDED</td>
+<td>digest valid</td>
+<td>mark artifact live</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Run lifecycle (whole DAG)</h3>
+<pre class="diagram"><code>RECEIVED -&gt; VALIDATED -&gt; CANONICAL -&gt; ANALYZED -&gt; OPTIMIZED -&gt; SCHEDULED -&gt; EMITTED -&gt; EXECUTING -&gt; COMPLETE
+   |            |fail        |             |           |            |          |          |fail
+   +--reject----+            +--(cache reuse subgraph)-+            +--backpressure-pause--+--partial-fail-&gt; RECOVER</code></pre>
+<h3 id="sec-8-7">8.7 Scheduling semantics</h3>
+<ul>
+<li>A task may start only after all in-edge artifacts exist (precedence).</li>
+<li>Concurrency at any instant ≤ pool concurrency limit; resource use ≤ pool capacity.</li>
+<li>Priority = critical-path length (longest path to any sink) — list scheduling.</li>
+<li>Affinity: tasks may pin to a pool (<code>pool=</code>); unpinned tasks bin-pack to minimize makespan.</li>
+<li>Determinism: ties broken by <code>(critical_path desc, fingerprint asc)</code> — total order, no randomness.</li>
+</ul>
+<h3 id="sec-8-8">8.8 Determinism semantics</h3>
+<ul>
+<li>Plan is a pure function of <code>(IR1, stats_snapshot, constraints, weights, seed)</code>.</li>
+<li>All ordering uses explicit total orders (fingerprint, NodeId), never hash iteration.</li>
+<li>Floating-point cost compares with a fixed epsilon and deterministic tie-break to avoid platform FP divergence.</li>
+<li>The <code>seed</code> parameterizes any randomized search (B&amp;B node order) so randomness is reproducible.</li>
+</ul>
+<h3 id="sec-8-9">8.9 Worked example</h3>
+<p>WDL-lite:</p>
+<pre class="diagram"><code>workflow etl {
+  pool big { cpu=8, mem=16GiB, concurrency=4 }
+  task load  { op=&quot;read&quot;;  out(d: array&lt;record{id:int,v:float}&gt;); pure; }
+  task filt  { op=&quot;filter&quot;; in(d: array&lt;record{id:int,v:float}&gt;);
+               out(d: array&lt;record{id:int,v:float}&gt;); pure; }
+  task agg   { op=&quot;sum&quot;;    in(d: array&lt;record{id:int,v:float}&gt;); out(s: float); }
+  task agg2  { op=&quot;sum&quot;;    in(d: array&lt;record{id:int,v:float}&gt;); out(s: float); }
+  edge load.d -&gt; filt.d;  edge filt.d -&gt; agg.d;  edge filt.d -&gt; agg2.d;
+}</code></pre>
+<p>Pipeline:</p>
+<ul>
+<li>Validate: acyclic, types unify (<code>array&lt;record{...}&gt;</code> on every edge), single producer per artifact.</li>
+<li>Canonicalize: <code>agg</code> and <code>agg2</code> have identical fingerprints (same op, same input fingerprint, pure).</li>
+<li>Rewrite: CSE merges <code>agg</code>/<code>agg2</code> → one node, both consumers of its <code>s</code>. Predicate pushdown: <code>filt</code> already adjacent to <code>load</code>; if <code>filt</code> selective, push toward source.</li>
+<li>Cost: estimate <code>load</code> IO, <code>filt</code> selectivity shrinks artifact, <code>agg</code> cheap.</li>
+<li>Schedule: critical path <code>load→filt→agg</code>; place on <code>big</code>, concurrency 4 unused (linear), makespan = sum.</li>
+<li>Emit: <code>ExecPlan</code> with 3 tasks (after CSE), schedule table, backpressure tokens.</li>
+</ul>
+<h3 id="sec-8-10">8.10 Sequence diagram (plan request)</h3>
+<pre class="diagram"><code>Client        SVC          Validate     Canon      Analysis    Optimizer    Sched     Emit     Cache
+  |  PlanReq    |             |            |           |           |           |        |        |
+  |------------&gt;|             |            |           |           |           |        |        |
+  |             |  validate   |            |           |           |           |        |        |
+  |             |------------&gt;|            |           |           |           |        |        |
+  |             |&lt;--IR1-------|            |           |           |           |        |        |
+  |             |  canon      |-----------&gt;|           |           |           |        |        |
+  |             |             |&lt;---IR2-----|           |           |           |        |        |
+  |             |  analyze    |            |----------&gt;|           |           |        |        |
+  |             |             |            |&lt;--facts---|           |           |        |        |
+  |             |  optimize (facts, stats) |----------&gt;|           |           |        |        |
+  |             |             |  cache lookup by fingerprint ------|----------&gt;|        |        |
+  |             |             |            |           |&lt;--hits----|           |        |        |
+  |             |             |            |&lt;--IR3-----|           |           |        |        |
+  |             |  schedule   |            |           |           |----------&gt;|        |        |
+  |             |             |            |           |           |&lt;--IR4-----|        |        |
+  |             |  emit       |            |           |           |           |-------&gt;|        |
+  |&lt;--PlanResp--|&lt;------------------------- ExecPlan + explain + cost ------------------|        |</code></pre>
+<h3 id="sec-8-11">8.11 Edge-case / malformed examples</h3>
+<ul>
+<li><strong>Cycle</strong>: <code>edge a.x -&gt; b.y; edge b.y2 -&gt; a.z;</code> → <code>ValidationError::Cycle{path:[a,b,a]}</code>.</li>
+<li><strong>Type mismatch</strong>: producer <code>out(d: array&lt;int&gt;)</code> to consumer <code>in(d: array&lt;float&gt;)</code> → <code>TypeMismatch</code>.</li>
+<li><strong>Dup producer</strong>: two <code>out</code> ports feeding one artifact → <code>DuplicateProducer</code>.</li>
+<li><strong>Dangling port</strong>: <code>in(d:int)</code> never connected → <code>UnboundPort</code> (warning if optional, error if required).</li>
+<li><strong>Unbounded map</strong>: <code>map over x</code> where <code>x</code> length unknown and no <code>fanout_cardinality</code> stat → planned with conservative estimate; if <code>x</code> from a non-terminating source → rejected (only bounded artifacts).</li>
+<li><strong>Self-edge</strong>: <code>edge a.x -&gt; a.y</code> → <code>Cycle</code> (trivial).</li>
+<li><strong>Empty workflow</strong>: no sinks → <code>NoSink</code> error (nothing to compute).</li>
+</ul>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Validity-preservation is absolute.</strong> Every rewrite maps a DAG to a semantically-equivalent DAG: same observable outputs for the same inputs. Tradeoff: forbids speculative &quot;usually-correct&quot; rewrites. Operational: a differential test (optimized vs unoptimized execution) gates every rule. Violation: silent wrong results in production — the worst failure class, undetectable without differential testing.</li><li id="p-2"><strong>Logical/physical/schedule separation.</strong> Three distinct stages with distinct IRs (IR2 logical, IR3 physical/optimized, IR4 scheduled). Tradeoff: more IR conversions. Operational: each stage independently testable and observable via <code>explain</code>. Violation: cost model and scheduler become entangled, makespan regressions masquerade as cost bugs.</li><li id="p-3"><strong>Determinism over convenience.</strong> Same inputs (DAG, stats, constraints, seed) → byte-identical plan. Tradeoff: forbids unseeded randomness, wall-clock-dependent decisions, hash-map iteration order. Operational: plan-diff and replay only work if deterministic. Violation: plan-diff produces noise, replay diverges, incidents become irreproducible.</li><li id="p-4"><strong>Bounded resource usage.</strong> Every search has a node/time/memory budget; exceeding it degrades gracefully (fall back to greedy, return best-so-far flagged suboptimal). Tradeoff: may return non-optimal plans. Operational: planning latency SLO is enforceable. Violation: a pathological DAG OOMs or hangs the planner — a DOS vector (see Threat Model).</li><li id="p-5"><strong>Content addressing is the spine.</strong> Subgraph fingerprints serve three masters: common-subgraph elimination, the result cache, and replay keys. Tradeoff: fingerprints must be stable across versions (or versioned). Operational: a cache hit and a CSE share one mechanism. Violation: cache poisoning or false dedup if fingerprints collide or drift.</li><li id="p-6"><strong>Cost monotonicity where claimed.</strong> When the cost model claims monotonicity (a subplan&#39;s cost ≤ any plan containing it), DP pruning depends on it. Tradeoff: some realistic costs are non-monotone (caching makes a bigger plan cheaper); those are modeled explicitly and disable pruning locally. Operational: pruning is sound only under declared monotonicity. Violation: DP prunes the optimal plan, silently returns a worse one.</li><li id="p-7"><strong>Explicit ownership of IR.</strong> IR nodes are immutable <code>Arc</code>-shared after canonicalization; rewrites produce new nodes, never mutate. Tradeoff: allocation churn during search. Operational: safe concurrent search, cheap structural sharing, trivial replay. Violation: a mutated shared node corrupts every plan referencing it across threads.</li><li id="p-8"><strong>Backpressure everywhere.</strong> The emitter issues bounded tokens; the executor pulls within budget; the service bounds its planning pool. Tradeoff: throughput capped by slowest stage. Operational: no unbounded queue growth, predictable memory. Violation: a slow executor causes unbounded plan buffering and OOM.</li><li id="p-9"><strong>Observability by default.</strong> Every stage emits spans, metrics, and contributes to <code>explain</code>. Tradeoff: tracing overhead (mitigated by sampling). Operational: &quot;why this plan?&quot; is always answerable. Violation: plan choices are black boxes, incidents undebuggable.</li><li id="p-10"><strong>Replayability first.</strong> Inputs to every plan are logged sufficiently to reproduce it offline. Tradeoff: log volume (mitigated, ≤ 200 B/plan). Operational: regression fixtures generated from production, bugs reproduced exactly. Violation: production-only bugs cannot be reproduced.</li><li id="p-11"><strong>Stable wire/IR compatibility.</strong> Wire and serialized-IR formats are versioned; new versions read old. Tradeoff: migration code. Operational: rolling upgrades of the service, cache survives upgrades. Violation: an upgrade invalidates the cache or breaks in-flight clients.</li><li id="p-12"><strong>Crash-only persistence.</strong> Cache and replay log are append-only and crash-consistent; recovery is reopen + truncate-torn-tail, never a repair tool. Tradeoff: no in-place edits. Operational: kill -9 is safe. Violation: a crash mid-write corrupts the cache, poisoning future plans.</li><li id="p-13"><strong>Fail closed on ambiguity.</strong> Unknown node kinds, missing stats, or unverifiable rewrite preconditions reject (or skip the rewrite) rather than guess. Tradeoff: conservative plans. Operational: no silent miscompilation. Violation: an unhandled construct is silently dropped from the plan.</li><li id="p-14"><strong>Separation of trust boundaries.</strong> Untrusted text is validated once; past the validation boundary the IR is trusted by type (<code>ValidatedDag</code>). Tradeoff: a newtype barrier to cross. Operational: downstream code need not re-validate. Violation: an unvalidated graph reaches the optimizer, which assumes acyclicity and loops forever.</li><li id="p-15"><strong>Small, composable rules.</strong> Rewrite rules are small, independently testable, and order-insensitive under saturation. Tradeoff: more rules than monolithic passes. Operational: a buggy rule is isolated and disableable by flag. Violation: a monolithic pass conflates concerns and is untestable in isolation.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

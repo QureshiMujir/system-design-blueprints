@@ -1,0 +1,340 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Sharding and Partition Router — Architecture · Engineering Blueprints</title><meta name="description" content="Sharding and Partition Router, hld: §3 overview + §8 domain model. Sharding and Partition Router is a key-value data-sharding and request-routing control plane: it assigns opaque byte-string keys to shards under five interchangeable partitioning schemes (range…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/sharding-partition-router/">Sharding and Partition Router</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Sharding and Partition Router</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~19 weeks</li> <li>2,883 lines</li> <li>blueprint #98</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/sharding-partition-router/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/sharding-partition-router/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/sharding-partition-router/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/sharding-partition-router/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/sharding-partition-router/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/sharding-partition-router/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/sharding-partition-router/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/sharding-partition-router/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/sharding-partition-router/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/sharding-partition-router/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Sharding and Partition Router — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌───────────────────────────────────────────────────────────────────────┐
+│  Application layer (KV client, microservice, future SQL engine)       │
+└──────────────────────────────┬────────────────────────────────────────┘
+                                │ public API — crate `shard-router`
+┌──────────────────────────────▼────────────────────────────────────────┐
+│  Routing tier (§18 / Phase 6)                                         │
+│  • SmartClientRouter    (in-process; arc-swap cache)                  │
+│  • ProxyRouter          (`shard-proxy` binary; Vitess vtgate-style)   │
+│  • Hybrid               (SDK routes; proxy validates cached version) │
+│  • Stale-routing retry  (KeyNotFound → refresh → retry once)          │
+└──────────────────────────────┬────────────────────────────────────────┘
+                                │ Router::route(key) -&gt; ShardId  (§11)
+┌──────────────────────────────▼────────────────────────────────────────┐
+│  Partitioning algorithms — crate `shard-core` (§13–§16 / Phase 1–4)   │
+│  • Range           BTreeMap&lt;PartitionKey,ShardId&gt;                     │
+│  • Hash-mod-N       Vec&lt;ShardId&gt;, fixed length                        │
+│  • Consistent hash  sorted ring, vnodes, bounded loads                │
+│  • Jump hash        Lamping–Veach, O(log N), stateless                │
+│  • Rendezvous       HRW, O(N), stateless                               │
+│  • Vindex           secondary-index keyspace (§20 / Phase 8)          │
+└──────────┬──────────────────────────────────────────────┬─────────────┘
+           │                                               │
+┌──────────▼──────────────────┐   ┌──────────────────────▼─────────────┐
+│  Metadata store (§17/Ph.5)  │   │  Resharding coordinator (§19/Ph.7)  │
+│  • etcd (default) / ZK /    │   │  • Hot-shard detector (QPS+bytes)   │
+│    internal Raft            │   │  • Split/merge planner              │
+│  • Versioned partition map  │   │  • Two-phase executor (scan+cutover)│
+│  • Lease-based ownership    │   │  • Rate-limited rebalancer          │
+│  • Watch-and-cache          │   │  • Job-state machine (§8)           │
+└──────────────┬───────────────┘   └───────────────┬─────────────────────┘
+               │                                    │
+┌──────────────▼────────────────────────────────────▼─────────────────┐
+│  Shard servers — out of scope; boundary defined by wire protocol     │
+│  crate `shard-net` (protobuf over gRPC/tonic)                        │
+│  shard_0   shard_1   shard_2   ...   shard_N                         │
+└───────────────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>Partitioning algorithms are independent of the routing tier.</strong> <code>Router</code> (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/design/#sec-11">§11</a>) is generic over
+the <code>PartitionMap</code> enum (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/design/#sec-11">§11</a>); the same routing code drives all five schemes without a scheme-
+specific code path in the hot loop.</p>
+<p><strong>The metadata store is linearizable for correctness, not merely &quot;usually consistent.&quot;</strong> A
+non-linearizable store admits split-brain on the partition map (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#sec-7">§7</a>); we depend on this
+property and reject weaker backends at the type level (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-6">P6</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#sec-6">§6</a>).</p>
+<p><strong>The resharding coordinator is the only writer of the partition map.</strong> It reads from the
+metadata store, writes back versioned plan documents, and drives shard servers via <code>shard-net</code>;
+no other component may mutate the map (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#sec-7">§7</a>).</p>
+<p><strong>The routing tier caches with bounded staleness, and staleness is a performance defect, not a
+correctness defect (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-14">P14</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#sec-6">§6</a>; <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/study/#sec-31">MM2</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/study/#sec-31">§31</a>).</strong> A stale cache routes to an ex-owner; the shard server
+— the actual authority — rejects the op and returns its current partition-map version; the
+client refreshes and retries once (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#sec-7">§7</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-1">8.1 Composite-key grammar (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>partition-key   = composite-key | plain-key ;
+plain-key       = byte-string ;
+composite-key   = tenant-len , tenant-id , row-key ;
+tenant-len      = varint ;                (* LEB128, ADR-13 *)
+tenant-id       = byte-string ;           (* length = tenant-len *)
+row-key         = byte-string ;           (* remainder of the key *)
+byte-string     = { OCTET } ;
+varint          = OCTET , { OCTET } ;      (* LEB128 continuation-bit encoding *)</code></pre>
+<p>Tenant ID is always the high-order prefix (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-14">I14</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#sec-7">§7</a>); a decoder that reads <code>row-key</code> before
+<code>tenant-id</code> is malformed by construction — <code>encode_composite</code> rejects any caller-supplied byte
+order that does not match this grammar.</p>
+<h3 id="sec-8-2">8.2 Partition-map wire record (Protobuf, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/trade-offs/#adr-3">ADR-03</a>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>magic</code></td>
+<td>fixed32</td>
+<td><code>0x53484152</code> (&quot;SHAR&quot;) — malformed if absent</td>
+</tr>
+<tr>
+<td><code>wire_version</code></td>
+<td>uint32</td>
+<td>compatibility gate, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/blueprint/#sec-26">§26</a></td>
+</tr>
+<tr>
+<td><code>map_version</code></td>
+<td>uint64</td>
+<td>monotonic (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-5">I5</a>)</td>
+</tr>
+<tr>
+<td><code>scheme</code></td>
+<td>enum <code>{RANGE, HASH, CONSISTENT_HASH, JUMP, RENDEZVOUS}</code></td>
+<td>selects the oneof below</td>
+</tr>
+<tr>
+<td><code>payload</code></td>
+<td>oneof <code>{RangeMap, HashMap, RingMap, JumpMap, RendezvousMap}</code></td>
+<td>scheme-specific body</td>
+</tr>
+<tr>
+<td><code>crc32</code></td>
+<td>fixed32</td>
+<td>checksum over <code>payload</code> (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#t-8">T8</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#sec-23">§23</a>)</td>
+</tr>
+</tbody></table></div>
+<p>A record whose <code>crc32</code> does not match its <code>payload</code> is <strong>malformed input</strong> (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#sec-8-5">§8.5</a>) and is rejected
+before any deserialization of the <code>oneof</code> — the checksum check runs on raw bytes first.</p>
+<h3 id="sec-8-3">8.3 Resharding job state machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entered From</th>
+<th>Exit To</th>
+<th>Persisted?</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Pending</code></td>
+<td>job creation</td>
+<td><code>Scanning</code></td>
+<td>yes</td>
+<td>Plan accepted; no data movement yet</td>
+</tr>
+<tr>
+<td><code>Scanning</code></td>
+<td><code>Pending</code></td>
+<td><code>Validating</code>, <code>Aborted</code></td>
+<td>yes</td>
+<td>Destination back-fills; double-write active (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-3">I3</a>)</td>
+</tr>
+<tr>
+<td><code>Validating</code></td>
+<td><code>Scanning</code></td>
+<td><code>Cutover</code>, <code>Aborted</code></td>
+<td>yes</td>
+<td>Byte-equivalence check between source/destination</td>
+</tr>
+<tr>
+<td><code>Cutover</code></td>
+<td><code>Validating</code></td>
+<td><code>Completed</code>, <code>Aborted</code></td>
+<td>yes</td>
+<td>Atomic CAS on the partition map (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-4">I4</a>)</td>
+</tr>
+<tr>
+<td><code>Completed</code></td>
+<td><code>Cutover</code></td>
+<td>— (terminal)</td>
+<td>yes</td>
+<td>Job done; double-write stopped</td>
+</tr>
+<tr>
+<td><code>Aborted</code></td>
+<td>any of the above</td>
+<td>— (terminal)</td>
+<td>yes</td>
+<td>Reachable from any state (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-12">I12</a>)</td>
+</tr>
+</tbody></table></div>
+<p>This is the full transition table for <code>JobState</code> (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/design/#sec-11">§11</a>); no other edge is legal, and the
+coordinator&#39;s crash-recovery path (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/blueprint/#sec-19-9">§19.9</a>) resumes strictly along this table.</p>
+<h3 id="sec-8-4">8.4 Worked example — cache-miss routing sequence</h3>
+<pre class="diagram"><code>1. Client calls Router::route(key=K)
+2. Local cache (version 41) has no entry covering K (K just moved in a split)
+3. Router forwards op to shard server per stale cache -&gt; Shard_7
+4. Shard_7 no longer owns K (cutover happened at version 42)
+5. Shard_7 returns KeyNotFound{current_version: 42}
+6. Router::refresh() re-fetches map version 42 from the metadata store
+7. Router::route(key=K) against version 42 -&gt; Shard_12 (correct owner)
+8. Op retried once against Shard_12 -&gt; success</code></pre>
+<p>Total added latency for the miss path: one refresh RTT (≤ 5 ms, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/numbers/#m-3">M3</a> <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/numbers/#sec-29">§29</a>) plus one retry RTT; the
+steady-state (cache-hit) path never executes steps 3–7 (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-14">P14</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-6">I6</a>).</p>
+<h3 id="sec-8-5">8.5 Malformed-input example</h3>
+<p>A partition-map record with <code>crc32</code> mismatching its <code>payload</code> (single bit-flipped byte in
+transit or at rest) is rejected at the metadata-store read boundary before the <code>scheme</code> oneof is
+even inspected — <code>get_partition_map</code> returns <code>Error::PartitionMapCorrupt</code> rather than attempting
+a best-effort partial decode. The routing tier treats this identically to a metadata-store
+outage: continue serving the last-known-good cached map (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-14">P14</a>) and alert (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#t-8">T8</a>, FM-class in <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#sec-24">§24</a>).</p>
+<h3 id="sec-8-6">8.6 Failure-path example — coordinator crash mid-cutover</h3>
+<pre class="diagram"><code>t0: Coordinator issues CAS(map_v41 -&gt; map_v42) for the cutover of job J.
+t1: CAS succeeds at the metadata store (map is now v42); coordinator crashes
+    before writing JobState::Completed.
+t2: Coordinator restarts; reads pending jobs; finds J in state `Cutover`.
+t3: Coordinator re-reads the partition map: v42, matching the cutover it was
+    attempting -&gt; the CAS already landed -&gt; transition J directly to `Completed`.
+    (If the re-read map were still v41, the coordinator would retry the CAS.)</code></pre>
+<p>This is why every state transition is persisted before the next step begins (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-12">I12</a>): the
+coordinator can always tell, from <code>(JobState, current_map_version)</code> alone, which side of the
+CAS it crashed on, with no ambiguity and no operator involvement (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/blueprint/#sec-19-9">§19.9</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-1">P1</a> — Partition scheme is forever.</strong> The choice of range/hash/consistent-hash/jump/rendezvous at provisioning time is immutable in production; switching is a full data migration, not a config flag (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/build/#sec-13">§13</a>–<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/build/#sec-16">§16</a>). Violating it: teams that &quot;switch later&quot; eat a quarter-long re-platform.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-2">P2</a> — Range and hash require different metadata representations.</strong> No unified representation; each scheme has a dedicated <code>PartitionMap</code> (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/design/#sec-11">§11</a>) variant. Violating it: forcing one representation (e.g., always a sorted map) makes hash-mod-N&#39;s O(1) lookup an O(log N) lookup for no reason.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-3">P3</a> — Consistent hashing requires ≥ 100 vnodes/physical, default 256 (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/trade-offs/#adr-6">ADR-06</a>).</strong> Below 100, load imbalance reaches 2× (Karger 1997, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/study/#sec-5">§5</a>). Violating it: silent production hotspotting that only shows up under real traffic skew.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-4">P4</a> — Live resharding must be online and non-blocking.</strong> Two-phase scan-then-cutover (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/build/#sec-19">§19</a>); the source keeps serving during the scan. Violating it: a blocking split is an outage.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-5">P5</a> — Routing tier must cache with bounded staleness.</strong> Default TTL 30 s + watch-driven invalidation (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/build/#sec-18">§18</a>). Violating it either way: no caching kills the <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/numbers/#m-1">M1</a>/<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/numbers/#m-2">M2</a> latency targets (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/numbers/#sec-29">§29</a>); unbounded caching makes stale-cache windows unrecoverable without a hard restart.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-6">P6</a> — Metadata store must be linearizable for correctness.</strong> Non-linearizable stores admit split-brain on the partition map (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#sec-7">§7</a>). Violating it: two shards can each believe they own the same key range simultaneously.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-7">P7</a> — Tenant-aware sharding requires composite keys, tenant ID as the high-order prefix.</strong> (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/build/#sec-21">§21</a>). Violating it: one hot tenant&#39;s data fans out across every shard, and rebalance work scales with tenant count instead of staying local.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-8">P8</a> — Secondary-index sharding requires a separate vindex keyspace.</strong> (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/build/#sec-20">§20</a>). Violating it: co-locating index with primary concentrates two hotspots on one shard instead of spreading them.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-9">P9</a> — Cross-shard transactions are explicit: 2PC or saga, never silent.</strong> <code>TransactionMode</code> is a typed parameter (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/design/#sec-11">§11</a>); no &quot;fire and pray&quot; path exists in the public API (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/trade-offs/#adr-17">ADR-17</a>/18, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/trade-offs/#sec-9">§9</a>). Violating it: partial multi-shard writes leave permanently inconsistent state with no recovery path.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-10">P10</a> — Hot-shard detection must be automatic.</strong> QPS-and-bytes-per-second AND p99-latency thresholds, sustained 60 s (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/blueprint/#sec-19-4">§19.4</a>). Violating it either way: single-metric detection produces false positives (one large key) or false negatives (many small hot keys).</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-11">P11</a> — Rebalance under load must be rate-limited.</strong> Token-bucket, default 10 MB/s/replica (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/trade-offs/#adr-12">ADR-12</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/trade-offs/#sec-9">§9</a>; the WeChat Pay 2019 postmortem, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/study/#sec-5">§5</a>). Violating it: an unthrottled copy saturates replica disk I/O and triples production write latency.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-12">P12</a> — Routing decisions are observable.</strong> Every <code>route(key)</code> records <code>(key_hash_prefix, shard_id, cache_hit, partition_map_version)</code> in a sampled trace (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/blueprint/#sec-25">§25</a>). Violating it: &quot;where did this key go and why&quot; becomes unanswerable without rebuilding cache state by hand.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-13">P13</a> — Conformance is the contract.</strong> Property tests (partition assignment, reshuffle minimality, live-resharding correctness) plus a Jepsen-style fault matrix gate <code>Done</code>/<code>Sealed</code> (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/blueprint/#sec-27">§27</a>). Violating it: &quot;looks correct in review&quot; replaces a checkable bar.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/architecture/#p-14">P14</a> — The shard server, not the client cache, is the authority on ownership.</strong> Cache staleness is a performance defect, never a correctness defect (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/study/#sec-31">MM2</a> <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/study/#sec-31">§31</a>). Violating it: engineers &quot;fix&quot; staleness by adding a strongly-consistent quorum read per route, destroying the latency budget (<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/numbers/#m-1">M1</a>/<a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/numbers/#m-2">M2</a>, <a class="cite" href="/system-design-blueprints/systems/sharding-partition-router/numbers/#sec-29">§29</a>) for no correctness gain.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

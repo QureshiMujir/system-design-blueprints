@@ -1,0 +1,645 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Model Serving Scheduler from Scratch · Engineering Blueprints</title><meta name="description" content="The simplest design is one scheduler process that holds admission, queues, placement, leases and metadata in memory (§34 Alt A). The blueprint names how that breaks as load and cluster size grow: - Two requests think they own the same GPU slot. The result is double allocation,…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <span aria-current="page">Model Serving Scheduler from Scratch</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>Model Serving Scheduler from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~15 weeks</li> <li>2,516 lines</li> <li>blueprint #254</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/model-serving-scheduler/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/model-serving-scheduler/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/model-serving-scheduler/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/model-serving-scheduler/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/model-serving-scheduler/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/model-serving-scheduler/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/model-serving-scheduler/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/model-serving-scheduler/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Model Serving Scheduler from Scratch"> <div class="doc-grid"> <aside class="doc-toc" data-pagefind-ignore> <details class="toc" open data-collapse-narrow> <summary>On this page</summary> <ol><li><a href="#ex-in-one-paragraph">In one paragraph</a></li><li><a href="#ex-the-problem-concretely">The problem, concretely</a></li><li><a href="#ex-how-it-works-end-to-end">How it works, end to end</a></li><li><a href="#ex-the-core-ideas">The core ideas</a></li><li><a href="#ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</a></li><li><a href="#ex-what-must-never-be-false">What must never be false</a></li><li><a href="#ex-what-breaks-in-production">What breaks in production</a></li><li><a href="#ex-the-numbers">The numbers</a></li><li><a href="#ex-how-it-compares">How it compares</a></li><li><a href="#ex-building-it-the-phase-plan">Building it — the phase plan</a></li><li><a href="#ex-questions-to-test-yourself">Questions to test yourself</a></li><li><a href="#ex-if-you-only-remember-three-things">If you only remember three things</a></li><li><a href="#ex-words-used-here">Words used here</a></li></ol> </details> </aside> <div class="doc-main"> <p class="meta doc-meta" data-pagefind-ignore> <span>Plain-words explainer</span> <span>status: checked</span> <span>written 2026-10-07</span> <span>checked by Opus 5.5 on 2026-10-07</span> <span>423 lines</span> </p>  <div class="prose explainer"><h2 id="ex-in-one-paragraph">In one paragraph</h2>
+<p>A model serving scheduler is the control plane that decides which GPU runs each inference request
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>). It sits between stateless gateways and the node-local runtimes that execute the model, and it
+owns admission, queueing, placement, batching, preemption and autoscaling coordination, but it never
+runs a tensor kernel (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>). It exists because inference platforms fail from placement instability,
+queue collapse, GPU fragmentation and runaway tail latency more than from tensor-math bugs (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-2">§2</a>). The
+design is a Rust system of fifteen crates and services whose authoritative state lives in a
+Raft-replicated store (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-1">ADR-01</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-4">ADR-04</a>). Platform engineers, GPU cluster operators and SRE teams
+run it (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>).</p>
+<h2 id="ex-the-problem-concretely">The problem, concretely</h2>
+<p>The simplest design is one scheduler process that holds admission, queues, placement, leases and
+metadata in memory (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-34">§34</a> Alt A). The blueprint names how that breaks as load and cluster size grow:</p>
+<ul>
+<li><strong>Two requests think they own the same GPU slot.</strong> The result is double allocation, and sharing a
+GPU set across tenants corrupts tensor memory (P6, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-7">I7</a>).</li>
+<li><strong>A queue with no ceiling.</strong> Every unbounded queue is a future out-of-memory kill with a deferred
+timestamp (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM2</a>, P2). The blueprint&#39;s own arithmetic: sustained load averages 4,167 req/s, but the
+system is provisioned to take bursts of 250k req/s, about 60 times that (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C2).</li>
+<li><strong>Priority with no fairness.</strong> A queue ordered only by priority starves a low-priority but paying
+tenant under sustained high-priority load, and a bulk batch job can starve an interactive tenant
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM6</a>, P7).</li>
+<li><strong>Silence treated as death.</strong> If a missing heartbeat alone evicts a node, a network blip reassigns
+work that is still running, and the result is double execution (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-9">§16.9</a>).</li>
+<li><strong>One process, one failure.</strong> A monolith cannot survive losing its node without a window where an
+acknowledged write is lost (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-34">§34</a> Alt A, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-2">I2</a>), against a 99.95% availability target that leaves
+21.6 minutes of error budget a month (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C7).</li>
+<li><strong>Decisions nobody can reproduce.</strong> Nondeterministic scheduling gives latency spikes no one can
+replay or debug (P1).</li>
+</ul>
+<h2 id="ex-how-it-works-end-to-end">How it works, end to end</h2>
+<p>Follow one request through <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>&#39;s diagram. Most boxes are crates or services from <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>; the model
+runtime, KV cache layer and streaming aggregator are not on <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>&#39;s list (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>).</p>
+<pre class="diagram"><code> Client -&gt; scheduler-api -&gt; admission-controller -&gt; queue-manager -&gt; scheduler-core
+            (TLS, auth)     (quota/SLA/legality)    (fair queues)      (placement + lease)
+ scheduler-core &lt;-&gt; placement-engine (scoring, pure function of snapshots)
+ scheduler-core -&gt; metadata-store (Raft quorum) + placement WAL -&gt; replay-framework
+ scheduler-core -&gt; runtime-agent mesh (lease proposal / accept) -&gt; model runtime (vLLM, TensorRT-LLM)
+ model runtime -&gt; streaming aggregator (ordering, cancellation) -&gt; Client
+ side channel: tracing-pipeline, metrics-exporter (never block scheduling)</code></pre>
+<ol>
+<li><strong>Gateway.</strong> <code>scheduler-api</code> terminates TLS at trust boundary A, authenticates the tenant,
+rate-limits, and normalizes the call into a <code>SchedulerRequest</code> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>). <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/design/#sec-11">§11</a> instead says that request
+is constructed once at <code>admission-controller</code> and never mutated afterwards (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/design/#sec-11">§11</a>). It makes no
+placement decision (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>).</li>
+<li><strong>Admission.</strong> <code>admission-controller</code> checks quota (<code>quota-engine</code>), SLA eligibility, token
+ceilings and payload legality before any scheduling work is spent. A failure is <code>REJECTED</code> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-8">§8</a>).</li>
+<li><strong>Queue.</strong> <code>queue-manager</code> holds the priority and fairness queues and the 1–15 ms batch-assembly
+window, and enforces <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-3">I3</a> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>).</li>
+<li><strong>Decision.</strong> <code>scheduler-core</code> asks <code>placement-engine</code> for a score and is the only writer of
+<code>PlacementDecision</code> rows into the WAL (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/design/#sec-11">§11</a>). State sits in <code>metadata-store</code> behind a Raft
+quorum (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-4">ADR-04</a>).</li>
+<li><strong>Lease and dispatch.</strong> <code>scheduler-core</code> proposes a lease to the node&#39;s <code>runtime-agent</code>, which is
+partially trusted (trust boundary B), then dispatches to the model runtime (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-8">§8</a>). Heartbeats
+come in through <code>node-heartbeat-service</code> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-16">§16</a>).</li>
+<li><strong>Streaming.</strong> Tokens return through the streaming aggregator, which enforces <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-4">I4</a> and applies
+cancellation (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>). The diagram draws it as its own box, but <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-17-2">§17.2</a> step 1 puts it inside the
+stateless gateway tier, as <code>scheduler-api/src/streaming.rs</code> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-17-2">§17.2</a> step 1, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-33">§33</a> item 6).</li>
+<li><strong>Replay and telemetry.</strong> <code>replay-framework</code> rebuilds decisions from the WAL, and the telemetry
+stack is decoupled so an outage degrades observability, never correctness (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>, P5).</li>
+</ol>
+<p>The request moves through ten states (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-8">§8</a>). <code>RECEIVED</code> goes to <code>QUEUED</code> or <code>REJECTED</code>. <code>QUEUED</code> goes to
+<code>SCHEDULED</code> or <code>CANCELLED</code>. <code>SCHEDULED</code> goes to <code>RUNNING</code> or <code>FAILED</code>. <code>RUNNING</code> goes to <code>STREAMING</code>,
+<code>FAILED</code> or <code>COMPLETED</code>, and <code>STREAMING</code> to <code>COMPLETED</code> or <code>FAILED</code>. <code>FAILED</code> goes to <code>RETRY_PENDING</code>,
+which goes back to <code>QUEUED</code> or to <code>CANCELLED</code>. <code>COMPLETED</code>, <code>CANCELLED</code> and <code>REJECTED</code> have no next
+state; <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-8">§8</a> also calls <code>FAILED</code> &quot;terminal failure&quot; while listing <code>RETRY_PENDING</code> as its next state (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-8">§8</a>). Any other transition is rejected and counted in <code>invalid_state_transition_total</code>. <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-8">§8</a> calls this
+&quot;<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-6">I6</a>&#39;s enforcement point&quot;, although <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-6">I6</a> is the epoch-monotonicity invariant (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-8">§8</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-7">§7</a>).</p>
+<p>Stateless services are <code>scheduler-api</code> and <code>admission-controller</code>. The stateful part is the
+<code>scheduler-core</code> plus <code>metadata-store</code> quorum, and one <code>runtime-agent</code> runs per GPU host (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>).</p>
+<h2 id="ex-the-core-ideas">The core ideas</h2>
+<h3 id="ex-leases-and-fencing-tokens-one-owner-per-gpu-slot-13-i1-i11-mm4">Leases and fencing tokens: one owner per GPU slot (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-13">§13</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM4</a>)</h3>
+<p>A <strong>lease</strong> is a temporary ownership contract over a runtime&#39;s GPU slot (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>). It is a row
+<code>RuntimeLease { runtime_id, fencing_token, expiry }</code> in the Raft-replicated <code>metadata-store</code>
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-13-2">§13.2</a> step 5), although <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-9">ADR-09</a> names embedded RocksDB as the queue and lease persistence store
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-9">ADR-09</a>). It is taken by <strong>compare-and-swap</strong> (<strong>CAS</strong>): the update applies only if the row is still what the caller
+last saw, so two schedulers cannot both win (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-13-2">§13.2</a> step 8, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-1">I1</a>). The <strong>fencing token</strong> is a monotonic
+value the runtime checks on every dispatch, so a superseded token is refused (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-11">I11</a>, P6, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-2">§16.2</a> step 8).
+Fencing turns &quot;who held it last&quot; into a comparison, not a race (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM4</a>).</p>
+<ol>
+<li><code>scheduler-core</code> proposes a lease and <code>runtime-agent</code> accepts; only then does dispatch go out (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-8">§8</a>).</li>
+<li>If preemption reclaims the slot, the old token is revoked before the freed GPU set is offered to
+anyone else (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-20-2">§20.2</a> step 7).</li>
+<li>If the old holder still sends work, the runtime rejects it and counts <code>stale_lease_rejected_total</code>
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-11">I11</a>).</li>
+</ol>
+<p>The same idea guards the leader: after a partition heals, any RPC bearing a lower term is rejected
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-13-6">§13.6</a> pitfall 2, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#t-6">T6</a>). The epoch counter (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-6">I6</a>) never decreases (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-13-2">§13.2</a> step 10). A lease whose owning
+request is gone is an <strong>orphan lease</strong>, reclaimed by a TTL scan (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-2">§16.2</a> step 17).</p>
+<h3 id="ex-placement-score-a-sample-not-the-whole-fleet-15-mm7">Placement: score a sample, not the whole fleet (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-15">§15</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM7</a>)</h3>
+<p>Placement is a pure function of read-only <code>RuntimeDescriptor</code> snapshots with no side effects, which
+is what makes it replayable (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>). The snapshots are read without locks (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-2">§15.2</a> step 1). The pipeline in
+<code>placement-engine/src/scoring.rs</code> follows the Kubernetes Scheduling Framework&#39;s plugin shape
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-2">§15.2</a> step 3). Its terms are GPU-memory accounting that feeds fragmentation estimates (steps 2 and 11), NUMA topology (steps 4–5), KV-cache
+affinity (step 6), anti-affinity (step 7), a fairness cross-check (step 13) and a penalty for
+unhealthy runtimes (step 15). <strong>KV-cache affinity</strong> means preferring a runtime that already holds a
+reusable prompt prefix. It goes into the score itself, not into a cache-warming pass afterwards (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM7</a>).
+To stay inside the p50 budget the engine scores at most 200 sampled candidates instead of up to
+5,000 nodes (<strong>Sparrow sampling</strong>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-2">§15.2</a> step 11, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C1):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Stage of the p50 budget</th>
+<th>Time</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>queue-manager</code> dequeue</td>
+<td>0.3 ms</td>
+</tr>
+<tr>
+<td>scoring over at most 200 sampled candidates</td>
+<td>1.5 ms</td>
+</tr>
+<tr>
+<td>WAL append fsync, amortized</td>
+<td>1 ms</td>
+</tr>
+<tr>
+<td>Total</td>
+<td>2.8 ms, inside the 3 ms ceiling (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C1, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>)</td>
+</tr>
+</tbody></table></div>
+<p>Two guards matter. A snapshot can be stale, so GPU fit is re-validated when the runtime accepts the
+lease, not only when scoring (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-6">§15.6</a> pitfall 1). Affinity can dominate and unbalance the fleet, so its
+weight is capped against the fragmentation and topology terms (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-6">§15.6</a> pitfall 3).</p>
+<h3 id="ex-queues-admission-and-fairness-windows-14-i3-i10-mm6">Queues, admission and fairness windows (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-14">§14</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-10">I10</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM6</a>)</h3>
+<p>Admission runs three cheap checks (quota, SLA eligibility, payload legality), each a single CAS or
+lookup (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-14-2">§14.2</a> step 13). Admitted work lands in one <code>QueueShard</code> per tenant-hash partition, owned by a
+single-threaded task (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-14-2">§14.2</a> step 1, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/design/#sec-11">§11</a>). Each shard has a depth ceiling (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-3">I3</a>) and a <strong>fairness
+window</strong>, the interval over which a tenant&#39;s share is measured against its target (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-10">I10</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>). Priority
+orders contention but does not bound it, so priority alone is not isolation (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM6</a>). A deviation over 5%
+of the window share triggers re-weighting before forced preemption (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-14-4">§14.4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-20-2">§20.2</a> step 14). When a
+shard nears its memory ceiling it sheds, rejecting new work before out-of-memory (<strong>admission
+shedding</strong>, P8, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-14-2">§14.2</a> step 15). The conformance fixture <code>tenant_starvation_case.json</code> has one tenant
+saturate a shard and expects re-weighting within one fairness window (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-14-5">§14.5</a>).</p>
+<h3 id="ex-heartbeats-and-quarantine-before-eviction-16-i5-p10">Heartbeats and quarantine before eviction (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-16">§16</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-5">I5</a>, P10)</h3>
+<p>Every <code>runtime-agent</code> sends a heartbeat each second, at a randomized offset so nodes do not all fire
+on the same tick (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-2">§16.2</a> step 11). A runtime&#39;s health moves forward through
+<code>Healthy -&gt; Degraded -&gt; Quarantined -&gt; Draining -&gt; Offline</code>, with explicit compensating moves back
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-2">§16.2</a> step 5, P10). Silence is not proof of death: &quot;no heartbeat received&quot; may be the network, while
+&quot;confirmed dead&quot; needs watchdog silence plus process exit (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-9">§16.9</a>).</p>
+<ol>
+<li>A malformed heartbeat is rejected and the runtime is marked <code>degraded</code>, not evicted (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-8">§8</a>).</li>
+<li>After a configurable run of consecutive rejections, the runtime is quarantined (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-2">§16.2</a> step 10).</li>
+<li>A node past its heartbeat TTL becomes unschedulable and its leases are revoked (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-5">I5</a>).</li>
+</ol>
+<p>The conformance fixture with five consecutive missed heartbeats expects quarantine, not eviction
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-5">§16.5</a>).</p>
+<h3 id="ex-cooldown-and-hysteresis-stopping-control-loops-from-flapping-15-18-20-mm5">Cooldown and hysteresis: stopping control loops from flapping (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-15">§15</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-18">§18</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-20">§20</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM5</a>)</h3>
+<p>A control loop that compares a noisy signal to one threshold oscillates near it (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM5</a>). <strong>Hysteresis</strong>
+is an asymmetric threshold gap that prevents oscillation (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>). A <strong>cooldown</strong> is a window
+after a decision during which it cannot repeat (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>). The blueprint applies the same fix in three
+places. In placement, a recently preempted runtime is deprioritized for a bounded window and a score
+margin is required before migrating, so a workload stops bouncing between two near-equal runtimes
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-2">§15.2</a> step 14, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-6">§15.6</a> pitfall 2, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-6">FM-6</a>). In autoscaling, scale-up and scale-down thresholds differ and
+a cooldown follows each decision (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-18-2">§18.2</a> steps 4 and 6, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-8">FM-8</a>). In preemption, a per-window cap damps
+cascades (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-20-2">§20.2</a> step 12, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-9">FM-9</a>). A &quot;flap&quot; is defined as more than one direction reversal within one
+cooldown window, and the fixture must show zero across 1,000 replays (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-18-4">§18.4</a>).</p>
+<h3 id="ex-deterministic-replay-reconstruct-a-decision-from-its-inputs-19-i8-p1-p4">Deterministic replay: reconstruct a decision from its inputs (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-19">§19</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-8">I8</a>, P1, P4)</h3>
+<p>Every placement emits a <code>PlacementDecision</code> row, append-only and durable before the
+acknowledgement, and it carries a <code>ScoreBreakdown</code> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/design/#sec-11">§11</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-2">I2</a>, P4). Because placement is a pure function
+of snapshots (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>), <code>replay-framework</code> can re-run a WAL segment in a sandbox and compare its checksum
+with the commit-time checksum, failing loudly on divergence (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-19-2">§19.2</a> steps 2, 9 and 12, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-8">I8</a>). A second
+check replays one segment under two binary versions to catch a determinism break before release
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-19-2">§19.2</a> step 16). One real cause is iterating a <code>HashMap</code> while serializing a snapshot, fixed by an
+ordered encoder (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-13-6">§13.6</a> pitfall 4). Replay proves what happened, not what should have happened, so a
+replay-clean incident can still be a policy bug (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM3</a>).</p>
+<h2 id="ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</h2>
+<h3 id="ex-language-rust-for-the-control-plane-adr-01">Language: Rust for the control plane (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-1">ADR-01</a>)</h3>
+<p><strong>Chosen:</strong> Rust, because the ownership model enforces <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-1">I1</a> and <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-11">I11</a> at compile time and there is no
+garbage-collector pause inside the p50 budget (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>).
+<strong>Rejected:</strong> Go and C++ (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>). <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a> adds that Go&#39;s GC pauses interact badly with the sub-3 ms p50 and
+that C++ has no ownership model to enforce <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-1">I1</a>.
+<strong>When the rejected choice is right:</strong> Go wins for a control plane with a latency budget above 50 ms
+and a small team unwilling to learn borrow-checking (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>).</p>
+<h3 id="ex-metadata-replication-raft-over-paxos-adr-04">Metadata replication: Raft over Paxos (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-4">ADR-04</a>)</h3>
+<p><strong>Chosen:</strong> Raft, for operational familiarity and a single reference implementation (etcd) to study (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>).
+<strong>Rejected:</strong> multi-Paxos (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>).
+<strong>When the rejected choice is right:</strong> when leaderless writes under network partition matter more than
+operational simplicity (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>). The blueprint itself asks whether this under-weighted a cost, since
+quorum write fan-out is the first scaling ceiling (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-33">§33</a> item 5, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-29">§29</a>).</p>
+<h3 id="ex-sharding-tenant-hash-partitioning-adr-20">Sharding: tenant-hash partitioning (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-20">ADR-20</a>)</h3>
+<p><strong>Chosen:</strong> hash the tenant to a shard, so a tenant&#39;s requests keep landing together and keep KV-cache
+locality (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>). It also ties into the scale-out path past the node ceiling (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-29">§29</a>).
+<strong>Rejected:</strong> random partitioning (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>).
+<strong>When the rejected choice is right:</strong> when tenant volume is so skewed that hash sharding creates hot
+shards (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>). <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-29">§29</a> names queue-shard imbalance as a bottleneck and <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#t-10">T10</a> a hash-collision risk.</p>
+<h3 id="ex-backpressure-bounded-channels-plus-a-token-bucket-adr-24">Backpressure: bounded channels plus a token bucket (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-24">ADR-24</a>)</h3>
+<p><strong>Chosen:</strong> bounded channels and token-bucket admission, because P2 requires every queue, stream and
+transport to be bounded (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>). The price is that a legitimate burst is rejected, not absorbed (P2).
+<strong>Rejected:</strong> unbounded mpsc channels (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>).
+<strong>When the rejected choice is right:</strong> a fixed, small, trusted internal fan-out that no outside actor
+can overload (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>).</p>
+<h3 id="ex-log-format-binary-append-only-wal-adr-08">Log format: binary append-only WAL (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-8">ADR-08</a>)</h3>
+<p><strong>Chosen:</strong> a binary append-only WAL for throughput, avoiding SQLite&#39;s page-cache and B-tree overhead
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>), against a WAL amplification target under 1.8x (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>).
+<strong>Rejected:</strong> SQLite WAL (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>).
+<strong>When the rejected choice is right:</strong> when ad hoc SQL queries over the log outweigh raw append
+throughput (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>).</p>
+<h3 id="ex-runtime-dispatch-grpc-bidirectional-streams-adr-19">Runtime dispatch: gRPC bidirectional streams (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-19">ADR-19</a>)</h3>
+<p><strong>Chosen:</strong> long-lived bidirectional streams, because polling adds tens of milliseconds the p99 budget
+cannot absorb (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>). Heartbeats ride the same transport (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-2">§16.2</a> step 2).
+<strong>Rejected:</strong> HTTP long-poll (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>).
+<strong>When the rejected choice is right:</strong> when runtime agents sit behind a proxy that cannot terminate
+long-lived streams (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>). <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a> also credits <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-19">ADR-19</a> with keeping scheduling logic out of <code>scheduler-api</code>,
+but the <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-19">ADR-19</a> row is about dispatch (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-9">§9</a>).</p>
+<h3 id="ex-roads-not-taken-34-35">Roads not taken (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-34">§34</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-35">§35</a>)</h3>
+<p><em>Centralized monolith</em> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-34">§34</a> Alt A) wins for a single-region, single-tenant cluster under about 500
+nodes where simplicity outweighs a single point of failure; early <code>slurmctld</code> without HA is the
+example. It loses here because 99.95% availability needs surviving a node loss without losing an
+acknowledged write (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>).</p>
+<p><em>One bigger Raft quorum, no sharding</em> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-34">§34</a> Alt B) wins on a cluster well under the 5,000-node ceiling
+where cross-tenant global ordering has value, as with a single etcd cluster. It loses because quorum
+fan-out is the first ceiling reached (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-29">§29</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-20">ADR-20</a>).</p>
+<p><em>Peer-to-peer gossip placement</em> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-34">§34</a> Alt C) wins for huge, latency-insensitive batch clusters that
+tolerate eventual consistency. It loses because <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-1">I1</a> and <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-7">I7</a> need a linearizable arbiter, and adding one
+collapses back to Alt B plus gossip latency.</p>
+<p><em>A Kubernetes scheduler extension as the whole system</em> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-34">§34</a> Alt D) wins for organizations committed to
+Kubernetes as the only orchestration surface, where reusing its scheduler and RBAC beats API-server
+round trips. It loses because that round trip breaks the 3 ms p50 budget (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>), so Kubernetes is only an
+optional substrate here.</p>
+<p><em>Deferred features</em> (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-35">§35</a>) each wait for a trigger: cross-region active-active inference, when
+inter-region RTT falls below 20 ms; ML-driven placement, once the replay corpus holds at least 90 days
+of labeled outcomes; MIG-style GPU partitioning, when a GPU generation ships a stable driver API; and
+RDMA-native routing, when the fabric standardizes on RDMA NICs (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#sec-35">§35</a>).</p>
+<h2 id="ex-what-must-never-be-false">What must never be false</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-1">I1</a></strong>: only one scheduler lease owns a runtime slot. Noticed by duplicate lease IDs and runtime conflict telemetry; <code>lease_conflict_total</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-2">I2</a></strong>: mutations are durable before they are acknowledged. Noticed by sequence gaps and replay checksum mismatch; <code>wal_append_latency_ms</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-3">I3</a></strong>: queues never exceed their configured limits. Noticed by a depth threshold breach; <code>queue_depth{tenant}</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-4">I4</a></strong>: streamed token offsets only increase. Noticed by the aggregator&#39;s offset check; <code>stream_offset_regression_total</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-5">I5</a></strong>: a node with no heartbeat inside the TTL is unschedulable. Noticed by the TTL scanner; <code>heartbeat_age_seconds</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-6">I6</a></strong>: the scheduler epoch never decreases. Noticed by a regression check on write; <code>epoch_regression_total</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-7">I7</a></strong>: a GPU set belongs to at most one placement. Noticed by overlapping <code>gpu_set</code> on active leases; <code>gpu_overlap_detected_total</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-8">I8</a></strong>: replaying a WAL segment gives identical decisions. Noticed by replay checksum comparison; <code>replay_divergence_total</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-9">I9</a></strong>: a tenant&#39;s token budget never goes negative. Noticed by a negative-balance write attempt; <code>quota_underflow_total</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-10">I10</a></strong>: no tenant exceeds its window share. Noticed by deviation above 5% (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-14-4">§14.4</a>); <code>fairness_deviation_ratio</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-11">I11</a></strong>: a superseded lease token is never honored. Noticed when a runtime is shown a fenced lease; <code>stale_lease_rejected_total</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-12">I12</a></strong>: a linearizable read never sees a write before quorum commit. Noticed by the stale-read detector in <code>conformance-suite</code>; <code>linearizable_read_violation_total</code>.</li>
+</ul>
+<p>A deterministic simulator asserts all twelve independently after every simulated tick, so a failure
+names the broken invariant directly (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-7">§7</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-26">§26</a>).</p>
+<h2 id="ex-what-breaks-in-production">What breaks in production</h2>
+<p><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-1">FM-1</a>, leader loss.</strong> Placement stalls cluster-wide and <code>raft_replication_lag_ms</code> spikes. Causes are a
+leader crash, a partition or host exhaustion. Followers detect it by heartbeat timeout and elect a new
+leader automatically. If the quorum is lost, restore from the last verified snapshot (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-23">§23</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-13-2">§13.2</a> step 1).</p>
+<p><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-2">FM-2</a>, runtime node crash.</strong> Leases are orphaned and queue depth rises. Causes are hardware faults,
+OOM kills or crashes. Missed heartbeats past the 5 s budget detect it, orphan-lease reclamation (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-5">I5</a>)
+and placement retry recover automatically, and the affected <code>PlacementDecision</code> sequence can be replayed
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-23">§23</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>).</p>
+<p><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-3">FM-3</a>, WAL corruption.</strong> Replay checksums mismatch and the snapshot load fails. Causes are disk
+faults, a partial write during a crash or bit rot. A CRC32C mismatch on read detects it, a healthy
+replica replays automatically, and the manual path is a snapshot restore (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-23">§23</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#t-7">T7</a>).</p>
+<p><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-4">FM-4</a>, queue saturation.</strong> The admission-reject rate climbs and depth pins at the shard ceiling. The
+cause is a sustained burst beyond capacity or a quota leak. Queue-depth alarms (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-3">I3</a>) detect it,
+admission shedding is the automatic response, and operators adjust quotas or add capacity (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-23">§23</a>, P8).</p>
+<p><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-5">FM-5</a>, replay divergence.</strong> A replayed decision differs from the original. The cause is reintroduced
+nondeterminism. The replay-checksum mismatch (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-8">I8</a>) detects it, and the divergent segment is isolated
+from further replay while engineers diff the scoring path (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-23">§23</a>).</p>
+<p><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-6">FM-6</a>, placement oscillation.</strong> <code>migration_rate</code> rises with no capacity change. The cause is
+insufficient hysteresis margin or misconfigured scoring weights. Migration-rate telemetry detects it,
+runtime cooldowns contain it, and the fix is a retune plus replaying the sequence to diff score
+breakdowns (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-23">§23</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-9">§15.9</a>).</p>
+<p><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-9">FM-9</a>, preemption storm.</strong> <code>preemption_total</code> spikes from one triggering tenant. The cause is no
+per-window preemption cap, or a starvation-escalation cascade. Damping contains it, and operators relax
+the cap and review quotas (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-23">§23</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-20-2">§20.2</a> step 12).</p>
+<p><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#fm-11">FM-11</a>, cross-tenant starvation.</strong> One tenant&#39;s p99 wait persistently exceeds the fairness window.
+Causes are priority inversion or affinity stickiness monopolizing GPUs. A sustained
+<code>fairness_deviation_ratio</code> breach detects it, forced-preemption escalation responds, and operators
+review that tenant&#39;s quota and priority class (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-23">§23</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-20-2">§20.2</a> step 5).</p>
+<p>Threats worth knowing (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-22">§22</a>):</p>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#t-3">T3</a></strong>, a runtime lying about its GPU inventory or health to win placement, is met by cross-checking
+against watchdog and heartbeat before trusting a self-report; the response is <code>degraded</code>, then
+quarantine (<code>heartbeat_rejected_total</code>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#t-6">T6</a></strong>, a stale leader accepting writes after a partition heals, is met by rejecting any RPC with a
+lower term (<code>stale_write_rejected_total</code>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#t-10">T10</a></strong>, one tenant starving another through shared-shard placement, is met by tenant-hash sharding
+and the fairness window (<code>fairness_deviation_ratio</code>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#t-11">T11</a></strong>, a fully compromised runtime dispatching unauthorized work, is met by lease fencing, which
+limits dispatch to a runtime holding a current token (<code>stale_lease_rejected_total</code>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#t-1">T1</a></strong>, an oversized request exhausting queue memory, is rejected at admission before
+<code>queue-manager</code> sees it (<code>admission_reject_total{reason}</code>).</li>
+</ul>
+<h2 id="ex-the-numbers">The numbers</h2>
+<p>Every <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a> row is a design budget, and the C-rows in <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> are the blueprint&#39;s arithmetic from those
+budgets (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a>).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Value</th>
+<th>Formula or derivation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Placement latency p50 / p99</td>
+<td>&lt; 3 ms / &lt; 20 ms</td>
+<td>p50 = 0.3 + 1.5 + about 1 ms (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C1); p99 = p50 x 6.7 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Admission p99</td>
+<td>&lt; 5 ms</td>
+<td>one queue tick (1 ms floor) x 5 for quota round trips (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Enqueue throughput</td>
+<td>250k req/s per region</td>
+<td>50M tok/min regional target divided by about 200 tokens per request (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C2)</td>
+</tr>
+<tr>
+<td>Heartbeat / failure detection</td>
+<td>1 s / &lt; 5 s</td>
+<td>5 missed heartbeats at a 1 s interval (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Metadata quorum write</td>
+<td>&lt; 15 ms</td>
+<td>majority round trip at 0.2–2 ms RTT x 3 hops, plus fsync (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>WAL durability / amplification</td>
+<td>fsync within 25 ms / &lt; 1.8x</td>
+<td>bounds the acknowledged-write loss window to zero (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-2">I2</a>)</td>
+</tr>
+<tr>
+<td>Max cluster</td>
+<td>5,000 nodes, 40,000 GPUs</td>
+<td>15 ms / 0.003 ms per follower (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C4); 8 GPUs x 5,000 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Active models</td>
+<td>25,000</td>
+<td>25,000 x 1.2 KB = 30 MB of a 32 GB ceiling (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C5)</td>
+</tr>
+<tr>
+<td>Concurrent streams</td>
+<td>2,000,000</td>
+<td>2M x about 4 KB = 8 GB (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C8)</td>
+</tr>
+<tr>
+<td>File descriptors</td>
+<td>2,000,000</td>
+<td>1.0 per stream, no slack, so multiplexing is required (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C10)</td>
+</tr>
+<tr>
+<td>Startup recovery</td>
+<td>&lt; 120 s</td>
+<td>25,000 models at about 250/s = 100 s, plus 15 s WAL tail = 115 s (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C6)</td>
+</tr>
+<tr>
+<td>Availability / error budget</td>
+<td>99.95% / 21.6 min per month</td>
+<td>0.05% x 30.44 x 24 x 60 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C7)</td>
+</tr>
+<tr>
+<td>GPU utilization</td>
+<td>&gt; 72% sustained</td>
+<td>100 - 18 fragmentation - 10 preemption and drain (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C3)</td>
+</tr>
+<tr>
+<td>Rebalance / drain</td>
+<td>&lt; 2 min / &lt; 60 s</td>
+<td>autoscaling cooldown plus warm-pool startup; stream deadline plus lease handoff (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>)</td>
+</tr>
+</tbody></table></div>
+<p>Places where the blueprint disagrees with itself, stated unresolved:</p>
+<ul>
+<li><strong>How many numbers.</strong> <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a> says &quot;These 27 numbers are load-bearing&quot;, but its table has 30 rows (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>).</li>
+<li><strong>What 250k req/s is.</strong> <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>&#39;s rationale column derives it from 50M tok/min divided by about 200
+tokens per request. <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C2 computes 250,000 req/min, that is 4,167 req/s sustained, and treats
+250k req/s as the provisioned burst ceiling (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C2).</li>
+<li><strong>Failure detection.</strong> <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a> budgets under 5 s, derived from 5 missed heartbeats at a 1 s interval.
+<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-4">§16.4</a>&#39;s criterion starts the 5 s clock at the fifth missed heartbeat (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-4">§16.4</a>).</li>
+<li><strong>&quot;Verbatim&quot; targets.</strong> <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-28">§28</a> says every M-row&#39;s target is the <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a> constraint verbatim, but <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#m-9">M9</a>
+(cancellation under 100 ms), <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#m-10">M10</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#m-11">M11</a> (CI under 15 min) and <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#m-12">M12</a> (rollback under 5 min) match no <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>
+row, and <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-12-4">§12.4</a> calls the CI budget &quot;<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>-adjacent&quot; (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-28">§28</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-12-4">§12.4</a>).</li>
+<li><strong>The error budget.</strong> <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a> and <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C7 both state 21.6 minutes, but C7&#39;s own formula,
+0.05% x 30.44 x 24 x 60, does not evaluate to 21.6 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C7).</li>
+</ul>
+<h2 id="ex-how-it-compares">How it compares</h2>
+<ul>
+<li><strong>Borg / Kubernetes</strong> chose a general reconciliation loop with a seconds-scale scheduling target. It
+fits mixed batch, service and stateful workloads where sub-10 ms placement is not the goal, and this
+design borrows its plugin pipeline but not its O(n) scoring fallback (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/compare/#sec-31">§31</a>).</li>
+<li><strong>Ray Serve</strong> chose Python actor scheduling with an eventually consistent control store. That is
+right for research and rapid iteration where control-plane latency is not the bottleneck (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/compare/#sec-31">§31</a>).</li>
+<li><strong>Slurm</strong> chose batch-oriented fairshare with a decay curve and a non-replicated <code>slurmctld</code> by
+default. That is right for HPC jobs that run for hours, where queueing overhead is negligible (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/compare/#sec-31">§31</a>).</li>
+<li><strong>NVIDIA Triton Inference Server</strong> chose per-node serving with no cluster-wide placement. That is
+right when an orchestration layer, here the scheduler, owns placement and Triton owns execution (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/compare/#sec-31">§31</a>).</li>
+</ul>
+<h2 id="ex-building-it-the-phase-plan">Building it — the phase plan</h2>
+<p>Ten phases, each with one proof from its <code>N.4</code> criteria and a duration from Appendix B (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-38">§38</a>). Build
+card: <code>blueprints/build-cards/Model Serving Scheduler.md</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>What exists afterwards</th>
+<th>The proof</th>
+<th>Appendix B</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-12">§12</a>)</td>
+<td>the 15-crate repository, deterministic config, CI, the epoch primitive and error taxonomy</td>
+<td>two clean-host builds give identical <code>Cargo.lock</code> hash and SBOM digest (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-12-4">§12.4</a>)</td>
+<td>1 week</td>
+</tr>
+<tr>
+<td>1 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-13">§13</a>)</td>
+<td>a 3–5 node Raft <code>metadata-store</code>, WAL, lease table</td>
+<td>no acknowledged write lost over 10,000 injected crash-recovery cycles (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-13-4">§13.4</a>)</td>
+<td>2 weeks</td>
+</tr>
+<tr>
+<td>2 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-14">§14</a>)</td>
+<td>bounded, tenant-isolated queues and the admission fast path</td>
+<td>no queue growth past the shard limit under a sustained 250k req/s burst (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-14-4">§14.4</a>)</td>
+<td>2 weeks</td>
+</tr>
+<tr>
+<td>3 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-15">§15</a>)</td>
+<td>the placement engine with topology and cache-aware scoring</td>
+<td>p99 placement under 20 ms on a 5,000-node, 40,000-GPU synthetic cluster (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-4">§15.4</a>)</td>
+<td>2 weeks</td>
+</tr>
+<tr>
+<td>4 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-16">§16</a>)</td>
+<td>runtime agents, heartbeats, health states, orphan reclamation</td>
+<td>failure detected within 5 s of the fifth missed heartbeat (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-4">§16.4</a>)</td>
+<td>1 week</td>
+</tr>
+<tr>
+<td>5 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-17">§17</a>)</td>
+<td>ordered, cancellation-safe token streaming</td>
+<td>zero token reordering across 100,000 synthetic multi-chunk streams (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-17-4">§17.4</a>)</td>
+<td>1 week</td>
+</tr>
+<tr>
+<td>6 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-18">§18</a>)</td>
+<td>autoscaling with warm pools and replayable scale decisions</td>
+<td>zero flap events on <code>scale_flap_case.json</code> replayed 1,000 times (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-18-4">§18.4</a>)</td>
+<td>1 week</td>
+</tr>
+<tr>
+<td>7 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-19">§19</a>)</td>
+<td>tracing, metrics, deterministic replay</td>
+<td>100% of <code>PlacementDecision</code> rows replay bit-for-bit across 1,000 WAL segments (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-19-4">§19.4</a>)</td>
+<td>1 week</td>
+</tr>
+<tr>
+<td>8 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-20">§20</a>)</td>
+<td>finalized fairness, preemption, speculative placement</td>
+<td>fairness deviation under 5% across a 72-hour multi-tenant soak (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-20-4">§20.4</a>)</td>
+<td>2 weeks</td>
+</tr>
+<tr>
+<td>9 (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-21">§21</a>)</td>
+<td>signed releases, canary rollout, conformance gating, <code>operator-cli</code></td>
+<td>100% conformance pass rate before any promotion (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-21-4">§21.4</a>)</td>
+<td>2 weeks</td>
+</tr>
+</tbody></table></div>
+<p>Timeline conflict: <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a> gives &quot;Phase 0 MVP: 10 weeks&quot;, while Appendix B gives Phase 0 as 1 week (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-1">§1</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-38">§38</a>).</p>
+<h2 id="ex-questions-to-test-yourself">Questions to test yourself</h2>
+<ol>
+<li>Why does <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>&#39;s p50/p99 gap (3ms vs. 20ms, a 6.7x ratio) not indicate a tail-latency bug, given <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-28">§28</a>&#39;s fan-out reasoning (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-28">§28</a>)? — <em>Hint: start from the p99 derivation in <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, then <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM1</a>.</em></li>
+<li>If placement-engine&#39;s candidate sampling (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-2">§15.2</a> step 11) never scans the full inventory, how does <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-15">§15</a>&#39;s zero-double-allocation acceptance criterion (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-4">§15.4</a>) hold under adversarial worst-case fragmentation, and what does <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a>&#39;s C4 assume that could break this (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-15">§15</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a>)? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-6">§15.6</a> pitfall 1&#39;s recovery, then <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a> C4.</em></li>
+<li><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a>&#39;s C2 shows 250k req/s is a ~60x burst multiple over sustained average — does <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>&#39;s queue- shard-level memory accounting (P8) actually bound worst-case memory at that burst multiple, or only at sustained average (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/numbers/#sec-32">§32</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-14">§14</a>)? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-14-2">§14.2</a> step 20 and P8.</em></li>
+<li><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-19">§19</a>&#39;s replay-differential testing (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-19-2">§19.2</a> step 16) catches determinism regressions between binary versions — but what catches a determinism regression introduced <em>within</em> one version, before any second version exists to diff against (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-19">§19</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-26">§26</a>)? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-26">§26</a>&#39;s deterministic-simulator paragraph and <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-8">I8</a>.</em></li>
+<li><a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-22">§22</a>&#39;s <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#t-3">T3</a> (falsified runtime telemetry) is mitigated by corroborating signals, but <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-16">§16</a>&#39;s degraded-node scoring penalty (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-15-2">§15.2</a> step 15) still trusts the runtime&#39;s self-reported health as one of those signals — is the corroboration actually independent, or partially circular (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#sec-22">§22</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-15">§15</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/build/#sec-16">§16</a>)? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#t-3">T3</a>&#39;s mitigation column and <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-2">§16.2</a> step 7.</em></li>
+</ol>
+<h2 id="ex-if-you-only-remember-three-things">If you only remember three things</h2>
+<p>Exactly one owner holds each GPU slot, proven by a fencing token the runtime checks on every dispatch
+(<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM4</a>). Every queue, stream and wait is bounded, and a silent node is quarantined before it is
+evicted (P2, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-9">§16.9</a>). Scheduling is a pure function written to a durable log before it is
+acknowledged, so any decision can be replayed and explained (P1, P4, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-8">I8</a>).</p>
+<h2 id="ex-words-used-here">Words used here</h2>
+<ul>
+<li><strong>Lease</strong>: a temporary, fenced ownership contract over a runtime&#39;s GPU slot (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-1">I1</a>).</li>
+<li><strong>Fencing token</strong>: a comparable number that stops a superseded lease holder from being honored (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-11">I11</a>).</li>
+<li><strong>CAS (compare-and-swap)</strong>: an atomic conditional update, used for leases and quota decrements (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>).</li>
+<li><strong>Quorum</strong>: the majority of metadata-store replicas needed to commit a write (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-4">ADR-04</a>).</li>
+<li><strong>Orphan lease</strong>: a lease whose request no longer exists, reclaimed by a TTL scan (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-5">I5</a>).</li>
+<li><strong>Cache affinity</strong>: scoring preference for a runtime holding a reusable KV-cache prefix (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>).</li>
+<li><strong>Sparrow sampling</strong>: scoring a sampled subset of candidates instead of the whole inventory (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>).</li>
+<li><strong>Fairness window</strong>: the interval over which a tenant&#39;s share is measured against its target (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-10">I10</a>).</li>
+<li><strong>Admission shedding</strong>: deliberately rejecting work under overload before scheduling effort is spent (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, P8).</li>
+<li><strong>Backpressure</strong>: bounded capacity that pushes pressure upstream instead of buffering forever (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, P2).</li>
+<li><strong>Hysteresis</strong>: an asymmetric threshold gap that prevents oscillation in a control loop (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-30">MM5</a>).</li>
+<li><strong>Cooldown period</strong>: a window after a decision during which it cannot repeat (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>).</li>
+<li><strong>Node quarantine</strong>: isolating a runtime after consecutive failures, short of eviction (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/blueprint/#sec-16-2">§16.2</a> step 10).</li>
+<li><strong>Replay determinism</strong>: replaying a WAL segment reproduces identical decisions (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/reliability/#inv-8">I8</a>).</li>
+<li><strong>Tenant-hash sharding</strong>: partitioning shards by a stable hash of the tenant (<a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/study/#sec-36">§36</a>, <a class="cite" href="/system-design-blueprints/systems/model-serving-scheduler/trade-offs/#adr-20">ADR-20</a>).</li>
+</ul>
+</div> </div> </div> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

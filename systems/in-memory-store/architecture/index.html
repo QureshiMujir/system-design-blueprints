@@ -1,0 +1,428 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>In-Memory Store — Architecture · Engineering Blueprints</title><meta name="description" content="In-Memory Store, hld: §3 overview + §8 domain model. Build a single-binary, single-process, from-scratch in-memory key-value data store wire-compatible with the Redis 7.x command surface on RESP2 and RESP3: the full data-type surface (strings, lists…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/in-memory-store/">In-Memory Store</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>In-Memory Store</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux</li> <li>12 phases</li> <li>~19 weeks</li> <li>3,113 lines</li> <li>blueprint #56</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/in-memory-store/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/in-memory-store/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/in-memory-store/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/in-memory-store/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/in-memory-store/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/in-memory-store/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/in-memory-store/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/in-memory-store/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/in-memory-store/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/in-memory-store/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:In-Memory Store — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+  %% legend rt: the server&#39;s own request path and data model
+  %% legend ingest: async or supporting subsystems
+  %% legend side: clients outside the server
+  CL([&quot;&lt;b&gt;Clients&lt;/b&gt;&lt;br/&gt;redis-cli, hiredis/lettuce/node-redis/&lt;br/&gt;ioredis/redis-py, our store-client&lt;br/&gt;RESP2/RESP3 over TCP, TLS,&lt;br/&gt;or Unix domain socket&quot;])
+  LI[&quot;&lt;b&gt;Listener&lt;/b&gt;&lt;br/&gt;tokio TCP/UDS listener per (addr,proto)&lt;br/&gt;rustls TLS termination (Phase 9)&lt;br/&gt;SO_REUSEPORT across N accept loops&quot;]
+  CO[&quot;&lt;b&gt;Connection&lt;/b&gt;&lt;br/&gt;RESP2/RESP3 parser+encoder&lt;br/&gt;input/output BytesMut&lt;br/&gt;ACL/auth state&lt;br/&gt;MULTI/WATCH state, subscription set&quot;]
+  DI[&quot;&lt;b&gt;Dispatcher&lt;/b&gt;&lt;br/&gt;one per shard, single-threaded, pinned&lt;br/&gt;lookup, arity, ACL check,&lt;br/&gt;cluster-slot check (MOVED/ASK),&lt;br/&gt;MULTI queue, execute&quot;]
+  DB[&quot;&lt;b&gt;Database&lt;/b&gt;&lt;br/&gt;keys Dict, expires Dict&lt;br/&gt;watch/blocked sets&lt;br/&gt;notify matrix&quot;]
+  PE[&quot;&lt;b&gt;Persistence (Phase 5)&lt;/b&gt;&lt;br/&gt;AOF append+rewrite&lt;br/&gt;RDB save/load&lt;br/&gt;hybrid RDB+AOF tail&quot;]
+  RE[&quot;&lt;b&gt;Replication (Phase 7)&lt;/b&gt;&lt;br/&gt;per-replica backlog ring buffer&lt;br/&gt;PSYNC2 full/partial resync&quot;]
+  ENC[&quot;&lt;b&gt;Data-type encodings&lt;/b&gt; (dual per type, P3)&lt;br/&gt;string raw/int/embstr&lt;br/&gt;list listpack/quicklist&lt;br/&gt;hash listpack/hashtable&lt;br/&gt;set intset/listpack/hashtable&lt;br/&gt;zset listpack/skiplist+hashtable&lt;br/&gt;stream radix-tree-of-listpack&lt;br/&gt;bitmap string-view&lt;br/&gt;hll sparse/dense, geo zset+geohash&quot;]
+  BG[&quot;&lt;b&gt;Background tasks&lt;/b&gt;&lt;br/&gt;active-expire cycle (10 Hz)&lt;br/&gt;eviction trigger on maxmemory watermark&lt;br/&gt;serverCron heartbeat&quot;]
+  CLU[&quot;&lt;b&gt;Cluster (Phase 8)&lt;/b&gt;&lt;br/&gt;16384 slots, CRC16(key)%16384&lt;br/&gt;gossip bus (client-port+10000)&lt;br/&gt;MIGRATING/IMPORTING + MOVED/ASK&lt;br/&gt;epoch-based failover election&quot;]
+  CL -- &quot;protocol boundary&quot; --&gt; LI
+  LI -- &quot;connection / trust boundary&quot; --&gt; CO
+  CO -- &quot;dispatch boundary — I2&quot; --&gt; DI
+  DI -- &quot;concurrency boundary:&lt;br/&gt;sharding, not locks — P2&quot; --&gt; DB
+  DI -- &quot;persistence boundary:&lt;br/&gt;async off dispatcher&quot; --&gt; PE
+  DI -- &quot;replication boundary:&lt;br/&gt;same command stream&quot; --&gt; RE
+  DB --&gt; ENC
+  RE --&gt; ENC
+  ENC -- &quot;queue/channel boundary:&lt;br/&gt;eviction trigger, active-expire cron&quot; --&gt; BG
+  BG ~~~ CLU
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef side stroke-width:1.5px
+  class LI,CO,DI,DB,ENC rt
+  class PE,RE,BG,CLU ingest
+  class CL side</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the server&#39;s own request path and data model</li><li><span class="swatch ingest"></span>async or supporting subsystems</li><li><span class="swatch side"></span>clients outside the server</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>┌──────────────────────────────────────────────────────────────────────┐
+│ Clients: redis-cli, hiredis/lettuce/node-redis/ioredis/redis-py,     │
+│ our store-client. RESP2/RESP3 over TCP, TLS, or Unix domain socket.   │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                 │  (protocol boundary)
+┌────────────────────────────────▼─────────────────────────────────────┐
+│ Listener — tokio TCP/UDS listener per (addr,proto); rustls TLS        │
+│ termination (Phase 9); SO_REUSEPORT across N accept loops.            │
+└────────────────────────────────┬─────────────────────────────────────┘
+                                 │  (connection / trust boundary)
+┌────────────────────────────────▼─────────────────────────────────────┐
+│ Connection — RESP2/RESP3 parser+encoder; input/output BytesMut;      │
+│ ACL/auth state; MULTI/WATCH state; subscription set.                  │
+└────────────────────────────────┬─────────────────────────────────────┘
+                                 │  (dispatch boundary — I2)
+┌────────────────────────────────▼─────────────────────────────────────┐
+│ Dispatcher (one per shard, single-threaded, pinned) — lookup, arity,  │
+│ ACL check, cluster-slot check (MOVED/ASK), MULTI queue, execute.      │
+└──────┬───────────────────────┬────────────────────┬───────────────────┘
+       │ (concurrency boundary:│ (persistence        │ (replication
+       │  sharding, not locks  │  boundary: async     │  boundary: same
+       │  — P2)                │  off dispatcher)     │  command stream)
+┌──────▼─────────────┐  ┌──────▼─────────────┐  ┌──────▼──────────────────┐
+│ Database             │  │ Persistence         │  │ Replication              │
+│ keys Dict, expires    │  │ (Phase 5)           │  │ (Phase 7)                │
+│ Dict, watch/blocked   │  │ AOF append+rewrite; │  │ per-replica backlog       │
+│ sets, notify matrix   │  │ RDB save/load;      │  │ ring buffer; PSYNC2       │
+└──────┬───────────────┘  │ hybrid RDB+AOF tail │  │ full/partial resync       │
+       │                  └─────────────────────┘  └──────┬────────────────────┘
+┌──────▼─────────────────────────────────────────────────▼───────────────┐
+│ Data-type encodings (dual per type, P3): string raw/int/embstr; list    │
+│ listpack/quicklist; hash listpack/hashtable; set intset/listpack/       │
+│ hashtable; zset listpack/skiplist+hashtable; stream radix-tree-of-      │
+│ listpack; bitmap string-view; hll sparse/dense; geo zset+geohash.       │
+└──────┬───────────────────────────────────────────────────────────────────┘
+       │ (queue/channel boundary: eviction trigger, active-expire cron)
+┌──────▼──────────────────┐   ┌─────────────────────────────────────────┐
+│ Background tasks          │   │ Cluster (Phase 8)                       │
+│ active-expire cycle       │   │ 16384 slots, CRC16(key)%16384;          │
+│ (10 Hz); eviction trigger │   │ gossip bus (client-port+10000);         │
+│ on maxmemory watermark;   │   │ MIGRATING/IMPORTING + MOVED/ASK;        │
+│ serverCron heartbeat      │   │ epoch-based failover election           │
+└────────────────────────────┘   └─────────────────────────────────────────┘</code></pre></details>
+<p><strong>Clients</strong> — any RESP2 or RESP3 speaker; no client-side changes required versus talking to real
+Redis (Principle <a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-1">P1</a>).</p>
+<p><strong>Listener</strong> — one tokio listener task per bound <code>(address, protocol)</code> pair; accepts connections
+and hands each to a shard chosen by a fixed hash of the connection&#39;s file descriptor (round-robin
+at startup, sticky thereafter) so that a connection&#39;s commands always execute on the same
+dispatcher.</p>
+<p><strong>Connection</strong> — owns the per-client parse/encode buffers and all client-local state (auth,
+transaction, watch set, subscriptions); this is the trust boundary between an unauthenticated byte
+stream and an ACL-checked command.</p>
+<p><strong>Dispatcher</strong> — the sole mutation path into a shard&#39;s databases (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#inv-2">I2</a>); every command passes
+through lookup → arity → ACL → cluster-slot check → execute, in that order, never re-ordered.</p>
+<p><strong>Database</strong> — the keyspace and its cross-cutting indices (expires, watch, blocked-client,
+keyspace-notification matrix); one instance per <code>SELECT</code>-able database index, 16 per shard by
+default.</p>
+<p><strong>Persistence</strong> — reads the dispatcher&#39;s already-validated write commands; never reads the
+database directly outside of a snapshot handoff (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-4">P4</a>, <a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-8">P8</a>).</p>
+<p><strong>Replication</strong> — the same command stream persistence sees, replayed to replicas instead of a
+file; PSYNC2&#39;s partial-resync path is what makes short disconnects cheap (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-5">P5</a>).</p>
+<p><strong>Data-type encodings</strong> — every collection type exposes exactly two encodings behind a vtable; the
+dispatcher never branches on encoding, only on <code>ObjectType</code> (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-3">P3</a>).</p>
+<p><strong>Background tasks</strong> — active-expire and eviction never hold the dispatcher mutex for more than
+their configured budget (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#inv-2">I2</a>, Pitfall in <a class="cite" href="/system-design-blueprints/systems/in-memory-store/blueprint/#sec-18-6">§18.6</a>).</p>
+<p><strong>Cluster</strong> — a slot map, not a hash ring (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-6">P6</a>); gossip converges slot ownership across nodes
+without an external coordinator (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/trade-offs/#adr-10">ADR-10</a>).</p>
+<p>Three properties recur throughout this document. First, the dispatcher is single-threaded per
+shard; concurrency comes from sharding, not from locking (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-2">P2</a>, <a class="cite" href="/system-design-blueprints/systems/in-memory-store/trade-offs/#adr-5">ADR-05</a>) — this is the choice antirez
+made in 2009 and the one this project re-makes, and it is what removes every reader-writer-lock bug
+class from the codebase. Second, the data path is one-way: bytes flow up from the listener into the
+dispatcher, mutate the database, and flow back down through the encoder; persistence and
+replication read the dispatcher&#39;s command stream, never the database directly. Third, every data
+type has exactly two encodings, and the conversion threshold is part of the type&#39;s invariant (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#inv-3">I3</a>);
+the dispatcher never reasons about encodings, it asks the type&#39;s vtable.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-1">8.1 RESP2 Wire Grammar (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>frame        = simple-string | error | integer | bulk-string | array ;
+simple-string = &quot;+&quot; , text , CRLF ;
+error         = &quot;-&quot; , text , CRLF ;
+integer       = &quot;:&quot; , [ &quot;-&quot; ] , digit+ , CRLF ;
+bulk-string   = &quot;$&quot; , length , CRLF , [ length*OCTET , CRLF ] ;
+array         = &quot;*&quot; , count , CRLF , frame* ;
+length        = &quot;-1&quot; | digit+ ;        (* &quot;-1&quot; = nil bulk string *)
+count         = &quot;-1&quot; | digit+ ;        (* &quot;-1&quot; = nil array *)
+text          = OCTET* - (CR | LF) ;
+CRLF          = %x0D.0A ;</code></pre>
+<p>A client request is always an <code>array</code> of <code>bulk-string</code>s (the &quot;multi-bulk&quot; request form); a server
+reply may be any frame. Applied in Phase 1 (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/blueprint/#sec-13-1">§13.1</a>).</p>
+<h3 id="sec-8-2">8.2 RESP3 Extensions (EBNF delta)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>map      = &quot;%&quot; , pair-count , CRLF , (frame , frame)* ;
+set      = &quot;~&quot; , count , CRLF , frame* ;
+boolean  = &quot;#&quot; , (&quot;t&quot;|&quot;f&quot;) , CRLF ;
+double   = &quot;,&quot; , float-text , CRLF ;
+bignum   = &quot;(&quot; , digit+ , CRLF ;
+verbatim = &quot;=&quot; , length , CRLF , 3OCTET , &quot;:&quot; , (length-3)*OCTET , CRLF ;
+push     = &quot;&gt;&quot; , count , CRLF , frame* ;
+null     = &quot;_&quot; , CRLF ;
+streamed = &quot;$?&quot; , CRLF , ( &quot;;&quot; , chunk-len , CRLF , chunk-len*OCTET )* , &quot;;0&quot; , CRLF ;</code></pre>
+<p>A RESP2 connection parsing any of these tags is a protocol error; the connection&#39;s negotiated
+<code>protocol</code> field (set by <code>HELLO</code>) gates acceptance. Applied in Phase 1 (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/blueprint/#sec-13-2">§13.2</a>).</p>
+<h3 id="sec-8-3">8.3 Worked Examples</h3>
+<p><strong><code>SET foo bar EX 10</code>, wire request (RESP2):</strong>
+<code>*5\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n$2\r\nEX\r\n$2\r\n10\r\n</code> → reply <code>+OK\r\n</code>.</p>
+<p><strong><code>ZADD leaderboard 100 alice</code>, wire request:</strong>
+<code>*4\r\n$4\r\nZADD\r\n$11\r\nleaderboard\r\n$3\r\n100\r\n$5\r\nalice\r\n</code> → reply <code>:1\r\n</code> (one
+new member added).</p>
+<p><strong><code>HELLO 3</code> reply (RESP3 map form) vs the RESP2-flattened equivalent of the same logical map</strong> —
+this is the <a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-1">P1</a>/<a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#inv-11">I11</a> dual-mode encoding in miniature: RESP3 emits
+<code>%7\r\n$6\r\nserver\r\n$5\r\nredis\r\n...</code>; RESP2 emits the same 14 elements as
+<code>*14\r\n$6\r\nserver\r\n$5\r\nredis\r\n...</code> — one flat array, alternating key/value.</p>
+<h3 id="sec-8-4">8.4 Storage Record Layouts</h3>
+<p><strong><code>RedisObject</code> header</strong> (fixed 12 bytes + pointer): <code>kind: u8</code> (ObjectType) | <code>encoding: u8</code> |
+<code>lru_or_lfu: u32</code> (24-bit LRU clock or 8-bit logc + 16-bit decr-time, mode selected by
+<code>maxmemory-policy</code>) | <code>refcount: u32</code> | <code>ptr: ObjectPtr</code> (8 bytes, tagged pointer/inline union).</p>
+<p><strong>Listpack</strong> (compact encoding for list/hash/set/zset): header <code>total-bytes: u32 LE</code>,
+<code>num-elements: u16 LE</code> (0xFFFF sentinel means &quot;count by scan&quot;), then a sequence of
+<code>{encoding-byte, payload, backlen}</code> entries (backlen enables O(1) reverse traversal), terminated by
+a single <code>0xFF</code> byte.</p>
+<p><strong>Quicklist node</strong> (full encoding for lists ≥ threshold): a doubly-linked list of nodes, each
+holding one listpack of up to <code>list-max-listpack-size</code> entries; each node carries <code>count: u16</code>,
+<code>sz: u32</code> (compressed byte size), <code>compressed: bool</code> (LZF compression of cold nodes,
+<code>PhaseDeferred(&quot;Deferred Features Register&quot;)</code>).</p>
+<p><strong>Intset</strong> (compact encoding for all-integer sets): header <code>encoding: u32 LE</code> (2, 4, or 8 —
+narrowest width that fits every member), <code>length: u32 LE</code>, then a sorted array of fixed-width
+signed integers; insertion upgrades the width in place if a new member exceeds the current one.</p>
+<p><strong>Skiplist node</strong> (full encoding for sorted sets, keyed by <code>(score, member)</code>): see <a class="cite" href="/system-design-blueprints/systems/in-memory-store/blueprint/#sec-11-5">§11.5</a> for the
+exact field signatures; <code>span</code> at each level is the exact node count skipped — the value this
+document&#39;s <a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#inv-13">I13</a> protects.</p>
+<h3 id="sec-8-5">8.5 Encoding State-Transition Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Type</th>
+<th>State A (compact)</th>
+<th>Trigger</th>
+<th>State B (full)</th>
+<th>Reversible?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Hash</td>
+<td><code>ListpackHash</code></td>
+<td>entries &gt; <code>hash-max-listpack-entries</code> (128) OR any value &gt; <code>hash-max-listpack-value</code> (64B)</td>
+<td><code>Hashtable</code></td>
+<td>No (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-3">P3</a>)</td>
+</tr>
+<tr>
+<td>List</td>
+<td><code>ListpackList</code></td>
+<td>entries &gt; <code>list-max-listpack-size</code> (128) OR any entry &gt; 64B</td>
+<td><code>Quicklist</code></td>
+<td>No</td>
+</tr>
+<tr>
+<td>Set (int)</td>
+<td><code>Intset</code></td>
+<td>non-integer member added OR entries &gt; <code>set-max-intset-entries</code> (512)</td>
+<td><code>ListpackSet</code> or <code>HashtableSet</code></td>
+<td>No</td>
+</tr>
+<tr>
+<td>Set (str)</td>
+<td><code>ListpackSet</code></td>
+<td>entries &gt; <code>set-max-listpack-entries</code> (128) OR any member &gt; 64B</td>
+<td><code>HashtableSet</code></td>
+<td>No</td>
+</tr>
+<tr>
+<td>Zset</td>
+<td><code>ListpackZset</code></td>
+<td>entries &gt; <code>zset-max-listpack-entries</code> (128) OR any member &gt; 64B</td>
+<td><code>Skiplist</code> + <code>Hashtable</code></td>
+<td>No</td>
+</tr>
+<tr>
+<td>Connection protocol</td>
+<td><code>Resp2</code></td>
+<td>client sends <code>HELLO 3</code></td>
+<td><code>Resp3</code></td>
+<td>Yes (<code>HELLO 2</code> reverts)</td>
+</tr>
+<tr>
+<td>Transaction</td>
+<td><code>Normal</code></td>
+<td>client sends <code>MULTI</code></td>
+<td><code>Queueing</code> → (<code>EXEC</code>/<code>DISCARD</code>) → <code>Normal</code></td>
+<td>Yes (per-transaction)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Connection Protocol State Machine</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">stateDiagram-v2
+  state &quot;QueueingMode with DIRTY_CAS=1&quot; as QueueingDirty
+  [*] --&gt; New
+  New --&gt; Resp2Established: HELLO 2 / no HELLO
+  New --&gt; Resp3Established: HELLO 3
+  Resp2Established --&gt; Authenticated: AUTH ok
+  Resp3Established --&gt; Authenticated: AUTH ok
+  Authenticated --&gt; PubSubMode: SUBSCRIBE / PSUBSCRIBE
+  PubSubMode --&gt; Authenticated: UNSUBSCRIBE (all)
+  Authenticated --&gt; QueueingMode: MULTI
+  QueueingMode --&gt; Authenticated: EXEC or DISCARD
+  QueueingMode --&gt; QueueingDirty: a watched key mutates (I9)
+  QueueingDirty --&gt; Authenticated: EXEC, nil reply</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.6.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>   New ──HELLO 2 / no HELLO──▶ Resp2Established
+   New ──HELLO 3────────────▶ Resp3Established
+   {Resp2|Resp3}Established ──AUTH ok──▶ Authenticated
+   Authenticated ──SUBSCRIBE/PSUBSCRIBE──▶ PubSubMode ──UNSUBSCRIBE(all)──▶ Authenticated
+   Authenticated ──MULTI──▶ QueueingMode ──EXEC or DISCARD──▶ Authenticated
+   QueueingMode ──a watched key mutates (I9)──▶ QueueingMode[DIRTY_CAS=1] ──EXEC──▶ nil reply, Authenticated</code></pre></details>
+<h3 id="sec-8-7">8.7 Malformed-Input Examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input bytes</th>
+<th>Parser result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>*3\r\n$3\r\nSET\r\n$-1\r\n</code></td>
+<td>incomplete frame (nil bulk string mid-array is unexpected here) → parser awaits more bytes, then errors <code>ERR Protocol error: expected &#39;$&#39;, got...</code> once a mismatched tag arrives</td>
+</tr>
+<tr>
+<td><code>$6000000000\r\n...</code></td>
+<td><code>ERR Protocol error: invalid bulk length</code> (exceeds <code>proto-max-bulk-len</code>, 512 MiB)</td>
+</tr>
+<tr>
+<td><code>*abc\r\n</code></td>
+<td><code>ERR Protocol error: invalid multibulk length</code> (non-numeric count)</td>
+</tr>
+<tr>
+<td><code>+OK</code> (no CRLF, connection closes)</td>
+<td>incomplete frame forever — read loop terminates on peer close (<code>n == 0</code>), no panic</td>
+</tr>
+<tr>
+<td><code>%2\r\n...</code> sent on a RESP2 connection</td>
+<td><code>ERR Protocol error: unknown RESP3 type &#39;%&#39; on RESP2 connection</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-8">8.8 Failure-Path Example</h3>
+<p>An AOF rewrite child (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/blueprint/#sec-17-2">§17.2</a>) crashes after writing 60% of the new file. The dispatcher continues
+appending to the <strong>old</strong> AOF and to the in-memory rewrite buffer throughout — the old file is never
+truncated until the new one is confirmed complete via a trailing checksum record. On restart, the
+loader (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/blueprint/#sec-17-4">§17.4</a>) detects the new file&#39;s missing/short checksum trailer, discards it, and loads the
+old AOF instead — zero data loss, one skipped rewrite (telemetry: <code>store_aof_rewrite_failures_total</code>
+increments; Pitfall cross-reference: <a class="cite" href="/system-design-blueprints/systems/in-memory-store/blueprint/#sec-17-8">§17.8</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-1">P1</a> — Wire compatibility is the contract.</strong> Every byte the engine emits is the byte real <code>redis-cli</code> and client libraries expect. <em>Tradeoff:</em> forecloses inventing a cleaner protocol. <em>Operational implication:</em> the conformance suite (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/blueprint/#sec-28">§28</a>) replays recorded traces and asserts byte-identical responses. <em>Violation:</em> any deviation silently breaks every client library in the wild, not just ours.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-2">P2</a> — One dispatcher per shard.</strong> Concurrency comes from sharding, never fine-grained locking. <em>Tradeoff:</em> no intra-shard parallelism. <em>Operational implication:</em> throughput scales with shard count up to core count (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/numbers/#sec-4">§4</a>). <em>Violation:</em> introducing a lock inside a shard reintroduces the entire reader-writer-lock bug class this design exists to avoid.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-3">P3</a> — Two encodings per data type.</strong> Compact (<code>listpack</code>/<code>intset</code>) for small collections, full (<code>hashtable</code>/<code>skiplist</code>/<code>quicklist</code>) otherwise; conversion is one-way. <em>Tradeoff:</em> a key that shrinks below threshold never reverts, wasting some memory. <em>Operational implication:</em> <code>OBJECT ENCODING</code> is a supported introspection surface operators rely on. <em>Violation:</em> skipping compact encodings inflates per-key memory 3–8× on small-collection-heavy workloads (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#inv-3">I3</a>).</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-4">P4</a> — Persistence is asynchronous; durability is configurable.</strong> AOF buffers and flushes on a cadence (<code>always</code>/<code>everysec</code>/<code>no</code>); RDB snapshots never block the dispatcher. <em>Tradeoff:</em> <code>everysec</code> accepts up to 1s of data loss. <em>Operational implication:</em> the durability knob is a documented SLA, not an implementation detail. <em>Violation:</em> a synchronous fsync on the dispatcher thread freezes every shard client (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/blueprint/#sec-17-8">§17.8</a>).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-5">P5</a> — The command log is the source of truth for replication.</strong> AOF and replication share one serialization path. <em>Tradeoff:</em> replication cannot diverge from persisted state by design. <em>Operational implication:</em> PSYNC2 partial resync reuses the same backlog format as AOF framing. <em>Violation:</em> a second, independent replication encoding doubles the surface for wire-format bugs.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-6">P6</a> — The cluster is a slot map, not a hash ring.</strong> 16,384 fixed slots, gossiped ownership. <em>Tradeoff:</em> re-sharding is coarser-grained than ring rebalancing. <em>Operational implication:</em> <code>MOVED</code>/<code>ASK</code> redirection is deterministic and inspectable via <code>CLUSTER SLOTS</code>. <em>Violation:</em> substituting consistent hashing breaks wire compatibility with every real Redis Cluster client (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#inv-8">I8</a>).</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-7">P7</a> — No silent fallbacks.</strong> A command&#39;s documented edge-case behavior is exact, never approximated. <em>Tradeoff:</em> more branches per command. <em>Operational implication:</em> the conformance suite encodes every documented distinction (e.g. <code>LPOP</code> nil vs empty-array). <em>Violation:</em> client libraries that pattern-match on exact reply shapes break silently.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-8">P8</a> — Determinism is the default for anything touching persistence.</strong> AOF/RDB replay is bit-deterministic given a starting point and a command log; non-deterministic commands (<code>SRANDMEMBER</code>, <code>SPOP</code>) are seeded and the seed is recorded. <em>Tradeoff:</em> extra bookkeeping per random command. <em>Operational implication:</em> replay-based debugging is possible. <em>Violation:</em> a replica or AOF-replay that samples independently diverges from the leader silently (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#inv-4">I4</a>).</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-9">P9</a> — Eviction policy is the store&#39;s; the algorithm is delegated.</strong> The store owns the trigger (<code>maxmemory</code> watermark) and candidate-set construction; the LRU/LFU cache engine (project 59) owns the algorithm. <em>Tradeoff:</em> a crate boundary between trigger and algorithm. <em>Operational implication:</em> eviction policies are swappable without touching the dispatcher. <em>Violation:</em> inlining eviction logic into the dispatcher couples two independently-evolving concerns (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/trade-offs/#adr-12">ADR-12</a>).</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-10">P10</a> — Strings are bytes.</strong> Never validated as UTF-8, never interpreted except in the documented numeric-conversion commands. <em>Tradeoff:</em> no built-in encoding safety net for application bugs. <em>Operational implication:</em> binary-safe keys and values are a first-class guarantee. <em>Violation:</em> any UTF-8 validation on the write path silently corrupts binary payloads (image blobs, protobuf, etc.).</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-11">P11</a> — Backpressure over unbounded buffering.</strong> A slow client is bounded and eventually disconnected, never allowed to grow the server&#39;s memory without limit. <em>Tradeoff:</em> a legitimately slow-but-valid subscriber can be dropped. <em>Operational implication:</em> <code>client-output-buffer-limit</code> is a tunable, documented SLA (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/trade-offs/#adr-22">ADR-22</a>). <em>Violation:</em> unbounded per-connection buffers turn one slow subscriber into a cluster-wide OOM (<a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#t-5">T5</a>, <a class="cite" href="/system-design-blueprints/systems/in-memory-store/reliability/#fm-6">FM-6</a>).</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-12">P12</a> — Fail closed on ambiguity.</strong> ACL and auth decisions default-deny when a rule set is partial or conflicting. <em>Tradeoff:</em> a misconfigured ACL rejects more than a permissive default would. <em>Operational implication:</em> <code>ACL LIST</code>/<code>ACL GETUSER</code> must always show the effective, fully-resolved rule set, not just the configured deltas. <em>Violation:</em> default-allow on ambiguity is the root cause class of most real-world ACL privilege-escalation incidents.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-13">P13</a> — Observability is not optional.</strong> Every subsystem emits a trace span and a metric; a subsystem that cannot be measured cannot be operated. <em>Tradeoff:</em> instrumentation overhead on the hot path (bounded, see M-table <a class="cite" href="/system-design-blueprints/systems/in-memory-store/numbers/#sec-30">§30</a>). <em>Operational implication:</em> the dashboards in <a class="cite" href="/system-design-blueprints/systems/in-memory-store/blueprint/#sec-26">§26</a> are buildable from day one, not retrofitted. <em>Violation:</em> an uninstrumented subsystem is undebuggable in production by construction, not by accident.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/in-memory-store/architecture/#p-14">P14</a> — Configuration is versioned and reloadable without full data loss.</strong> <code>CONFIG SET</code> applies at runtime where safe (<code>maxmemory</code>, <code>appendfsync</code>); restart is required only where correctness cannot otherwise be guaranteed (<code>cluster-enabled</code>). <em>Tradeoff:</em> a two-tier config model (hot-reloadable vs restart-required) is more complex than &quot;everything requires restart.&quot; <em>Operational implication:</em> <code>CONFIG GET</code>/<code>CONFIG SET</code>/<code>CONFIG REWRITE</code> must agree with the running process, not just the file on disk. <em>Violation:</em> a config surface that silently ignores a runtime <code>CONFIG SET</code> produces the exact &quot;why didn&#39;t my change take effect&quot; incident class operators hate most.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

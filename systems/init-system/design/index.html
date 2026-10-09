@@ -1,0 +1,296 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Init System — Design · Engineering Blueprints</title><meta name="description" content="Init System, lld: core types, repo tree, file inventory. Build, from scratch in Rust, a PID-1-capable init system in the systemd / launchd / runit / OpenRC tradition: a declarative unit model, a dependency-ordered activation engine, per-process supervision…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <a href="/system-design-blueprints/systems/init-system/">Init System</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Init System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux+qemu</li> <li>12 phases</li> <li>~31 weeks</li> <li>2,533 lines</li> <li>blueprint #151</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/init-system/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/init-system/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/init-system/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/init-system/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/init-system/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/init-system/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/init-system/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/init-system/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/init-system/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/init-system/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Init System — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/init-system/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>// is-core
+pub struct UnitName(String);                 // &quot;foo.service&quot; — kind-qualified
+pub enum UnitKind {
+    Service, Socket, Timer, Path, Target, Slice, Scope, Device, Mount,
+}
+pub struct Unit {
+    pub name: UnitName,
+    pub kind: UnitKind,
+    pub state: UnitState,                    // §8.3 FSM; owned, mutated only by is-txn
+    pub config: UnitConfig,                   // immutable post-parse; is-parser output
+    pub deps: Dependencies,                   // owned by is-graph; rebuilt, not patched
+    pub cgroup: Option&lt;CgroupPath&gt;,           // Some() once is-cgroup has entered it
+    pub pid: Option&lt;Pid&gt;,                     // Some() only while Activating|Active
+}
+pub enum UnitState {
+    Inactive, Activating, Active, Deactivating, Failed, Maintenance,
+}
+pub struct Dependencies {                     // BTreeSet: P13 determinism
+    pub wants: BTreeSet&lt;UnitName&gt;,
+    pub requires: BTreeSet&lt;UnitName&gt;,
+    pub after: BTreeSet&lt;UnitName&gt;,
+    pub before: BTreeSet&lt;UnitName&gt;,
+    pub conflicts: BTreeSet&lt;UnitName&gt;,
+    pub binds_to: BTreeSet&lt;UnitName&gt;,
+}
+pub enum RestartPolicy {
+    No, Always, OnSuccess, OnFailure, OnAbnormal, OnAbort, OnWatchdog,
+}
+pub enum InitError {                          // taxonomy referenced by every crate
+    ParseError { key: String, value: String, unit: UnitName },
+    GraphCycle { members: Vec&lt;UnitName&gt; },
+    MissingRequire { unit: UnitName, target: UnitName },
+    ActivationTimeout { unit: UnitName, elapsed_ms: u64 },
+    CgroupError { unit: UnitName, errno: i32 },
+}</code></pre><pre class="code"><code>// is-parser
+pub struct UnitConfig {                       // serialization: parsed, never re-serialized to disk
+    pub description: Option&lt;String&gt;,
+    pub exec_start: Option&lt;Vec&lt;String&gt;&gt;,
+    pub restart: RestartPolicy,
+    pub restart_sec: Duration,
+    pub start_limit_burst: u32,
+    pub start_limit_interval: Duration,
+    pub memory_max: Option&lt;u64&gt;,
+    pub cpu_weight: Option&lt;u32&gt;,
+    pub wanted_by: BTreeSet&lt;UnitName&gt;,
+}
+pub fn parse_unit(path: &amp;Path) -&gt; Result&lt;UnitConfig, InitError&gt;;   // pure, no I/O side effects beyond read
+
+// is-graph
+pub struct Graph { /* adjacency, ownership: is-graph exclusively */ }
+pub fn build(units: &amp;[Unit]) -&gt; Result&lt;Graph, InitError&gt;;
+pub fn detect_cycles(g: &amp;Graph) -&gt; Vec&lt;Vec&lt;UnitName&gt;&gt;;             // Tarjan SCC, I1
+
+// is-txn
+pub struct Transaction {                      // ownership: is-txn; concurrency: single-writer
+    pub target: UnitName,
+    pub batches: Vec&lt;Vec&lt;UnitName&gt;&gt;,          // topological batches, I6
+}
+pub fn plan(g: &amp;Graph, target: &amp;UnitName) -&gt; Result&lt;Transaction, InitError&gt;;
+pub fn commit(t: Transaction) -&gt; ActivationReport;</code></pre><pre class="code"><code>// is-supervisor
+pub struct SupervisorRecord {                 // persistence: in-memory only, rebuilt on restart
+    pub unit: UnitName,
+    pub pid: Pid,
+    pub restart_count: u32,
+    pub window_start: Instant,                // CLOCK_MONOTONIC, ADR-19
+}
+pub fn spawn(cfg: &amp;UnitConfig, cgroup: &amp;CgroupPath) -&gt; Result&lt;Pid, InitError&gt;;
+
+// is-cgroup
+pub struct CgroupPath(PathBuf);
+pub struct Limits { pub memory_max: Option&lt;u64&gt;, pub cpu_weight: Option&lt;u32&gt;, pub io_weight: Option&lt;u32&gt; }
+pub fn create_and_enter(path: &amp;CgroupPath, limits: &amp;Limits) -&gt; Result&lt;(), InitError&gt;;  // I12 ordering
+
+// is-socket
+pub struct SocketUnit { pub listen: SocketAddrSpec, pub accept: bool }
+pub fn activate_on_connection(s: &amp;SocketUnit) -&gt; Result&lt;OwnedFd, InitError&gt;;
+
+// is-journal
+pub struct JournalEntry {                     // wire/storage record layout
+    pub unit: UnitName,
+    pub ts_realtime: SystemTime,               // ADR-19
+    pub priority: u8,
+    pub fields: BTreeMap&lt;String, String&gt;,
+}
+pub fn append(e: JournalEntry) -&gt; Result&lt;(), InitError&gt;;           // I9 durability contract</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>Init-System/
+├── README.md                      # overview, quickstart, links to docs/
+├── CONTRIBUTING.md                # dev workflow, review policy
+├── CODE_OF_CONDUCT.md             # community standard
+├── SECURITY.md                    # vuln disclosure process
+├── CHANGELOG.md                   # per-release notes (ADR-17 SemVer)
+├── BLUEPRINT_LOG.md                # decisions log vs. this document
+├── BUILD_PLAN.md                  # phase-by-phase execution tracker
+├── LICENSE-MIT / LICENSE-APACHE   # ADR-21
+├── Makefile                       # build/test/fuzz/bench entry points
+├── Dockerfile                     # QEMU-boot test image
+├── docker-compose.yml             # local multi-service dev harness
+├── .github/workflows/
+│   ├── ci.yml                     # build+test matrix (ADR-13)
+│   └── qemu-boot.yml              # boot smoke test
+└── crates/
+    ├── is-core/                   # Unit, UnitKind, UnitState, error types (§11)
+    ├── is-parser/                 # unit-file lexer/parser, drop-in resolver
+    ├── is-graph/                  # DAG build, Tarjan cycle detection
+    ├── is-txn/                    # transaction engine, transitive closure
+    ├── is-activate/                # parallel batch activation engine
+    ├── is-supervisor/              # process FSM, restart/backoff policy
+    ├── is-reap/                    # signalfd loop, orphan reaping
+    ├── is-cgroup/                  # cgroups v2 create/enter/limits
+    ├── is-socket/                  # socket-activation, LISTEN_FDS protocol
+    ├── is-bus/                     # control-bus (D-Bus-like) over UDS
+    ├── is-target/                  # targets/runlevels, boot sequencing
+    ├── is-journal/                 # structured log capture + binary store
+    ├── is-shutdown/                 # reverse-order shutdown transaction
+    ├── is-cli/                     # is-ctl, the systemctl-like CLI
+    ├── is-verifier/                 # deterministic simulator (§7)
+    ├── is-bench/                   # criterion benchmarks (§30)
+    └── is-fuzz/                    # cargo-fuzz targets (parser, txn engine)</code></pre><pre class="diagram"><code>Init-System/ (continued)
+├── conformance/
+│   └── buckets/
+│       ├── parser/                 # unit-file parse fixtures
+│       ├── graph/                  # dependency-graph fixtures
+│       ├── txn/                    # transaction-engine fixtures
+│       ├── activate/               # activation-order fixtures
+│       ├── supervisor/             # FSM + restart-policy fixtures
+│       ├── cgroup/                 # cgroup limit-enforcement fixtures
+│       ├── socket-act/             # socket-activation fixtures
+│       ├── target/                 # targets/boot-sequencing fixtures
+│       ├── journal/                 # journal durability fixtures
+│       ├── shutdown/                # shutdown-order fixtures
+│       └── differential-systemd/    # curated-unit-set parity fixtures
+├── fuzz/
+│   ├── fuzz_targets/parse_unit.rs  # signature only, §11
+│   └── fuzz_targets/txn_replay.rs  # signature only, §11
+├── docs/
+│   ├── adr/                        # one file per ADR-##
+│   ├── runbooks/                   # §26 Operational Readiness runbooks
+│   ├── threat-model/               # §24 detail
+│   ├── performance/                # §30 detail
+│   └── failure-analysis/           # §25 detail
+├── benchmarks/                     # criterion output baselines
+├── examples/                       # sample unit files (web.service, db.service)
+├── templates/                      # unit-file skeleton templates
+├── scripts/                        # dev-loop helper scripts
+├── tools/                          # journal-dump, graph-visualize CLIs
+├── notes/                          # design-session notes
+├── papers/                         # local copies of cited freedesktop docs
+├── legal/                          # license text, NOTICE
+└── brand/                          # logo, naming assets</code></pre> </section><section aria-labelledby="sec-39"> <h2 id="sec-39">File inventory <small class="muted">(Appendix A · 58 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File / Directory</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>README.md</code></td><td>project overview, quickstart</td></tr><tr><td><code>CONTRIBUTING.md</code></td><td>dev workflow, review policy</td></tr><tr><td><code>CODE_OF_CONDUCT.md</code></td><td>community standard</td></tr><tr><td><code>SECURITY.md</code></td><td>vulnerability disclosure process</td></tr><tr><td><code>CHANGELOG.md</code></td><td>per-release notes (<a class="cite" href="/system-design-blueprints/systems/init-system/trade-offs/#adr-17">ADR-17</a>)</td></tr><tr><td><code>BLUEPRINT_LOG.md</code></td><td>running decisions log vs. this document</td></tr><tr><td><code>BUILD_PLAN.md</code></td><td>phase-by-phase execution tracker</td></tr><tr><td><code>LICENSE-MIT</code>, <code>LICENSE-APACHE</code></td><td>dual license text (<a class="cite" href="/system-design-blueprints/systems/init-system/trade-offs/#adr-21">ADR-21</a>)</td></tr><tr><td><code>Makefile</code></td><td>build/test/fuzz/bench entry points</td></tr><tr><td><code>Dockerfile</code></td><td>QEMU-boot test image definition</td></tr><tr><td><code>docker-compose.yml</code></td><td>local multi-service dev harness</td></tr><tr><td><code>.github/workflows/ci.yml</code></td><td>build+test CI matrix (<a class="cite" href="/system-design-blueprints/systems/init-system/trade-offs/#adr-13">ADR-13</a>)</td></tr><tr><td><code>.github/workflows/qemu-boot.yml</code></td><td>QEMU boot smoke test (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-12">§12</a>)</td></tr><tr><td><code>crates/is-core/</code></td><td><code>Unit</code>, <code>UnitKind</code>, <code>UnitState</code>, error types (<a class="cite" href="/system-design-blueprints/systems/init-system/design/#sec-11">§11</a>)</td></tr><tr><td><code>crates/is-parser/</code></td><td>unit-file lexer/parser, drop-in resolver (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-13">§13</a>)</td></tr><tr><td><code>crates/is-graph/</code></td><td>DAG build, Tarjan cycle detection (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-14">§14</a>)</td></tr><tr><td><code>crates/is-txn/</code></td><td>transaction engine, transitive closure (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-15">§15</a>)</td></tr><tr><td><code>crates/is-activate/</code></td><td>parallel batch activation engine (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-16">§16</a>)</td></tr><tr><td><code>crates/is-supervisor/</code></td><td>process FSM, restart/backoff policy (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-17">§17</a>)</td></tr><tr><td><code>crates/is-reap/</code></td><td>signalfd loop, orphan reaping (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-18">§18</a>)</td></tr><tr><td><code>crates/is-cgroup/</code></td><td>cgroups v2 create/enter/limits (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-19">§19</a>)</td></tr><tr><td><code>crates/is-socket/</code></td><td>socket-activation, <code>LISTEN_FDS</code> protocol (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-20">§20</a>)</td></tr><tr><td><code>crates/is-bus/</code></td><td>control bus (D-Bus-like) over UDS (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-20">§20</a>)</td></tr><tr><td><code>crates/is-target/</code></td><td>targets/runlevels, boot sequencing (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-21">§21</a>)</td></tr><tr><td><code>crates/is-journal/</code></td><td>structured log capture + binary store (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-22">§22</a>)</td></tr><tr><td><code>crates/is-shutdown/</code></td><td>reverse-order shutdown transaction (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-23">§23</a>)</td></tr><tr><td><code>crates/is-cli/</code></td><td><code>is-ctl</code>, the systemctl-like CLI</td></tr><tr><td><code>crates/is-verifier/</code></td><td>deterministic simulator (<a class="cite" href="/system-design-blueprints/systems/init-system/reliability/#sec-7">§7</a>)</td></tr><tr><td><code>crates/is-bench/</code></td><td>criterion benchmarks (<a class="cite" href="/system-design-blueprints/systems/init-system/numbers/#sec-30">§30</a>)</td></tr><tr><td><code>crates/is-fuzz/</code></td><td><code>cargo-fuzz</code> targets (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-28">§28</a>)</td></tr><tr><td><code>conformance/buckets/parser/</code></td><td>unit-file parse fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-13-5">§13.5</a>)</td></tr><tr><td><code>conformance/buckets/graph/</code></td><td>dependency-graph fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-14-5">§14.5</a>)</td></tr><tr><td><code>conformance/buckets/txn/</code></td><td>transaction-engine fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-15-5">§15.5</a>)</td></tr><tr><td><code>conformance/buckets/activate/</code></td><td>activation-order fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-16-5">§16.5</a>)</td></tr><tr><td><code>conformance/buckets/supervisor/</code></td><td>FSM + restart-policy fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-17-5">§17.5</a>, <a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-18-5">§18.5</a>)</td></tr><tr><td><code>conformance/buckets/cgroup/</code></td><td>cgroup limit-enforcement fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-19-5">§19.5</a>)</td></tr><tr><td><code>conformance/buckets/socket-act/</code></td><td>socket-activation fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-20-5">§20.5</a>)</td></tr><tr><td><code>conformance/buckets/target/</code></td><td>targets/boot-sequencing fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-21-5">§21.5</a>)</td></tr><tr><td><code>conformance/buckets/journal/</code></td><td>journal durability fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-22-5">§22.5</a>)</td></tr><tr><td><code>conformance/buckets/shutdown/</code></td><td>shutdown-order fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-23-5">§23.5</a>)</td></tr><tr><td><code>conformance/buckets/differential-systemd/</code></td><td>curated-unit-set parity fixtures (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-28">§28</a>)</td></tr><tr><td><code>fuzz/fuzz_targets/parse_unit.rs</code></td><td>fuzz target signature (<a class="cite" href="/system-design-blueprints/systems/init-system/design/#sec-11">§11</a>, <a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-28">§28</a>)</td></tr><tr><td><code>fuzz/fuzz_targets/txn_replay.rs</code></td><td>fuzz target signature (<a class="cite" href="/system-design-blueprints/systems/init-system/design/#sec-11">§11</a>, <a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-28">§28</a>)</td></tr><tr><td><code>docs/adr/</code></td><td>one file per ADR-## (<a class="cite" href="/system-design-blueprints/systems/init-system/trade-offs/#sec-9">§9</a>)</td></tr><tr><td><code>docs/runbooks/</code></td><td>operational runbooks (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-26">§26</a>)</td></tr><tr><td><code>docs/threat-model/</code></td><td>Threat Model detail (<a class="cite" href="/system-design-blueprints/systems/init-system/reliability/#sec-24">§24</a>)</td></tr><tr><td><code>docs/performance/</code></td><td>Performance Engineering detail (<a class="cite" href="/system-design-blueprints/systems/init-system/numbers/#sec-30">§30</a>)</td></tr><tr><td><code>docs/failure-analysis/</code></td><td>Failure Modes detail (<a class="cite" href="/system-design-blueprints/systems/init-system/reliability/#sec-25">§25</a>)</td></tr><tr><td><code>benchmarks/</code></td><td>criterion output baselines</td></tr><tr><td><code>examples/</code></td><td>sample unit files (<code>web.service</code>, <code>db.service</code>)</td></tr><tr><td><code>templates/</code></td><td>unit-file skeleton templates</td></tr><tr><td><code>scripts/</code></td><td>dev-loop helper scripts</td></tr><tr><td><code>tools/graph-visualize</code></td><td>Graphviz DOT export CLI (<a class="cite" href="/system-design-blueprints/systems/init-system/blueprint/#sec-14-3">§14.3</a>)</td></tr><tr><td><code>tools/journal-dump</code></td><td>raw journal-segment inspection CLI (<a class="cite" href="/system-design-blueprints/systems/init-system/build/#sec-22">§22</a>)</td></tr><tr><td><code>notes/</code></td><td>design-session notes</td></tr><tr><td><code>papers/</code></td><td>local copies of cited freedesktop/kernel docs (<a class="cite" href="/system-design-blueprints/systems/init-system/study/#sec-5">§5</a>)</td></tr><tr><td><code>legal/</code></td><td>license text, NOTICE</td></tr><tr><td><code>brand/</code></td><td>logo, naming assets</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

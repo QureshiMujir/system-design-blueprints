@@ -1,0 +1,296 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Software Transactional Memory — Architecture · Engineering Blueprints</title><meta name="description" content="Software Transactional Memory, hld: §3 overview + §8 domain model. Build a production-grade software transactional memory (STM) library in Rust: a TVar<T> transactional-cell type, a per-thread transaction context that accumulates a read set and a write set, a…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <a href="/system-design-blueprints/systems/software-transactional-memory/">Software Transactional Memory</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Software Transactional Memory</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~19 weeks</li> <li>1,808 lines</li> <li>blueprint #130</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/software-transactional-memory/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/software-transactional-memory/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/software-transactional-memory/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/software-transactional-memory/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/software-transactional-memory/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/software-transactional-memory/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/software-transactional-memory/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/software-transactional-memory/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/software-transactional-memory/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/software-transactional-memory/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Software Transactional Memory — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌────────────────────────────────────────────────────────────────┐
+│ User code: atomically(|tx| ...), TVar::new(v), tx.read(v),     │
+│ tx.write(v,x), retry(), or_else(a,b), nested atomically(...)    │
+└──────────────────────────────┬─────────────────────────────────┘
+                               │
+┌──────────────────────────────▼─────────────────────────────────┐
+│ stm-core facade (§11): TVar&lt;T&gt;::new, atomically, try_atomically,│
+│ retry, or_else                                                  │
+└──────────────────────────────┬─────────────────────────────────┘
+                               │
+┌──────────────────────────────▼─────────────────────────────────┐
+│ Tx (§11): read_set, write_set, start_version, aborted_count,    │
+│ parent — stack-allocated per atomically call (ADR-21)           │
+└──────────────────────────────┬─────────────────────────────────┘
+                               │
+┌──────────────────────────────▼─────────────────────────────────┐
+│ stm-clock: TL2 commit state machine (§14)                       │
+│ 1 sort+lock write set  2 fetch_add clock  3 validate read set    │
+│ 4 publish+unlock (success)  5 unlock+abort (validation fails)    │
+└──────┬───────────────────────┬─────────────────────┬───────────┘
+       │                       │                     │
+┌──────▼─────────┐   ┌─────────▼──────────┐  ┌───────▼──────────┐
+│ TVar&lt;T&gt; (§11)   │   │ stm-wait (§15)     │  │ stm-gc (§19)     │
+│ value:AtomicPtr │   │ per-TVar wait-set; │  │ crossbeam-epoch; │
+│ vlock:AtomicU64 │   │ retry registers,   │  │ retires old value│
+│ (§8.3 layout)   │   │ commit drains+wakes│  │ on every write   │
+└─────────────────┘   └────────────────────┘  └──────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ stm-verify (§20): opacity oracle + loom (exhaustive) + shuttle    │
+│ (randomized) — the correctness gate every commit-path change      │
+│ must clear before merge                                            │
+└────────────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>User code</strong> issues <code>atomically(|tx| ...)</code> closures; <code>tx</code> never escapes the closure (a lifetime parameter enforces this, <a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/trade-offs/#adr-1">ADR-01</a>, P5) — the sole entry point; there is no way to read or write a <code>TVar</code> outside a transaction.</p>
+<p><strong>stm-core facade</strong> is the crate-root re-export surface (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/design/#sec-11">§11</a>); it owns no state — every call forwards into a <code>Tx</code> or a <code>TVar</code>.</p>
+<p><strong>Tx</strong> accumulates the read set and write set as the closure runs; stack-allocated per <code>atomically</code> call (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/trade-offs/#adr-21">ADR-21</a>) with inline capacity 8 (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/trade-offs/#adr-22">ADR-22</a>) sized to the common small-transaction case.</p>
+<p><strong>stm-clock</strong> is the only contention point in the architecture (P1): reads/writes during the transaction body touch no shared state beyond the <code>TVar</code>&#39;s own fields; conflicts surface exclusively at the five-step commit sequence (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-14-2">§14.2</a>).</p>
+<p><strong>TVar&lt;T&gt;</strong> is the shared transactional cell: a version-and-lock word packed into one <code>AtomicU64</code> (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-5">I5</a>) plus an <code>AtomicPtr&lt;T&gt;</code> to the current heap-allocated value (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/trade-offs/#adr-3">ADR-03</a>).</p>
+<p><strong>stm-wait</strong> holds, per <code>TVar</code>, the set of parked transactions waiting on a <code>retry</code>; a successful commit drains and wakes every waiter whose read set included that <code>TVar</code> (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-15-3">§15.3</a>).</p>
+<p><strong>stm-gc</strong> retires the old heap value of every write into <code>crossbeam-epoch</code>&#39;s reclamation list; a value is freed only once every transaction that could hold a pointer to it has advanced past the epoch it was retired in (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-19-1">§19.1</a>).</p>
+<p><strong>stm-verify</strong> is off the runtime critical path but on the CI critical path: it proves the other six boxes satisfy opacity (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-1">I1</a>) under every interleaving it can enumerate or sample (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/build/#sec-20">§20</a>).</p>
+<p>Four properties referenced throughout: optimistic reads (contention only at commit, P1); the version clock totally orders commits (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-2">I2</a>); validation is per-commit not per-read (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/architecture/#sec-8-4">§8.4</a>); opacity is the correctness contract, not an optimization (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-1">I1</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 The transaction state machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entry</th>
+<th>Reads/Writes allowed</th>
+<th>Exit transitions</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Active</code></td>
+<td><code>atomically</code> begins; <code>start_version = clock.load()</code></td>
+<td>Yes, into <code>read_set</code>/<code>write_set</code></td>
+<td>→ <code>Committing</code> (body returns) / → <code>Retrying</code> (<code>retry()</code>) / → <code>Aborting</code> (panic/user abort)</td>
+</tr>
+<tr>
+<td><code>Committing</code></td>
+<td>Body returned a value</td>
+<td>No</td>
+<td>→ <code>Committed</code> (validation passes) / → <code>Aborted</code> (validation fails, loop to <code>Active</code> with fresh <code>start_version</code>)</td>
+</tr>
+<tr>
+<td><code>Retrying</code></td>
+<td><code>retry()</code> called, read set non-empty (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-7">I7</a>)</td>
+<td>No</td>
+<td>→ <code>Parked</code> (wait-set registration complete)</td>
+</tr>
+<tr>
+<td><code>Parked</code></td>
+<td>Waker registered on every read-set TVar</td>
+<td>No</td>
+<td>→ <code>Active</code> (a relevant commit drains the wait-set)</td>
+</tr>
+<tr>
+<td><code>Aborting</code></td>
+<td>Validation failed or user abort</td>
+<td>No</td>
+<td>→ <code>Active</code> (retry from scratch, back-off per <a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/build/#sec-17">§17</a>)</td>
+</tr>
+<tr>
+<td><code>Committed</code></td>
+<td>Publish complete, locks released</td>
+<td>—</td>
+<td>Terminal</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Read-set / write-set representation</h3>
+<p><code>read_set: SmallVec&lt;[(TVarId, ObservedVersion); 8]&gt;</code>; <code>write_set: SmallVec&lt;[(TVarId, NewValue); 8]&gt;</code> (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/trade-offs/#adr-22">ADR-22</a>). A <code>tx.write</code> to a TVar already in <code>write_set</code> overwrites the buffered entry (last-write-wins within one transaction); a subsequent <code>tx.read</code> of that same TVar returns the buffered write, never re-touching the shared <code>AtomicPtr</code> (P1).</p>
+<h3 id="sec-8-3">8.3 The versioned-lock schema (TL2)</h3>
+<pre class="diagram"><code>VLock (AtomicU64):
+  bit 0        : locked (1 = held by a committing writer)
+  bits 1..63   : version (monotonic, from the global clock)
+
+encode(version, locked) = (version &lt;&lt; 1) | (locked as u64)
+decode(word)            = (word &gt;&gt; 1, word &amp; 1)</code></pre>
+<p>Lock acquire: CAS <code>(v&lt;&lt;1)|0 → (v&lt;&lt;1)|1</code>. Lock release+publish: store <code>(v_new&lt;&lt;1)|0</code>. Validation: <code>decode(word) == (observed_version, 0)</code> OR the TVar is in our own write set (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-5">I5</a>).</p>
+<h3 id="sec-8-4">8.4 Commit-time validation and conflict detection</h3>
+<p>Conflict is structural: transaction A conflicts with committed B iff <code>A.read_set ∩ B.write_set ≠ ∅</code> and B&#39;s commit version falls inside <code>(A.start_version, A.commit_attempt]</code>. TL2 detects this without a per-object conflict graph — it re-reads each TVar&#39;s current <code>VLock</code> at validation time (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-14-2">§14.2</a> step 4) and compares against the value observed at read time: O(|read_set|) per commit attempt, not O(active transactions) — the key TL2 scaling property (P2, referenced in <a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/numbers/#sec-34">§34</a>).</p>
+<h3 id="sec-8-5">8.5 Worked example — two-account transfer under contention</h3>
+<p>Accounts <code>A = TVar(100)</code>, <code>B = TVar(50)</code>. Thread 1 runs <code>transfer(A, B, 30)</code>: reads <code>A@v0=100</code>, reads <code>B@v0=50</code>, writes <code>A=70</code>, writes <code>B=80</code>. Concurrently thread 2 runs <code>transfer(B, A, 10)</code>: reads <code>B@v0=50</code>, reads <code>A@v0=100</code>, writes <code>B=40</code>, writes <code>A=110</code>.</p>
+<p>Both write sets overlap (<code>{A, B}</code>) — the canonical-order lock (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-14-2">§14.2</a> step 1, sorted by <code>TVarId</code>) means both threads attempt to lock <code>A</code> then <code>B</code> in the same order, so no deadlock occurs; one thread&#39;s CAS on <code>A</code> fails and it aborts before ever locking <code>B</code> (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-3">I3</a>). Say thread 1 wins: locks <code>A</code>, locks <code>B</code>, allocates commit version <code>v1 = clock.fetch_add(1)</code>, validates (both TVars still at <code>v0</code>, locks held by self — valid), publishes <code>A=70, B=80</code> at <code>v1</code>, unlocks. Thread 2&#39;s CAS on <code>A</code> failed at step 2; it aborts, backs off (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-17-1">§17.1</a>, <code>aborted_count=1</code>, no delay yet), retries from scratch with <code>start_version=v1</code>: reads <code>B@v1=80</code>, reads <code>A@v1=70</code>, writes <code>B=70</code>, writes <code>A=80</code>. Commits cleanly. Final state <code>A=80, B=70</code> — the invariant <code>A+B=150</code> holds throughout (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-1">I1</a>: no thread ever observed an inconsistent intermediate sum).</p>
+<h3 id="sec-8-6">8.6 Malformed-input / hazard example — torn reads without commit-time validation (Harris &amp; Fraser, OOPSLA 2003, Fig. 4)</h3>
+<p>Setup: <code>x = TVar(0)</code>, <code>y = TVar(0)</code>; the application invariant <code>x == y</code> is maintained by every committed transaction. A transaction body reads <code>x</code> into a local, then — only when that value is nonzero — busy-waits re-reading <code>y</code> until it too is observed nonzero: a pattern that is legal Rust but pathological under STM, since it never returns to let the runtime validate.</p>
+<pre class="diagram"><code>timeline →
+T:      read(x)=0 ......... [reordered: T now sees x=1] .. read(y) read(y) ...
+Other:            commit: x=1, y=1 (v1)</code></pre>
+<p>If <code>T</code>&#39;s read of <code>x</code> is reordered (by CPU or missing fence) to observe the <em>post-commit</em> value while its later reads of <code>y</code> still observe the <em>pre-commit</em> value, <code>T</code> busy-waits forever: the guard is true but <code>y</code> never becomes nonzero from <code>T</code>&#39;s point of view. <strong>This is not a validation failure — validation never runs, because the transaction body never returns.</strong> TL2&#39;s commit-time check (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-14-2">§14.2</a> step 4) is powerless against a transaction that hangs before reaching it; the defenses are (a) a correct <code>Acquire</code> fence on every TVar read so <code>x</code> and <code>y</code> can never be observed out of commit order (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-4">I4</a>), and (b) <code>--features paranoid</code> per-read validation (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-18-6">§18.6</a>) that aborts as soon as inconsistency is detected. Documented as Threat Model <a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#t-5">T5</a> and Pitfall <a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-18-6">§18.6</a>.</p>
+<h3 id="sec-8-7">8.7 Failure-path example — panic during commit</h3>
+<p>Thread holds locks on <code>{A, B}</code> mid-commit (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-14-2">§14.2</a> step 2 complete, step 4 in progress) when the validation-comparison code panics (e.g., an allocator failure inside the retire path, <a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/build/#sec-19">§19</a>). The commit&#39;s RAII guard (<code>CommitGuard</code>, <a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-14-7">§14.7</a>) runs on unwind: releases every lock acquired so far by storing <code>(observed_version&lt;&lt;1)|0</code> back into each held TVar&#39;s <code>VLock</code>, then propagates the panic to the caller as <code>AbortReason::UserAbort</code> wrapping the original payload. No TVar is left locked (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-8">I8</a>); no partial write is published (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-1">I1</a>). The caller&#39;s <code>atomically</code> does not auto-retry on <code>UserAbort</code> (only on <code>Retry</code>) — the panic surfaces to the application, per P6&#39;s distinction between &quot;wants to wait&quot; and &quot;crashed.&quot;</p>
+<h3 id="sec-8-8">8.8 Write-only transactions (conflict-detection edge case)</h3>
+<p>A transaction that only writes (never reads) a TVar — e.g. an unconditional <code>tx.write(&amp;v, new_value)</code> with no preceding <code>tx.read(&amp;v)</code> — never adds that TVar to its <code>read_set</code> (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/architecture/#sec-8-2">§8.2</a>), and so never validates it against a concurrent writer&#39;s commit (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/architecture/#sec-8-4">§8.4</a>&#39;s validation is defined over the read set, not the write set). This is not a bug: TL2&#39;s correctness argument (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-14-4">§14.4</a>) only requires that a transaction&#39;s <em>read</em> set be consistent at commit; a pure write has no prior observation to be inconsistent with. Two write-only transactions to the same TVar still conflict at the <em>lock-acquisition</em> step (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-14-2">§14.2</a> step 2, <a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#inv-3">I3</a>) — one&#39;s CAS fails and it aborts — so mutual exclusion on the write itself is preserved even though no read-set validation is involved. The distinction matters operationally: a workload dominated by write-only transactions to a shared TVar shows contention exclusively as <code>stm_lock_cas_fail_total</code> (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/reliability/#t-11">T11</a>), not as <code>stm_opacity_violation_total</code>, since there is no read-set-consistency question to violate.</p>
+<h3 id="sec-8-9">8.9 Contention-manager state (detailed in <a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/build/#sec-17">§17</a>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Action</th>
+<th>Exit</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Normal</code></td>
+<td>Default</td>
+<td>Retry immediately or minimal back-off (aborts 1–3)</td>
+<td>→ <code>BackingOff</code> at abort 4</td>
+</tr>
+<tr>
+<td><code>BackingOff</code></td>
+<td><code>aborted_count</code> 4–15</td>
+<td>Exponential spin/yield delay (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-17-4">§17.4</a>)</td>
+<td>→ <code>Priority</code> at abort 16</td>
+</tr>
+<tr>
+<td><code>Priority</code></td>
+<td><code>aborted_count</code> &gt; 16</td>
+<td>May abort a non-priority lock holder on CAS failure (<a class="cite" href="/system-design-blueprints/systems/software-transactional-memory/blueprint/#sec-17-5">§17.5</a>)</td>
+<td>→ <code>Normal</code> after next successful commit</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

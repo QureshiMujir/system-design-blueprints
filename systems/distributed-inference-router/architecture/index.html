@@ -1,0 +1,1121 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Inference Router — Architecture · Engineering Blueprints</title><meta name="description" content="Distributed Inference Router, hld: §3 overview + §8 domain model. Build a from-scratch, production-grade control+data-plane inference router in Rust (edition 2021, MSRV 1.78) that sits in front of a fleet of LLM inference backends (vLLM, SGLang, TGI-style replicas)…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/distributed-inference-router/">Distributed Inference Router</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>Distributed Inference Router</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~24 weeks</li> <li>4,742 lines</li> <li>blueprint #326</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-inference-router/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-inference-router/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-inference-router/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-inference-router/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-inference-router/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-inference-router/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-inference-router/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-inference-router/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-inference-router/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Inference Router — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Architecture Diagram</h3>
+<pre class="diagram"><code>    clients (HTTP/1.1, HTTP/2, gRPC, streaming)
+            |
+      [infr-ingress] parse request; resolve model/adapter; compute prefix_hash
+            |  Request
+      [infr-queue] admission: SLO deadline, priority, bounded queue -&gt; admit / shed / backpressure   &lt;-&gt;   [infr-sched] fairness, autoscale signals
+            |  admitted Request
+      [infr-route] policy: least-load + prefix-cache-aware (PrefixTree longest match) + adapter-aware   &lt;-&gt;   [infr-registry]+[infr-health] (model-&gt;replicas, LoadState, PrefixTree)
+            |  RoutingDecision (BackendId + reason)
+      [infr-dispatch] conn pool -&gt; backend; stream tokens back; retry / hedge / timeout / circuit-break
+            |  token stream
+        back to client          [infr-telemetry] taps every stage</code></pre>
+<h3 id="sec-3-2">3.2 infr-ingress</h3>
+<ul>
+<li><strong>Responsibilities</strong>: accept TCP connections; negotiate HTTP/1.1 upgrade or HTTP/2 ALPN; parse OpenAI-compatible <code>/v1/chat/completions</code> and <code>/v1/completions</code> JSON bodies; resolve <code>model</code> → <code>ModelId</code>, optional <code>adapter</code> → <code>AdapterId</code>; compute <code>prefix_hash</code> (SHA-256 of canonicalized prompt tokens); emit a <code>Request</code> struct; relay SSE (<code>data: &lt;token&gt;\n\n</code>) or chunked transfer back to client byte-for-byte preserving order; execute graceful drain on SIGTERM.</li>
+<li><strong>Concurrency boundary</strong>: one <code>tokio::task</code> per client stream; H2 multiplexes N streams over one TCP connection; backpressure via H2 flow-control windows propagates to upstream client.</li>
+<li><strong>Protocol boundary</strong>: external (client-facing) vs internal (infr-queue channel); no backend protocol here.</li>
+<li><strong>Failure modes</strong>: malformed JSON → 400; unknown model → 404; upstream queue full → 429 with <code>Retry-After</code>; graceful drain timeout → 503.</li>
+</ul>
+<h3 id="sec-3-3">3.3 infr-queue</h3>
+<ul>
+<li><strong>Responsibilities</strong>: per-<code>ModelId</code> bounded <code>VecDeque&lt;Lease&gt;</code>; admit requests by priority (<code>Priority</code> enum: high/normal/low/batch); enforce SLO deadline (<code>Slo.deadline</code>) — shed if wall-clock would exceed deadline before dispatch; emit backpressure signal to infr-ingress when queue at high-water mark; interact with infr-sched for fairness quotas.</li>
+<li><strong>Async queue/channel</strong>: tokio <code>mpsc</code> channel from ingress → queue; semaphore-based bounded admission; <code>tokio::time::sleep_until(deadline)</code> for SLO expiry.</li>
+<li><strong>Bounded-queue invariant</strong>: queue capacity = <code>max_queue_depth</code> per model (config); on saturation, shed lowest-priority first (oldest-deadline-first within same priority); never allocate unbounded.</li>
+<li><strong>Concurrency boundary</strong>: queue actor runs in its own tokio task; registry/health read is read-only shared <code>Arc&lt;RwLock&lt;RegistryState&gt;&gt;</code>.</li>
+<li><strong>Failure modes</strong>: queue full + high-priority request → shed lowest priority to make room; all priorities full → 503; SLO deadline already expired on dequeue → drop + increment <code>requests_expired_total</code>.</li>
+</ul>
+<h3 id="sec-3-4">3.4 infr-sched</h3>
+<ul>
+<li><strong>Responsibilities</strong>: observe queue depths across all models; emit autoscale signals (<code>ScaleSignal { model, direction: Up|Down, reason }</code>) to a broadcast channel consumed by an external HPA/KEDA bridge; enforce per-model and per-tenant quota (token/minute, request/minute); coordinate disaggregated prefill/decode: on prefill completion, emit a decode-continuation <code>Request</code> to the decode-replica queue with affinity to the correct decode backend.</li>
+<li><strong>Disaggregated prefill/decode</strong>: prefill replicas handle prompt evaluation; decode replicas handle token generation; sched tracks <code>PrefillLease</code> → <code>DecodeLease</code> handoff; invariant: decode continuation is only dispatched after prefill KV-cache is confirmed transferred.</li>
+<li><strong>Async queue/channel</strong>: sched subscribes to <code>infr-health</code>&#39;s <code>LoadEvent</code> broadcast; publishes to <code>autoscale_tx: broadcast::Sender&lt;ScaleSignal&gt;</code>.</li>
+<li><strong>Failure modes</strong>: prefill backend fails mid-transfer → abort decode lease; emit <code>InferError::PrefillFailed</code>; retry policy configurable.</li>
+</ul>
+<h3 id="sec-3-5">3.5 infr-registry + infr-health</h3>
+<ul>
+<li><strong>infr-registry responsibilities</strong>: authoritative map <code>ModelId → Vec&lt;Replica&gt;</code>; adapter inventory <code>AdapterId → Vec&lt;BackendId&gt;</code>; capacity descriptors (GPU memory, max_batch); config reload (SIGHUP → atomic <code>Arc</code> swap of <code>RegistryState</code>); exposes read-only handle to infr-route.</li>
+<li><strong>infr-health responsibilities</strong>: periodic heartbeat probes (HTTP GET <code>/health</code>); scrape queue-depth + kv-util from backend metrics endpoints; compute EWMA of <code>ttft_ms</code> per replica; run ejection state machine (<code>Healthy → Degraded → Ejected</code>); publish <code>LoadEvent</code> to broadcast channel; update <code>LoadState</code> in <code>RegistryState</code> via write lock.</li>
+<li><strong>Ejection state machine</strong>: <code>consecutive_failures &gt;= threshold → Ejected</code>; periodic re-probe in Ejected state; re-admit to Degraded on first success; Degraded → Healthy after <code>recovery_probes</code> successes.</li>
+<li><strong>Health invariant</strong>: infr-route reads only replicas with <code>Health::Healthy | Health::Degraded</code> (Degraded used only when no Healthy alternative); <code>Health::Ejected</code> replicas are never returned by <code>route()</code>.</li>
+<li><strong>Persistence boundary</strong>: no persistent storage; state is in-memory; re-bootstraps from config on restart.</li>
+</ul>
+<h3 id="sec-3-6">3.6 infr-route</h3>
+<ul>
+<li><strong>Responsibilities</strong>: given admitted <code>Request</code> + current <code>RegistryState</code>, select <code>BackendId</code> and record <code>RouteReason</code>; policy chain (in order): 1) filter by <code>ModelId</code> + <code>Health</code>; 2) filter by <code>AdapterId</code> if <code>request.adapter.is_some()</code>; 3) <code>PrefixTree</code> longest-prefix match on <code>prefix_hash</code> (prefix-cache-aware); 4) least-load on <code>kv_util * w_kv + ewma_ttft * w_ttft + queue_depth * w_q</code>; 5) consistent hashing for session affinity; 6) fallback: lowest <code>queue_depth</code>.</li>
+<li><strong>PrefixTree</strong>: radix tree keyed by token-prefix byte sequences; leaf = <code>BTreeSet&lt;BackendId&gt;</code> with recency timestamp; updated by infr-health when backends report cache hits; eviction: LRU per prefix entry; thread-safe via <code>RwLock&lt;PrefixTree&gt;</code> (write only on health events, read on every route call — low contention).</li>
+<li><strong>Decision auditability</strong>: every call returns <code>RoutingDecision { backend: BackendId, reason: RouteReason }</code> — <code>RouteReason</code> ∈ <code>{PrefixHit, LeastLoad, AdapterResident, Affinity, Fallback}</code>; logged and counted in infr-telemetry.</li>
+<li><strong>Failure modes</strong>: no healthy replica for model → <code>InferError::NoHealthyReplica</code>; prefix match found but replica now Ejected → fall through to least-load; all replicas at max kv_util → <code>InferError::Overloaded</code> → shed at queue.</li>
+</ul>
+<h3 id="sec-3-7">3.7 infr-dispatch</h3>
+<ul>
+<li><strong>Responsibilities</strong>: maintain per-<code>BackendId</code> HTTP/2 connection pool (<code>hyper</code> client, max <code>pool_size</code> streams); forward <code>Request</code> to chosen <code>BackendId</code> as HTTP POST; stream response tokens back through a <code>tokio::sync::mpsc::Sender&lt;Bytes&gt;</code>; implement retry (on <code>retriable</code> errors + <code>request.idempotent</code>), hedging (second replica after <code>hedge_delay_ms</code> if <code>idempotent</code>), timeout (<code>Slo.ttft_ms</code> for first token, <code>Slo.tpot_ms</code> per token), circuit breaker per backend.</li>
+<li><strong>Circuit breaker</strong>: per-backend <code>AtomicU32</code> failure counter; <code>&gt;= cb_threshold</code> → Open; Open → reject immediately with <code>InferError::CircuitOpen</code>; half-open probe after <code>cb_reset_ms</code>.</li>
+<li><strong>At-most-once invariant</strong>: non-idempotent requests sent to exactly one backend; hedging disabled; retry only on connection errors before first byte sent.</li>
+<li><strong>Order invariant</strong>: SSE/chunked bytes forwarded in arrival order; no reordering in relay buffer.</li>
+<li><strong>Lease invariant</strong>: <code>Lease</code> acquired before dispatch, released (and backend accounting decremented) on completion, error, or timeout.</li>
+<li><strong>Failure modes</strong>: backend 5xx → retry if budget; backend timeout → retry or hedge; all retries exhausted → <code>InferError::BackendExhausted</code>; circuit open → <code>InferError::CircuitOpen</code> → queue may re-route to alternate backend.</li>
+</ul>
+<h3 id="sec-3-8">3.8 infr-telemetry</h3>
+<ul>
+<li><strong>Responsibilities</strong>: tap every stage via <code>tracing::Span</code> and <code>metrics</code> crate (Prometheus-compatible); emit per-route histograms for TTFT, TPOT, queue wait, dispatch latency; counters for cache-hit/miss, shed requests, retry count, circuit-open events; gauges for queue depth, kv_util per backend, inflight requests; export via <code>/metrics</code> HTTP endpoint (Prometheus scrape); structured JSON logs via <code>tracing-subscriber</code>; OpenTelemetry trace export (OTLP/gRPC).</li>
+<li><strong>Instrumentation points</strong>: ingress parse, queue admit/shed, route decision (+ RouteReason), dispatch start/first-byte/last-byte, retry, hedge, circuit-breaker transition.</li>
+<li><strong>No side effects on hot path</strong>: all metric updates are atomic increments or histogram observations; tracing spans are sampled; never blocks the routing hot path.</li>
+</ul>
+<h3 id="sec-3-9">3.9 Data Flow Summary</h3>
+<pre class="diagram"><code>Request path (per request):
+  1. TCP accept → HTTP parse → Request{id, model, adapter, prefix_hash, slo, priority} (infr-ingress)
+  2. mpsc send → infr-queue: priority enqueue; SLO deadline check
+  3. sched signal: quota gate; disaggregated-prefill routing hint
+  4. dequeue → infr-route: PrefixTree match + load score → RoutingDecision
+  5. Lease acquire (infr-core) → infr-dispatch: H2 forward → backend
+  6. Token stream: backend → dispatch relay buffer → ingress SSE writer → client
+  7. Lease release; telemetry record TTFT/TPOT/route-reason
+
+Control path (continuous background tasks):
+  - infr-health: probe loop (every health_interval_ms) → update LoadState + PrefixTree → broadcast LoadEvent
+  - infr-sched: observe LoadEvents → emit ScaleSignal → external HPA
+  - infr-registry: SIGHUP → reload config → Arc::swap(RegistryState)</code></pre>
+<h3 id="sec-3-10">3.10 Trust + Persistence Boundaries</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Boundary</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>External trust</td>
+<td>Clients are untrusted; request size limits enforced at infr-ingress</td>
+</tr>
+<tr>
+<td>Internal trust</td>
+<td>Backend replicas are trusted (same cluster); no mTLS required by default (hook exists)</td>
+</tr>
+<tr>
+<td>Persistence</td>
+<td>None: all state in-memory; restart = re-bootstrap from config + health probes</td>
+</tr>
+<tr>
+<td>Cross-router</td>
+<td>No shared state between router pods; each pod has independent registry view</td>
+</tr>
+<tr>
+<td>Auth hook</td>
+<td><code>AuthzFilter</code> trait in infr-ingress; no-op default; pluggable for API-key checks</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Distributed Inference Routing &amp; Scheduling</h2>
+<h3 id="sec-8-1">8.1 Entity Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Crate</th>
+<th>Cardinality</th>
+<th>Lifecycle</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>RequestId(Ulid)</code></td>
+<td>infr-core</td>
+<td>1 per client request</td>
+<td>birth at ingress parse; death at response flush or shed</td>
+</tr>
+<tr>
+<td><code>Request</code></td>
+<td>infr-core</td>
+<td>1:1 with RequestId</td>
+<td>immutable after ingress; passed by value through pipeline</td>
+</tr>
+<tr>
+<td><code>BackendId(u32)</code></td>
+<td>infr-core</td>
+<td>1 per replica process</td>
+<td>assigned at registry registration; stable until explicit deregister</td>
+</tr>
+<tr>
+<td><code>Replica</code></td>
+<td>infr-registry</td>
+<td>1 per backend process</td>
+<td>registered via config/service-discovery; refreshed on health probe</td>
+</tr>
+<tr>
+<td><code>LoadState</code></td>
+<td>infr-health</td>
+<td>1 per Replica</td>
+<td>mutable; updated each probe cycle (default 500 ms EWMA window)</td>
+</tr>
+<tr>
+<td><code>RoutingDecision</code></td>
+<td>infr-route</td>
+<td>1 per admitted Request</td>
+<td>produced by policy engine; consumed by dispatch</td>
+</tr>
+<tr>
+<td><code>Lease</code></td>
+<td>infr-core</td>
+<td>1 per in-flight Request</td>
+<td>held from route assignment until completion/timeout</td>
+</tr>
+<tr>
+<td><code>PrefixTree</code></td>
+<td>infr-route</td>
+<td>1 per ModelId</td>
+<td>shared mutable; write-on-completion, read-on-route</td>
+</tr>
+<tr>
+<td><code>Slo</code></td>
+<td>infr-core</td>
+<td>1 per Request</td>
+<td>sourced from client header or default per-model config</td>
+</tr>
+<tr>
+<td><code>ModelId</code></td>
+<td>infr-core</td>
+<td>M across registry</td>
+<td>opaque string; validated against registry on ingress</td>
+</tr>
+<tr>
+<td><code>AdapterId</code></td>
+<td>infr-core</td>
+<td>M per Replica</td>
+<td>LoRA adapter identifier; registry tracks per-replica inventory</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-8-2">8.2 Core Type Normative Definitions</h3>
+<pre class="diagram"><code>RequestId  = Ulid  -- monotonic, sortable, URL-safe 26-char
+
+Request {
+  id           : RequestId
+  model        : ModelId        -- validated against registry
+  adapter      : Option&lt;AdapterId&gt;
+  prompt_tokens: u32            -- tokenized count; used for admission scoring
+  max_tokens   : u32
+  prefix_hash  : PrefixHash     -- sha256[..16] of first min(512,N) prompt tokens
+  slo          : Slo
+  priority     : Priority       -- {Critical, High, Normal, Low, BestEffort}
+  idempotent   : bool           -- gates hedging eligibility
+  stream       : bool           -- SSE/chunked relay vs buffered response
+}
+
+LoadState {
+  queue_depth  : u32   -- backend pending request count
+  kv_util      : f32   -- [0.0,1.0] KV cache occupancy
+  running_batch: u32   -- currently executing sequences
+  ewma_ttft_ms : f32   -- EWMA of TTFT over last window
+  inflight     : u32   -- dispatched, awaiting first token
+}
+
+Slo { ttft_ms: u32, tpot_ms: u32, deadline: Instant }
+
+Replica {
+  id      : BackendId
+  model   : ModelId
+  adapters: HashSet&lt;AdapterId&gt;
+  load    : LoadState
+  health  : Health   -- {Healthy, Degraded, Ejected}
+  addr    : SocketAddr
+}
+
+RoutingDecision { backend: BackendId, reason: RouteReason }
+
+RouteReason = least_load | prefix_hit | adapter_resident | affinity | fallback
+
+Lease { request: RequestId, backend: BackendId, deadline: Instant }
+
+PrefixHash = [u8; 16]   -- first 16 bytes of SHA-256 over canonical token sequence</code></pre>
+<hr>
+<h3 id="sec-8-3">8.3 Request Lifecycle State Machine</h3>
+<p>States and transitions for a single <code>RequestId</code>:</p>
+<pre class="diagram"><code>  [RECEIVED] ──parse ok──► [ADMITTED_PENDING]
+       │                          │
+  parse fail                 queue full / SLO expired
+       │                          │
+       ▼                          ▼
+   [REJECTED]             [SHED / 503]
+                                  
+  [ADMITTED_PENDING] ──dequeued──► [ROUTING]
+                                      │
+                              no healthy replica
+                                      │
+                                      ▼
+                               [ROUTE_FAILED / 503]
+                                      
+  [ROUTING] ──decision──► [DISPATCHING]
+                                │
+                           connect fail / pool exhausted
+                                │
+                                ▼
+                          [RETRY] ──retries exhausted──► [FAILED]
+                                      
+  [DISPATCHING] ──first_token──► [STREAMING]
+  [DISPATCHING] ──response_complete──► [COMPLETED]
+  [STREAMING]   ──last_token──► [COMPLETED]
+  [DISPATCHING/STREAMING] ──backend_error──► [RETRY] or [FAILED]
+  [DISPATCHING/STREAMING] ──deadline_exceeded──► [TIMED_OUT]
+  [COMPLETED/FAILED/TIMED_OUT/SHED/REJECTED] ──lease released──► [TERMINAL]</code></pre>
+<p>State-transition table:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Side Effects</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>RECEIVED</td>
+<td>parse_ok</td>
+<td>ADMITTED_PENDING</td>
+<td>enqueue; emit <code>request.received</code> counter</td>
+</tr>
+<tr>
+<td>RECEIVED</td>
+<td>parse_fail</td>
+<td>REJECTED</td>
+<td>emit 400; trace span closed</td>
+</tr>
+<tr>
+<td>ADMITTED_PENDING</td>
+<td>dequeue</td>
+<td>ROUTING</td>
+<td>acquire Lease; record queue_wait_ms</td>
+</tr>
+<tr>
+<td>ADMITTED_PENDING</td>
+<td>queue_full</td>
+<td>SHED</td>
+<td>emit 429 or 503; update shed_total counter</td>
+</tr>
+<tr>
+<td>ADMITTED_PENDING</td>
+<td>slo_deadline_expired</td>
+<td>SHED</td>
+<td>emit 504; record slo_miss</td>
+</tr>
+<tr>
+<td>ROUTING</td>
+<td>decision_ok</td>
+<td>DISPATCHING</td>
+<td>bind Lease.backend; emit route_reason label</td>
+</tr>
+<tr>
+<td>ROUTING</td>
+<td>no_healthy_replica</td>
+<td>ROUTE_FAILED</td>
+<td>emit 503; release Lease</td>
+</tr>
+<tr>
+<td>DISPATCHING</td>
+<td>first_token</td>
+<td>STREAMING</td>
+<td>record TTFT; emit ttft_ms histogram</td>
+</tr>
+<tr>
+<td>DISPATCHING</td>
+<td>complete</td>
+<td>COMPLETED</td>
+<td>record e2e latency; release Lease; update PrefixTree</td>
+</tr>
+<tr>
+<td>DISPATCHING</td>
+<td>backend_err</td>
+<td>RETRY</td>
+<td>circuit-breaker check; if idempotent → hedge</td>
+</tr>
+<tr>
+<td>DISPATCHING</td>
+<td>timeout</td>
+<td>TIMED_OUT</td>
+<td>emit 504; release Lease; update ewma on backend</td>
+</tr>
+<tr>
+<td>STREAMING</td>
+<td>last_token</td>
+<td>COMPLETED</td>
+<td>record TPOT; flush SSE <code>[DONE]</code>; release Lease</td>
+</tr>
+<tr>
+<td>STREAMING</td>
+<td>backend_disconnect</td>
+<td>RETRY/FAILED</td>
+<td>non-idempotent → FAILED; idempotent → RETRY</td>
+</tr>
+<tr>
+<td>RETRY</td>
+<td>retry_ok</td>
+<td>DISPATCHING</td>
+<td>select new backend; record retry_count++</td>
+</tr>
+<tr>
+<td>RETRY</td>
+<td>retries_exhausted</td>
+<td>FAILED</td>
+<td>emit 502; release Lease</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-8-4">8.4 Replica Health State Machine</h3>
+<pre class="diagram"><code>  [Healthy] ──consecutive_failures(≥3)──► [Degraded]
+  [Healthy] ──kv_util &gt; 0.95──► [Degraded]
+  [Degraded] ──probe_success + load_ok──► [Healthy]
+  [Degraded] ──consecutive_failures(≥5)──► [Ejected]
+  [Ejected] ──slow_start_probe_success──► [Degraded]  (not directly Healthy)
+  [Ejected] ──manual_force_healthy──► [Healthy]</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Health</th>
+<th>Routing Eligibility</th>
+<th>Probe Interval</th>
+<th>Recovery Path</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Healthy</td>
+<td>Full weight</td>
+<td>500 ms</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Degraded</td>
+<td>Reduced weight (50%)</td>
+<td>200 ms</td>
+<td>2 consecutive successes → Healthy</td>
+</tr>
+<tr>
+<td>Ejected</td>
+<td>None (invariant: never dispatched)</td>
+<td>5 s slow-start</td>
+<td>probe success → Degraded</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li><strong>Health invariant</strong>: <code>RoutingDecision.backend</code> is NEVER a BackendId whose Replica.health = Ejected.</li>
+<li>EWMA decay: <code>ewma_new = α * sample + (1-α) * ewma_old</code>; α=0.2 default; configurable per model.</li>
+</ul>
+<hr>
+<h3 id="sec-8-5">8.5 PrefixTree (Radix Cache) Model</h3>
+<p>Purpose: route requests whose prompt shares a long prefix with tokens already materialized in a backend&#39;s KV cache → reduces TTFT and compute cost.</p>
+<div class="filetree" role="tree"><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">PrefixTree structure:</span></span></li><li class="ft-dir"><details open><summary><span class="ft-name">root</span></summary><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">├── [hash_A]  → {BackendId(1), BackendId(3)}  recency: T-10s</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">│   ├── [hash_A+B] → {BackendId(1)}           recency: T-2s</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">│   └── [hash_A+C] → {BackendId(3)}           recency: T-5s</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">└── [hash_D]  → {BackendId(2)}                recency: T-1s</span></span></li></ul></details></li></ul></div>
+<p>Key operations:</p>
+<ul>
+<li><code>longest_match(prefix_hash) -&gt; Option&lt;(depth, Set&lt;BackendId&gt;)&gt;</code> — walk radix tree; return deepest node whose BackendId set intersects Healthy replicas.</li>
+<li><code>insert(prefix_hash, backend_id, timestamp)</code> — called on COMPLETED; adds leaf; evicts LRU nodes beyond capacity.</li>
+<li><code>evict(backend_id)</code> — called on Ejected; removes all tree nodes referencing that backend.</li>
+<li><code>invalidate_stale(ttl: Duration)</code> — background task; removes nodes older than TTL.</li>
+</ul>
+<p>PrefixHash computation:</p>
+<pre class="diagram"><code>prefix_hash = SHA-256( canonical_token_bytes )[0..16]
+canonical_token_bytes = little-endian u32 array of first min(512, N) token ids</code></pre>
+<p>Routing with prefix cache:</p>
+<ol>
+<li><code>longest_match(request.prefix_hash)</code> → candidates.</li>
+<li>Intersect candidates with <code>Healthy</code> replicas for <code>request.model</code> + <code>request.adapter</code>.</li>
+<li>If intersect non-empty: pick lowest <code>LoadState.kv_util</code> among matches → <code>RouteReason::prefix_hit</code>.</li>
+<li>If empty (cold start or all matched backends degraded/ejected): fall through to <code>least_load</code>.</li>
+</ol>
+<p>Edge cases:</p>
+<ul>
+<li>Hash collision: two distinct prompts produce same <code>prefix_hash</code> → harmless; backend may not have the exact prefix but will re-compute; routed with <code>RouteReason::prefix_hit</code> but actual cache miss is acceptable.</li>
+<li>All matching backends ejected: invariant forces fallback; <code>prefix_hit</code> reason NOT emitted; <code>fallback</code> emitted.</li>
+<li>Tree race: concurrent <code>insert</code> + <code>evict</code> on same node → protected by per-tree <code>RwLock</code>; writers hold write lock; readers share read lock; stale reads tolerated (eventual consistency acceptable for cache hints).</li>
+</ul>
+<hr>
+<h3 id="sec-8-6">8.6 Admission Control &amp; Queue Model</h3>
+<p>Queue per <code>(ModelId, Priority)</code> pair:</p>
+<pre class="diagram"><code>Queue key: (ModelId, Priority)
+Queue capacity: config.queue_max[model] * priority_weight[p]
+  e.g., model=&quot;llama3-70b&quot;, capacity=1000 total
+        Critical=200, High=300, Normal=400, Low=80, BestEffort=20</code></pre>
+<p>Admission algorithm (sequential checks, first failure → shed):</p>
+<ol>
+<li><strong>Deadline check</strong>: <code>now + estimated_queue_wait &gt; slo.deadline</code> → shed 504.</li>
+<li><strong>Capacity check</strong>: <code>queue.len() &gt;= queue_max</code> → shed 429 (backpressure).</li>
+<li><strong>Token budget check</strong>: <code>request.prompt_tokens + request.max_tokens &gt; model.max_context</code> → reject 400.</li>
+<li><strong>Replica availability check</strong>: at least one Healthy replica for model+adapter → admit; else hold for <code>replica_wait_timeout</code> then shed.</li>
+</ol>
+<p>Queue drain:</p>
+<ul>
+<li>Dequeue order: priority-descending, then FIFO within priority tier.</li>
+<li>Dequeue rate governed by <code>infr-sched</code> fairness policy (token budgets per tenant/model).</li>
+<li>SLO scan: background task every 50 ms evicts expired entries (deadline &lt; now) → shed 504 without dispatching.</li>
+</ul>
+<p>Backpressure propagation:</p>
+<ul>
+<li>HTTP/1.1: return 429 with <code>Retry-After</code> header.</li>
+<li>HTTP/2: send RST_STREAM or 429 response.</li>
+<li>gRPC: RESOURCE_EXHAUSTED status.</li>
+<li>Internal: <code>infr-ingress</code> checks queue fullness before accepting TCP read; applies TCP backpressure by pausing reads on saturated connections.</li>
+</ul>
+<p>Bounded-queue invariant: <code>queue.len()</code> is bounded by <code>queue_max</code>; no dynamic growth; admission is rejected before exceeding bound.</p>
+<hr>
+<h3 id="sec-8-7">8.7 Routing Policy Engine — Decision Procedure</h3>
+<p>Candidate set (computed once per request): replicas serving <code>req.model</code>, filtered to <code>Health == Healthy</code>, further filtered to replicas holding <code>req.adapter</code> when an adapter is requested. An empty candidate set short-circuits to <code>RouteReason::Fallback</code> with an error — no tier below is consulted.</p>
+<p>Decision tiers, evaluated in strict priority order against the candidate set — the first tier that yields a non-empty eligible subset wins and the search stops:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Name</th>
+<th>Eligible subset (within candidates)</th>
+<th>Winner selection</th>
+<th>RouteReason on match</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Session affinity</td>
+<td>Candidates equal to the backend bound in <code>affinity_store</code> for <code>req.session_id</code>, if that backend is not overloaded</td>
+<td>The bound backend itself</td>
+<td><code>Affinity</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Prefix-cache aware</td>
+<td>Candidates ∩ <code>tree.longest_match(req.prefix_hash)</code> backend set</td>
+<td><code>min</code> by <code>score_load</code> (table below) over the intersection</td>
+<td><code>PrefixHit</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Adapter-resident</td>
+<td>Candidates already holding <code>req.adapter</code> loaded (skips adapter swap-in cost)</td>
+<td><code>min</code> by <code>score_load</code> over that subset</td>
+<td><code>AdapterResident</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Least-load (default)</td>
+<td>Full candidate set</td>
+<td><code>min</code> by <code>score_load</code> over all candidates</td>
+<td><code>LeastLoad</code></td>
+</tr>
+</tbody></table></div>
+<p><code>score_load</code> weighted-sum components (default weights, per-model configurable via <code>infr-cli</code> config reload, no restart required):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Default weight</th>
+<th>Contribution</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>load.queue_depth</code></td>
+<td><code>w_q = 0.4</code></td>
+<td>pending requests at replica</td>
+</tr>
+<tr>
+<td><code>load.kv_util</code></td>
+<td><code>w_kv = 0.3</code></td>
+<td>KV-cache occupancy fraction</td>
+</tr>
+<tr>
+<td><code>load.ewma_ttft_ms</code></td>
+<td><code>w_t = 0.2</code></td>
+<td>smoothed time-to-first-token</td>
+</tr>
+<tr>
+<td><code>load.inflight</code></td>
+<td><code>w_i = 0.1</code></td>
+<td>dispatched, awaiting first token</td>
+</tr>
+</tbody></table></div>
+<p><code>score_load(r) = w_q·queue_depth + w_kv·kv_util + w_t·ewma_ttft_ms + w_i·inflight</code>; lower score wins each tier&#39;s <code>min</code>.</p>
+<hr>
+<h3 id="sec-8-8">8.8 Dispatch &amp; Streaming Protocol Model</h3>
+<p>Connection pool per <code>BackendId</code>:</p>
+<ul>
+<li>Multiplexed HTTP/2 streams; max concurrent streams bounded by backend&#39;s <code>max_concurrent_streams</code> advertisement.</li>
+<li>Pool size: <code>min_idle=2</code>, <code>max_size=config.backend_max_conns</code> (default 32).</li>
+<li>Acquire timeout: 50 ms; on timeout → circuit-breaker check → fallback to least-loaded alternative.</li>
+</ul>
+<p>Request forwarding wire format:</p>
+<pre class="diagram"><code>POST /v1/completions  (OpenAI-compatible) or /generate (vLLM native)
+Headers: X-Request-Id, X-Upstream-Deadline, X-Prefix-Hash, X-Router-Lease
+Body: JSON { model, prompt, max_tokens, stream, ... }</code></pre>
+<p>Streaming relay invariants:</p>
+<ul>
+<li><strong>Order invariant</strong>: bytes forwarded to client in exact order received from backend; no reordering, no buffering beyond flow control.</li>
+<li>SSE relay: each <code>data: ...</code> chunk forwarded immediately on receipt; <code>[DONE]</code> forwarded then connection closed.</li>
+<li>Chunked-transfer relay: chunk boundaries preserved; no re-chunking.</li>
+<li>On backend mid-stream disconnect: if <code>request.idempotent</code> → attempt hedge/retry on new backend from token 0 (no partial replay); else → send SSE <code>data: {&quot;error&quot;:&quot;upstream_disconnect&quot;}</code> then close.</li>
+</ul>
+<p>Retry policy:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Attempt</th>
+<th>Delay</th>
+<th>Condition</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1 (initial)</td>
+<td>0</td>
+<td>—</td>
+</tr>
+<tr>
+<td>2</td>
+<td>50 ms jitter</td>
+<td>5xx, connect_err, timeout; only if <code>idempotent=true</code> or <code>retryable_error</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>200 ms jitter</td>
+<td>same; new backend selected</td>
+</tr>
+<tr>
+<td>4+</td>
+<td>rejected</td>
+<td>retries_exhausted → FAILED</td>
+</tr>
+</tbody></table></div>
+<p>Hedging (speculative execution):</p>
+<ul>
+<li>Enabled only if <code>request.idempotent=true</code> AND <code>p99_ttft &gt; slo.ttft_ms * 0.8</code> (configurable threshold).</li>
+<li>Hedge fires after <code>hedge_delay = ewma_ttft_ms * 1.5</code> ms on a second backend.</li>
+<li>First response wins; second request cancelled via HTTP/2 RST_STREAM.</li>
+<li>At-most-once invariant: hedging is ONLY permitted for idempotent requests.</li>
+</ul>
+<p>Circuit breaker per <code>BackendId</code>:</p>
+<pre class="diagram"><code>States: Closed → Open → HalfOpen
+Closed  : normal dispatch; trip on consecutive_failures &gt;= threshold (default 5)
+Open    : all requests to backend fail-fast; timeout = 10s
+HalfOpen: allow 1 probe request; success → Closed; failure → Open (reset timer)</code></pre>
+<hr>
+<h3 id="sec-8-9">8.9 Disaggregated Prefill/Decode Coordination</h3>
+<p>Applies when backend fleet supports disaggregation (e.g., DistServe-style split prefill/decode nodes).</p>
+<p>Model:</p>
+<ul>
+<li><code>PrefillReplica</code>: optimized for high-throughput prompt ingestion (large batch, high MFU).</li>
+<li><code>DecodeReplica</code>: optimized for low-latency token streaming (smaller batch, KV cache resident).</li>
+<li>KV cache transfer: prefill node sends KV blocks to decode node over RDMA/NVLink or TCP fallback.</li>
+</ul>
+<p>Routing for disaggregated requests — applies only when <code>model.disaggregated_mode</code> is set; unified (non-disaggregated) models skip this table entirely and use the standard <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-7">§8.7</a> decision procedure:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Action</th>
+<th>On failure</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Select <code>prefill_backend</code> from <code>PrefillReplicas</code> via the <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-7">§8.7</a> decision procedure (reason: <code>LeastLoad</code>)</td>
+<td>No prefill candidate → <code>route_failed</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Select <code>decode_backend</code> from <code>DecodeReplicas</code> via the <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-7">§8.7</a> decision procedure (reason: <code>KvAffinity</code>)</td>
+<td>No decode candidate → <code>route_failed</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Dispatch prompt to <code>prefill_backend</code>; receive opaque KV-transfer-token</td>
+<td>Prefill fails → retry on a new <code>prefill_backend</code> (idempotent step)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Forward <code>(prompt_ref, kv_token)</code> to <code>decode_backend</code>; stream tokens to client</td>
+<td>Decode fails post-transfer → <code>route_failed</code> (KV blocks are not re-transferable without cost)</td>
+</tr>
+</tbody></table></div>
+<p>Coordination invariants:</p>
+<ul>
+<li>Lease covers BOTH prefill and decode phases; released only after decode completes.</li>
+<li>KV transfer token is opaque to infr-route; treated as bytes forwarded to decode backend.</li>
+<li><code>infr-sched</code> emits autoscale signals independently for prefill pool and decode pool.</li>
+</ul>
+<hr>
+<h3 id="sec-8-10">8.10 Autoscaling Signal Model</h3>
+<p><code>infr-sched</code> emits <code>AutoscaleSignal</code> events consumed by external orchestrators (Kubernetes HPA, Ray autoscaler):</p>
+<pre class="diagram"><code>AutoscaleSignal {
+  model          : ModelId
+  replica_class  : ReplicaClass   -- {Prefill, Decode, Combined}
+  current_count  : u32
+  desired_count  : u32
+  reason         : ScaleReason    -- {queue_depth, slo_miss_rate, kv_util, idle}
+  timestamp      : Instant
+}</code></pre>
+<p>Scale-out triggers:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Threshold</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>avg_queue_depth</code></td>
+<td>&gt; 10 for 30 s</td>
+<td>scale_out by ceil(queue_depth / target_queue_depth)</td>
+</tr>
+<tr>
+<td><code>slo_miss_rate</code> (TTFT)</td>
+<td>&gt; 5% over 60 s</td>
+<td>scale_out by 1</td>
+</tr>
+<tr>
+<td><code>avg_kv_util</code></td>
+<td>&gt; 0.85 for 60 s</td>
+<td>scale_out by 1</td>
+</tr>
+<tr>
+<td><code>p99_ttft_ms</code></td>
+<td>&gt; slo.ttft_ms * 1.2</td>
+<td>scale_out by 1</td>
+</tr>
+</tbody></table></div>
+<p>Scale-in triggers:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Threshold</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>avg_queue_depth</code></td>
+<td>&lt; 2 for 300 s</td>
+<td>scale_in by 1 (keep min_replicas)</td>
+</tr>
+<tr>
+<td><code>avg_kv_util</code></td>
+<td>&lt; 0.3 for 300 s</td>
+<td>scale_in by 1</td>
+</tr>
+<tr>
+<td>No traffic</td>
+<td>600 s</td>
+<td>scale_in to min_replicas</td>
+</tr>
+</tbody></table></div>
+<p>Cooldown: 120 s between consecutive scale actions per model (prevents thrash).</p>
+<hr>
+<h3 id="sec-8-11">8.11 Observability Data Model</h3>
+<p>Metrics emitted per stage (label cardinality: <code>model</code>, <code>adapter</code>, <code>backend_id</code>, <code>route_reason</code>, <code>priority</code>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Metric Name</th>
+<th>Type</th>
+<th>Labels</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>infr_request_total</code></td>
+<td>Counter</td>
+<td>model, priority, outcome</td>
+<td>requests by final state</td>
+</tr>
+<tr>
+<td><code>infr_queue_depth</code></td>
+<td>Gauge</td>
+<td>model, priority</td>
+<td>instantaneous queue length</td>
+</tr>
+<tr>
+<td><code>infr_queue_wait_ms</code></td>
+<td>Histogram</td>
+<td>model, priority</td>
+<td>time from enqueue to dequeue</td>
+</tr>
+<tr>
+<td><code>infr_shed_total</code></td>
+<td>Counter</td>
+<td>model, priority, reason</td>
+<td>admission-rejected requests</td>
+</tr>
+<tr>
+<td><code>infr_route_decision_total</code></td>
+<td>Counter</td>
+<td>model, route_reason</td>
+<td>routing decisions by reason</td>
+</tr>
+<tr>
+<td><code>infr_ttft_ms</code></td>
+<td>Histogram</td>
+<td>model, backend_id, route_reason</td>
+<td>time-to-first-token</td>
+</tr>
+<tr>
+<td><code>infr_tpot_ms</code></td>
+<td>Histogram</td>
+<td>model, backend_id</td>
+<td>time-per-output-token</td>
+</tr>
+<tr>
+<td><code>infr_e2e_latency_ms</code></td>
+<td>Histogram</td>
+<td>model, priority</td>
+<td>full request latency</td>
+</tr>
+<tr>
+<td><code>infr_backend_kv_util</code></td>
+<td>Gauge</td>
+<td>backend_id, model</td>
+<td>KV cache utilization</td>
+</tr>
+<tr>
+<td><code>infr_backend_queue_depth</code></td>
+<td>Gauge</td>
+<td>backend_id</td>
+<td>backend queue depth (probed)</td>
+</tr>
+<tr>
+<td><code>infr_prefix_cache_hit_total</code></td>
+<td>Counter</td>
+<td>model</td>
+<td>requests routed via prefix_hit</td>
+</tr>
+<tr>
+<td><code>infr_prefix_cache_miss_total</code></td>
+<td>Counter</td>
+<td>model</td>
+<td>requests with no prefix match</td>
+</tr>
+<tr>
+<td><code>infr_retry_total</code></td>
+<td>Counter</td>
+<td>model, backend_id, reason</td>
+<td>dispatch retries</td>
+</tr>
+<tr>
+<td><code>infr_circuit_open_total</code></td>
+<td>Counter</td>
+<td>backend_id</td>
+<td>circuit-breaker trips</td>
+</tr>
+<tr>
+<td><code>infr_autoscale_signal_total</code></td>
+<td>Counter</td>
+<td>model, replica_class, direction</td>
+<td>scale signals emitted</td>
+</tr>
+<tr>
+<td><code>infr_slo_miss_total</code></td>
+<td>Counter</td>
+<td>model, slo_dimension</td>
+<td>SLO violations (ttft/tpot/deadline)</td>
+</tr>
+<tr>
+<td><code>infr_lease_active</code></td>
+<td>Gauge</td>
+<td>model</td>
+<td>inflight leases</td>
+</tr>
+</tbody></table></div>
+<p>Trace span hierarchy:</p>
+<div class="filetree" role="tree"><ul><li class="ft-dir"><details open><summary><span class="ft-name">infr_request (root span: RequestId, model, priority)</span></summary><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">├── queue_wait</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── routing_decision (route_reason, backend_id)</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── dispatch_connect (pool_acquire_ms)</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">│   ├── prefill (disaggregated mode only)</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">│   └── decode / generate</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">└── stream_relay (ttft_ms, token_count, tpot_ms)</span></span></li></ul></details></li></ul></div>
+<p>Structured log fields (every log line):
+<code>request_id</code>, <code>model</code>, <code>backend_id</code>, <code>phase</code>, <code>route_reason</code>, <code>priority</code>, <code>duration_ms</code>, <code>outcome</code>.</p>
+<hr>
+<h3 id="sec-8-12">8.12 Configuration &amp; Reload Model</h3>
+<p>Config is hot-reloaded (no restart) via SIGHUP or API endpoint <code>POST /admin/reload</code>:</p>
+<pre class="diagram"><code>RouterConfig {
+  models: Map&lt;ModelId, ModelConfig&gt;
+  backends: Map&lt;BackendId, BackendConfig&gt;
+  routing: RoutingConfig
+  queue: QueueConfig
+  dispatch: DispatchConfig
+  sched: SchedConfig
+}
+
+ModelConfig { max_context: u32, adapters: Vec&lt;AdapterId&gt;, disaggregated: bool, queue_max: u32 }
+BackendConfig { addr: SocketAddr, model: ModelId, adapters: Vec&lt;AdapterId&gt;, max_conns: u32 }
+RoutingConfig { weights: LoadWeights, prefix_ttl_s: u64, affinity_ttl_s: u64 }
+QueueConfig { priorities: PriorityLimits, slo_scan_interval_ms: u64 }
+DispatchConfig { retry_max: u8, hedge_enabled: bool, circuit_breaker: CbConfig }
+SchedConfig { fairness: FairnessPolicy, autoscale: AutoscaleConfig }</code></pre>
+<p>Reload invariants:</p>
+<ul>
+<li>Config is validated before applying; invalid config → reload rejected, old config retained.</li>
+<li>New backends added: registered in <code>infr-registry</code>, health probed before routing eligible.</li>
+<li>Removed backends: drained (no new requests), existing Leases allowed to complete, then removed.</li>
+<li>Weight changes: applied immediately to next routing decision; in-flight requests unaffected.</li>
+<li>Queue-max reduction: new arrivals bounded by new max; existing queue not truncated.</li>
+</ul>
+<hr>
+<h3 id="sec-8-13">8.13 Worked Examples</h3>
+<p><strong>Example A — Normal streaming request (cold prefix)</strong></p>
+<pre class="diagram"><code>T=0ms  client POST /v1/completions {model=&quot;llama3-70b&quot;, stream=true}
+T=1ms  infr-ingress: parse → Request{id=01HX.., prefix_hash=ab12..}
+T=1ms  infr-queue: admit (queue_depth=3/1000, deadline ok) → Lease created
+T=2ms  infr-route: longest_match(ab12..) → miss; least_load → Backend(2)
+T=2ms  RoutingDecision{backend=2, reason=least_load} emitted
+T=3ms  infr-dispatch: acquire conn from pool(Backend 2); forward POST
+T=45ms infr-dispatch: first byte received → TTFT=42ms; emit ttft_ms=42
+T=45ms infr-ingress: begin SSE relay to client
+T=800ms last token; SSE [DONE]; Lease released; PrefixTree.insert(ab12.., Backend 2)</code></pre>
+<p><strong>Example B — Prefix-cache hit</strong></p>
+<pre class="diagram"><code>Request{prefix_hash=ab12..} arrives 10s after Example A
+PrefixTree.longest_match(ab12..) → {Backend 2}, depth=1, recency=10s
+Backend 2 health=Healthy, kv_util=0.6 (acceptable)
+RoutingDecision{backend=2, reason=prefix_hit}
+TTFT reduced (KV cache warm): 12ms vs 42ms baseline</code></pre>
+<p><strong>Example C — Admission shed (queue full)</strong></p>
+<pre class="diagram"><code>Model=&quot;llama3-70b&quot; queue at capacity (1000/1000)
+New request arrives: infr-queue capacity check fails
+Response: 429 Too Many Requests, Retry-After: 2
+Metric: infr_shed_total{model=&quot;llama3-70b&quot;, reason=&quot;queue_full&quot;}++</code></pre>
+<p><strong>Example D — Backend ejection mid-stream</strong></p>
+<pre class="diagram"><code>Backend 3 returns 500 on 5 consecutive requests → Health: Healthy→Degraded
+After 5 more failures → Health: Degraded→Ejected
+infr-route: Backend 3 removed from candidate set (Health invariant enforced)
+PrefixTree.evict(Backend 3) called (removes all prefix nodes referencing Backend 3)
+infr-dispatch: any in-flight request on Backend 3 → retry if idempotent; fail if not
+Circuit breaker: Open for Backend 3, 10s timeout</code></pre>
+<p><strong>Example E — SLO deadline eviction from queue</strong></p>
+<pre class="diagram"><code>Request{slo.deadline=T+500ms, priority=Normal} enqueued at T=0
+Queue stall: all backends at capacity
+At T=500ms: background SLO scan fires; deadline &lt; now → evict from queue
+Response: 504 Gateway Timeout
+Metric: infr_slo_miss_total{model=.., slo_dimension=&quot;deadline&quot;}++</code></pre>
+<p><strong>Example F — Disaggregated prefill/decode</strong></p>
+<pre class="diagram"><code>Request dispatched to PrefillReplica(id=10)
+Prefill completes in 200ms; returns kv_token=&quot;kv://block/abc123&quot;
+infr-dispatch sends (prompt_ref + kv_token) to DecodeReplica(id=20)
+DecodeReplica streams tokens; relay to client
+If DecodeReplica fails: FAILED (KV transfer not replayable without cost)
+If PrefillReplica fails before KV token: retry PrefillReplica (idempotent)</code></pre>
+<p><strong>Example G — Hedge firing</strong></p>
+<pre class="diagram"><code>Request idempotent=true, slo.ttft_ms=100
+ewma_ttft_ms for Backend 4 = 80ms; hedge_delay = 80*1.5 = 120ms
+Primary dispatch → Backend 4 at T=0
+At T=120ms: no first token yet; hedge fires → Backend 5
+Backend 5 returns first token at T=135ms (Backend 4 still pending)
+Backend 5 wins; Backend 4 RST_STREAM sent
+Client receives tokens from Backend 5</code></pre>
+<hr>
+<h3 id="sec-8-14">8.14 Failure Modes &amp; Domain-Level Invariant Enforcement</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Failure</th>
+<th>Detection</th>
+<th>Response</th>
+<th>Invariant Preserved</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Backend returns 5xx</td>
+<td>infr-dispatch status code</td>
+<td>retry (idempotent) or fail</td>
+<td>at-most-once</td>
+</tr>
+<tr>
+<td>Backend silent hang (no bytes)</td>
+<td>dispatch.timeout</td>
+<td>timeout → retry/fail</td>
+<td>lease released</td>
+</tr>
+<tr>
+<td>KV cache full on backend</td>
+<td>kv_util probe ≥ 0.95</td>
+<td>Health→Degraded; reduce weight</td>
+<td>Health invariant</td>
+</tr>
+<tr>
+<td>All backends ejected</td>
+<td>route candidates empty</td>
+<td>503 + autoscale signal</td>
+<td>Health invariant</td>
+</tr>
+<tr>
+<td>Queue overflow</td>
+<td>queue.len() == queue_max</td>
+<td>shed 429</td>
+<td>Bounded-queue invariant</td>
+</tr>
+<tr>
+<td>PrefixTree eviction race</td>
+<td>backend ejected while routing</td>
+<td>fallback via least_load</td>
+<td>Health invariant</td>
+</tr>
+<tr>
+<td>Mid-stream byte reorder</td>
+<td>(implementation guard)</td>
+<td>panic in debug; alert in prod</td>
+<td>Order invariant</td>
+</tr>
+<tr>
+<td>Hedge on non-idempotent</td>
+<td>idempotent flag check</td>
+<td>hedge blocked</td>
+<td>at-most-once</td>
+</tr>
+<tr>
+<td>Config reload with invalid schema</td>
+<td>validation before apply</td>
+<td>reject reload, keep old</td>
+<td>config consistency</td>
+</tr>
+<tr>
+<td>Lease leak (no release)</td>
+<td>Lease TTL watchdog (deadline + grace)</td>
+<td>force-release + alert</td>
+<td>Lease invariant</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

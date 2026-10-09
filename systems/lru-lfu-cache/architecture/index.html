@@ -1,0 +1,272 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>LRU/LFU Cache Engine — Architecture · Engineering Blueprints</title><meta name="description" content="LRU/LFU Cache Engine, hld: §3 overview + §8 domain model. Ship a library, a CLI, a benchmark suite, a conformance suite against three public trace corpora, and four bindings (Rust, Python, Java, WASM) that together implement ten cache-replacement policies…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/lru-lfu-cache/">LRU/LFU Cache Engine</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>LRU/LFU Cache Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~26 weeks</li> <li>2,057 lines</li> <li>blueprint #57</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/lru-lfu-cache/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/lru-lfu-cache/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/lru-lfu-cache/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/lru-lfu-cache/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/lru-lfu-cache/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/lru-lfu-cache/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/lru-lfu-cache/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/lru-lfu-cache/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/lru-lfu-cache/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/lru-lfu-cache/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:LRU/LFU Cache Engine — Architecture">  <section class="prose"><h2 id="sec-architecture">§3 Architectural Overview</h2>
+<pre class="diagram"><code>┌──────────────────────────────────────────────────────────────────────┐
+│  Bindings (Phase 9)                                                   │
+│   • Rust crate (ground truth) • Python (PyO3) • Java (JNI) • WASM     │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │ Rust API
+┌──────────────────────────────▼───────────────────────────────────────┐
+│  Cache&lt;K,V&gt; facade (Phase 1, extended Phase 7)                        │
+│   .lru()/.lfu()/.arc()/.w_tiny_lfu()/.sieve(); get/insert/remove/...  │
+│   TTL, weight, refresh-ahead, write-mode hooks                        │
+└──────┬───────────────────────────────────────────────┬───────────────┘
+       │                                               │
+┌──────▼───────────────────────┐            ┌──────────▼─────────┐
+│  ShardedCache (Phase 5)      │            │  Stats (Phase 10)  │
+│   N shards, per-shard lock,  │            │  hit/miss/evict/   │
+│   optional sharded RCU       │            │  age/size/admit    │
+└──────┬───────────────────────┘            └────────────────────┘
+       │
+┌──────▼────────────────────────────────────────────────────────────┐
+│  Replacement policy (Phases 1-4)                                   │
+│   LRU(1) · LFU(2) · LRU-K/2Q/ARC(3) · W-TinyLFU/CLOCK*/CAR/SIEVE(4) │
+└──────┬────────────────────────────────────────────────────────────┘
+       │
+┌──────▼─────────────────────────────────────────────────────────────┐
+│  Admission (Phase 4): TinyLFU = Bloom doorkeeper + 4-bit CMS + aging│
+└──────┬─────────────────────────────────────────────────────────────┘
+       │
+┌──────▼────────────────┐    ┌──────────────────────────────────────┐
+│  TTL (Phase 6)        │    │  Persistence (Phase 8, optional)     │
+│  hierarchical wheel   │    │  periodic snapshot + AOF log         │
+└───────────────────────┘    └──────────────────────────────────────┘
+       │
+┌──────▼─────────────────────────────────────────────────────────────┐
+│  DLL primitive (Phase 0): intrusive Node&lt;K,V&gt;, raw prev/next slots  │
+└────────────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>Bindings.</strong> Host-language projections of the Rust API; they cannot have features the Rust API lacks. <strong>Cache facade.</strong> Dispatches on a <code>dyn Policy</code> chosen once at construction; never branches on policy at the call site. <strong>ShardedCache.</strong> One type that accepts any policy and lifts it to a contention-split cache without the policy noticing. <strong>Stats.</strong> Counters and histograms read off every operation; always on. <strong>Replacement policy.</strong> The ten algorithms, each a thin wrapper around the DLL primitive. <strong>Admission.</strong> A filter applied between &quot;the eviction policy proposes a victim&quot; and &quot;the cache stores the candidate&quot;; policies that do not want it do not pay for it. <strong>TTL.</strong> Per-entry expiry via a hierarchical timer wheel ticked on op. <strong>Persistence.</strong> Optional snapshot + AOF, deferred. <strong>DLL primitive.</strong> The single <code>unsafe</code> site; every algorithm sits on it.</p>
+<p>Three load-bearing properties recur throughout: the algorithm choice is data (dispatch once at construction); sharding is orthogonal to the algorithm; every cross-cut (TTL, admission, stats, persistence) is composed by trait objects, never by recompilation. The build matrix is a Cartesian product of orthogonal axes — there is no <code>LRU+TTL+TinyLFU</code> type distinct from <code>LFU+TTL+TinyLFU</code>.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-domain">§8 Domain Model</h2>
+<p>The cache is a hash map plus an intrusive DLL plus a policy that decides which slot to evict. The domain objects are: <strong>Entry</strong> (<code>key</code>, <code>value</code>, <code>weight</code>, <code>expires_at</code>, policy state), <strong>Slot</strong> (a generational handle into the arena), <strong>Policy</strong> (the eviction strategy), <strong>Budget</strong> (bytes/weight ceiling), and <strong>Admission</strong> (the optional front filter).</p>
+<h3 id="sec-8-1">8.1 Worked example (W-TinyLFU admission decision)</h3>
+<p>Cache at capacity. LRU proposes to evict victim <code>V</code> to admit candidate <code>C</code>.</p>
+<ol>
+<li><code>freq(V) = cms.estimate(hash(V))</code> → 3.</li>
+<li><code>freq(C) = cms.estimate(hash(C))</code> → 5.</li>
+<li><code>5 &gt; 3</code> ⇒ admit <code>C</code>, evict <code>V</code>. The doorkeeper Bloom is consulted first: on <code>C</code>&#39;s first-ever sighting the bit is unset, so <code>C</code> is rejected and the bit is set — a key must be seen at least twice before admission. On the second sighting the CMS comparison above runs.</li>
+</ol>
+<h3 id="sec-8-2">8.2 Entry state-transition table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Side effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>absent</td>
+<td>insert, under budget</td>
+<td>resident@MRU</td>
+<td><code>used_bytes += w</code></td>
+</tr>
+<tr>
+<td>absent</td>
+<td>insert, over budget</td>
+<td>resident@MRU</td>
+<td>evict victim(s) until under budget</td>
+</tr>
+<tr>
+<td>absent</td>
+<td>insert, admission reject</td>
+<td>absent</td>
+<td>doorkeeper bit set; <code>admission_reject++</code></td>
+</tr>
+<tr>
+<td>resident</td>
+<td>get (not expired)</td>
+<td>resident (policy-touched)</td>
+<td>hit++; policy <code>on_hit</code></td>
+</tr>
+<tr>
+<td>resident</td>
+<td>get (expired)</td>
+<td>absent</td>
+<td>miss++; lazily reaped; <code>on_remove</code></td>
+</tr>
+<tr>
+<td>resident</td>
+<td>TTL tick reaches expiry</td>
+<td>absent</td>
+<td><code>evict_total{reason=ttl}++</code></td>
+</tr>
+<tr>
+<td>resident</td>
+<td>over budget, chosen victim</td>
+<td>absent (→ ghost, if 2Q/ARC)</td>
+<td><code>evict_total{reason=capacity}++</code></td>
+</tr>
+<tr>
+<td>ghost</td>
+<td>get</td>
+<td>resident@Am/<a class="cite" href="/system-design-blueprints/systems/lru-lfu-cache/reliability/#t-2">T2</a></td>
+<td>promotion; <code>p</code> adapts (ARC)</td>
+</tr>
+<tr>
+<td>ghost</td>
+<td>ghost list over bound</td>
+<td>absent</td>
+<td>trimmed (<a class="cite" href="/system-design-blueprints/systems/lru-lfu-cache/reliability/#inv-8">I8</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Malformed / adversarial input</h3>
+<ul>
+<li><strong>Zero-weight entry:</strong> rejected at insert (<a class="cite" href="/system-design-blueprints/systems/lru-lfu-cache/reliability/#inv-2">I2</a> would let the cache exceed budget without evicting).</li>
+<li><strong>Oversized value:</strong> <code>weight &gt; max_value_bytes</code> rejected before allocation (memory-pressure attack mitigation).</li>
+<li><strong>Non-<code>Serialize</code> key with persistence on:</strong> runtime-rejected at builder time (persistence boundary).</li>
+<li><strong>Key controlled by an attacker to collide a shard:</strong> keyed hasher seeded at startup; seed never exposed (<a class="cite" href="/system-design-blueprints/systems/lru-lfu-cache/reliability/#inv-12">I12</a>, hash-flooding mitigation).</li>
+<li><strong>Clock step backward:</strong> wheel clamps <code>now_ms</code> to previous (P13, <a class="cite" href="/system-design-blueprints/systems/lru-lfu-cache/reliability/#inv-11">I11</a>).</li>
+</ul>
+<h3 id="sec-8-4">8.4 Failure path</h3>
+<p>A loader panic inside refresh-ahead is caught with <code>catch_unwind</code>; the entry keeps its stale-but-valid value, <code>loader_panic_total</code> increments, and the cache does not crash. A snapshot read of a malformed length field is bounded (no unbounded allocation) and aborts the load, leaving the in-memory cache untouched.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

@@ -1,0 +1,751 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Filesystem Journaling Layer · Engineering Blueprints</title><meta name="description" content="Creating or changing a file touches several blocks: in the blueprint's example, an inode block and a file-content block (§8.6). Without a journal, a crash in the middle leaves a partially updated inode, a partially updated bitmap, and a directory entry that may or may not point…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <span aria-current="page">Filesystem Journaling Layer</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Filesystem Journaling Layer</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~15 weeks</li> <li>2,268 lines</li> <li>blueprint #110</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/filesystem-journaling/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/filesystem-journaling/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/filesystem-journaling/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/filesystem-journaling/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/filesystem-journaling/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/filesystem-journaling/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/filesystem-journaling/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/filesystem-journaling/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/filesystem-journaling/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Filesystem Journaling Layer"> <div class="doc-grid"> <aside class="doc-toc" data-pagefind-ignore> <details class="toc" open data-collapse-narrow> <summary>On this page</summary> <ol><li><a href="#ex-in-one-paragraph">In one paragraph</a></li><li><a href="#ex-the-problem-concretely">The problem, concretely</a></li><li><a href="#ex-how-it-works-end-to-end">How it works, end to end</a></li><li><a href="#ex-the-core-ideas">The core ideas</a></li><li><a href="#ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</a></li><li><a href="#ex-what-must-never-be-false">What must never be false</a></li><li><a href="#ex-what-breaks-in-production">What breaks in production</a></li><li><a href="#ex-the-numbers">The numbers</a></li><li><a href="#ex-how-it-compares">How it compares</a></li><li><a href="#ex-building-it-the-phase-plan">Building it — the phase plan</a></li><li><a href="#ex-questions-to-test-yourself">Questions to test yourself</a></li><li><a href="#ex-if-you-only-remember-three-things">If you only remember three things</a></li><li><a href="#ex-words-used-here">Words used here</a></li></ol> </details> </aside> <div class="doc-main"> <p class="meta doc-meta" data-pagefind-ignore> <span>Plain-words explainer</span> <span>status: checked</span> <span>written 2026-10-07</span> <span>checked by Opus 5.5 on 2026-10-07</span> <span>467 lines</span> </p>  <div class="prose explainer"><h2 id="ex-in-one-paragraph">In one paragraph</h2>
+<p>A journaling layer sits between a filesystem and a raw block device and makes a group of block
+writes all-or-nothing, even if the power fails mid-write (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-1">§1</a>). It writes a description of the
+intended change into a fixed-size circular log, forces that log to disk, and only then lets the
+change reach its final location; after a crash, a scan of the log finishes or discards each change
+(<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-2">§2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-3">§8.3</a>). It is not a filesystem: it owns no inodes, directories or allocator (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-1">§1</a>). This design
+is a Rust library, or a standalone <code>jbd</code> daemon, with one writer process per journal, used by
+filesystem implementers and operated by SREs (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-1">§1</a>).</p>
+<h2 id="ex-the-problem-concretely">The problem, concretely</h2>
+<p>Creating or changing a file touches several blocks: in the blueprint&#39;s example, an inode block and
+a file-content block (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-6">§8.6</a>). Without a journal, a crash in the middle leaves a partially updated
+inode, a partially updated bitmap, and a directory entry that may or may not point at the new
+inode (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-2">§2</a>). The post-crash repair tool (<code>fsck</code>) must then walk the whole device and guess the most
+plausible interpretation, and it is sometimes wrong (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-2">§2</a>).</p>
+<p>The fix, credited to Hagmann&#39;s 1987 Cedar paper, is to append a description of the intended change
+to a log, <code>fsync</code> the log, and only then do the change (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-2">§2</a>). If the change is half-done after a
+crash, recovery finishes it from the log. If the log entry itself is half-done, recovery discards
+it and the change never happened (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-2">§2</a>). One bit, &quot;is the commit record durable?&quot;, decides which
+outcome you get (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-2">§2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-1">I1</a>).</p>
+<p>The naive versions of this each fail in a specific way. Treating a <code>write()</code> that returned <code>Ok</code> as
+durable makes the bit meaningless (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-2">§2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM1</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM3</a>). An unbounded append-only log gives up predictable
+size and recovery time (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-3">§3</a>, P2, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-3">ADR-03</a>). One commit per <code>fsync</code> caps throughput at <code>1/L</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-6">§14.6</a>). A
+stale log entry replayed over a block that was freed and reallocated silently restores old bytes
+(<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-6">§19.6</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-7">T7</a>). <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-2">§2</a> calls group commit, checksums, revocation and the three modes engineering
+scaffolding around the one commit-record bit (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-2">§2</a>).</p>
+<h2 id="ex-how-it-works-end-to-end">How it works, end to end</h2>
+<p>Follow one transaction (a set of block writes committed together) through <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-3">§3</a>&#39;s boxes. The
+blueprint&#39;s own trace is transaction 42, which writes metadata block 100 and data block 500 in
+<code>ordered</code> mode (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-6">§8.6</a>).</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend side: the filesystem above the layer
+%% legend rt: write path: txn manager, commit thread, journal
+%% legend store: block device that holds the journal
+%% legend ingest: checkpoint and recovery
+  FS([&quot;&lt;b&gt;filesystem above&lt;/b&gt;&quot;])
+  TM[&quot;&lt;b&gt;transaction manager&lt;/b&gt;&lt;br/&gt;(jbd-txn)&quot;]
+  CT[&quot;&lt;b&gt;commit thread + group-commit window&lt;/b&gt;&lt;br/&gt;(jbd-commit)&lt;br/&gt;calling the mode strategy&quot;]
+  JR[&quot;&lt;b&gt;journal, a circular log&lt;/b&gt;&lt;br/&gt;(jbd-journal)&quot;]
+  BD[(&quot;&lt;b&gt;block device&lt;/b&gt;&lt;br/&gt;(jbd-block)&quot;)]
+  WB[&quot;&lt;b&gt;writeback / checkpoint&lt;/b&gt;&lt;br/&gt;copies blocks to final locations,&lt;br/&gt;advances the log tail&quot;]
+  RS[&quot;&lt;b&gt;recovery scan&lt;/b&gt;&lt;br/&gt;(jbd-recover / jbd-replay)&quot;]
+  FS -- &quot;begin_txn / write_metadata / write_data /&lt;br/&gt;revoke_blocks / commit_txn&quot; --&gt; TM
+  TM --&gt; CT
+  CT --&gt; JR
+  JR --&gt; BD
+  WB -.-&gt; BD
+  RS -. &quot;at mount: reads the journal back&quot; .-&gt; JR
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  classDef side stroke-width:1.5px
+  class FS side
+  class TM,CT,JR rt
+  class WB,RS ingest
+  class BD store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch side"></span>the filesystem above the layer</li><li><span class="swatch rt"></span>write path: txn manager, commit thread, journal</li><li><span class="swatch store"></span>block device that holds the journal</li><li><span class="swatch ingest"></span>checkpoint and recovery</li></ul></figcaption></figure>
+<ol>
+<li><strong>Transaction manager</strong> (<code>jbd-txn</code>) hands out a <code>TxnHandle</code>, buffers the blocks written into
+it, allocates a monotonic <code>TxnId</code>, and passes the sealed transaction to the commit thread
+(<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-1">§8.1</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-12-2">§12.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-6">I6</a>).</li>
+<li><strong>Commit thread and group-commit window</strong> (<code>jbd-commit</code> in <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-3">§3</a>; <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/design/#sec-10">§10</a> and <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-2">§14.2</a> put the window
+manager in a separate <code>jbd-group-commit</code> crate) is the only writer to the journal (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-10">I10</a>, P14). It gathers concurrent
+transactions inside a bounded window, calls the active mode strategy&#39;s pre-commit hook, writes
+descriptor, data and commit records, and issues one <code>fsync</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-3">§3</a>).</li>
+<li><strong>Mode strategy</strong> (<code>jbd-mode-ordered</code> is the one wired in Phase 0) decides when data blocks hit
+their final location relative to the commit record (P4, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-4">§8.4</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-1">§1</a>).</li>
+<li><strong>Journal</strong> (<code>jbd-journal</code>) is a ring: block 0 is the superblock, the rest hold descriptor,
+data, commit and revoke records (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-2">§8.2</a>). Head is the next-write cursor, tail is the oldest
+uncheckpointed transaction (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-7">I7</a>).</li>
+<li><strong>Block device</strong> (<code>jbd-block</code>) is a trait with in-memory, file-backed and raw-device
+implementations plus a crash-injection decorator (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-1">§1</a>, P11, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-5">ADR-05</a>). Its <code>flush()</code> is the only
+durability primitive the layer relies on (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-13">I13</a>).</li>
+<li><strong>Checkpoint</strong> copies the committed blocks to their final locations, then advances the tail and
+records that in the superblock (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-3">§8.3</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-13-2">§13.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-9">I9</a>). Each transaction moves
+<code>Running -&gt; Locked -&gt; Committing -&gt; Committed -&gt; Checkpointed</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-1">§8.1</a>).</li>
+<li><strong>Recovery</strong> (<code>jbd-recover</code>, <code>jbd-replay</code>) reads the superblock, builds the revocation set,
+scans forward, and replays every valid committed transaction. It is safe to run again after a
+crash during recovery (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-8">I8</a>).</li>
+</ol>
+<p><code>commit_txn</code> returns <code>Ok(TxnId(42))</code> only after the journal <code>fsync</code> in step 6 of <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-6">§8.6</a>&#39;s trace
+(<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-6">§8.6</a>). A crash before that point discards the transaction entirely on recovery; a crash after it
+replays block 100 at recovery, and block 500 is already in place (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-6">§8.6</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-3">I3</a>).</p>
+<h2 id="ex-the-core-ideas">The core ideas</h2>
+<h3 id="ex-the-commit-record-is-the-pivot-8-3-p1-i1">The commit record is the pivot (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-3">§8.3</a>, P1, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-1">I1</a>)</h3>
+<p>The write-ahead discipline has three steps: describe every block write in the journal; make the
+descriptor, data and commit records durable with one <code>fsync</code>; only afterwards copy blocks to their
+final locations (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-3">§8.3</a>). The design is <strong>redo-only</strong> (it never stores an undo image): a transaction
+that has not committed has never touched a final location, so there is nothing to undo (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-3">§8.3</a>, P3).
+A transaction is durable if and only if its commit record is <code>fsync</code>&#39;d, checksum-valid and
+chained to a valid descriptor (P1, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-1">I1</a>). The commit record carries <code>crc_over_txn</code>, a checksum over
+the descriptor and every data block, plus <code>crc_self</code> over its own preceding fields (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-11-4">§11.4</a>). The mental model
+is a coin flip resolved once: before the <code>fsync</code> returns the fate is undetermined; after, it is
+permanently one of two values (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM1</a>). The blueprint names five crash shapes that every later phase
+tests (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-12-8">§12.8</a>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Crash shape</th>
+<th>State on disk</th>
+<th>After recovery</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>pre-write</td>
+<td>transaction opened, no journal writes</td>
+<td>transaction does not exist</td>
+</tr>
+<tr>
+<td>2</td>
+<td>mid-data</td>
+<td>some data journaled, no descriptor</td>
+<td>orphaned data reclaimed by the filesystem above</td>
+</tr>
+<tr>
+<td>3</td>
+<td>pre-commit</td>
+<td>descriptor and data durable, no commit record</td>
+<td>discarded</td>
+</tr>
+<tr>
+<td>4</td>
+<td>post-commit-pre-flush</td>
+<td>commit record written, <code>fsync</code> in flight</td>
+<td>either outcome is correct; caller tolerates both</td>
+</tr>
+<tr>
+<td>5</td>
+<td>post-flush</td>
+<td>commit record durable</td>
+<td>applied</td>
+</tr>
+</tbody></table></div>
+<h3 id="ex-a-ring-with-two-cursors-head-tail-and-wrap-around-8-2-p2-i7-mm2">A ring with two cursors: head, tail and wrap-around (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-2">§8.2</a>, P2, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM2</a>)</h3>
+<p>The journal is a fixed-size circular sequence of blocks (P2). Head advances on write and tail
+advances on checkpoint; the gap between them is exactly the uncheckpointed window (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM2</a>). Before
+any write, the journal checks whether the target blocks intersect the uncheckpointed region and,
+if so, blocks until checkpoint advances the tail (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-13-2">§13.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-7">I7</a>). That blocking is the price of a
+fixed size: predictable recovery time and write amplification, paid for with checkpoint-driven
+backpressure (P2, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>). In the default configuration the journal holds 128 MiB / 4 KiB = 32,768
+blocks (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 1). Records are fixed-width and byte-exact, so the recovery scan is
+deterministic rather than probabilistic (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-13-2">§13.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-14">ADR-14</a>). One layout rule is worth knowing: a data
+block whose first four bytes equal the journal magic is zeroed on write, flagged <code>ESCAPED</code> in its
+descriptor tag, and restored on read, so recovery never mistakes payload for a record header
+(<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-11-3">§11.3</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-13-2">§13.2</a>).</p>
+<h3 id="ex-three-modes-one-codebase-8-4-p4-i3-i14">Three modes, one codebase (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-4">§8.4</a>, P4, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-14">I14</a>)</h3>
+<p>The modes differ only in when data reaches its final location relative to the commit record
+(P4). Metadata atomicity is identical in all three (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-14">I14</a>).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Metadata journaled</th>
+<th>Data journaled</th>
+<th>Data flushed before commit</th>
+<th>Anomaly admitted (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-4">§8.4</a>)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>journal</code></td>
+<td>yes</td>
+<td>yes</td>
+<td>yes, in the same commit</td>
+<td>none; 2x write amplification</td>
+</tr>
+<tr>
+<td><code>ordered</code> (default)</td>
+<td>yes</td>
+<td>no</td>
+<td>yes</td>
+<td>none for data that metadata points at</td>
+</tr>
+<tr>
+<td><code>writeback</code></td>
+<td>yes</td>
+<td>no</td>
+<td>no</td>
+<td>stale or leaked data bytes behind valid metadata</td>
+</tr>
+</tbody></table></div>
+<p>Ordered mode buys causality between data and metadata, not ordering between two data writes in
+the same transaction (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM4</a>). In writeback mode the canonical anomaly is metadata claiming a size
+whose data bytes are whatever previously occupied the block, possibly from a deleted file (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-17-8">§17.8</a>).
+Writeback needs an explicit <code>--unsafe-writeback</code> flag (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-17-2">§17.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-17-10">§17.10</a>) and still keeps the
+metadata <code>fsync</code> barrier (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-17-6">§17.6</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-13">I13</a>).</p>
+<h3 id="ex-group-commit-one-fsync-for-many-transactions-14-2-14-6-p6-i12">Group commit: one <code>fsync</code> for many transactions (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-2">§14.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-6">§14.6</a>, P6, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-12">I12</a>)</h3>
+<p>With <code>fsync</code> latency <code>L</code>, an ungrouped commit thread is capped at <code>1/L</code> regardless of how many
+writers there are, because writers share one journal and cannot commit concurrently (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-6">§14.6</a>).
+<strong>Group commit</strong> gathers whatever arrives within a window <code>W</code>, terminates the batch with one
+commit record whose checksum covers every descriptor and data block in it, and pays for one
+<code>fsync</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-2">§14.2</a>). Batch size is about <code>N * W * r</code> for <code>N</code> writers each at rate <code>r</code>, and throughput
+is <code>(N*W*r)/W = N*r</code>, linear in <code>N</code> up to <code>max_batch</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-6">§14.6</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-2">§14.2</a>).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Formula</th>
+<th>Blueprint&#39;s values</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>fsync</code> latency <code>L</code></td>
+<td>given</td>
+<td>about 200 us on NVMe (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-6">§14.6</a>)</td>
+</tr>
+<tr>
+<td>ungrouped ceiling</td>
+<td><code>1/L</code></td>
+<td>about 5,000 txn/s (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-6">§14.6</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 5)</td>
+</tr>
+<tr>
+<td>batch at window close</td>
+<td><code>N*W*r</code></td>
+<td>64 * 5 ms * 1/ms = 320 per <code>fsync</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 4)</td>
+</tr>
+</tbody></table></div>
+<p>The batch is atomic as a whole: a crash mid-batch discards every transaction in it, and each
+waiting writer sees an error or timeout and must retry (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-12">I12</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-9">§14.9</a>). A solo committer exits the
+window early so it does not pay the full wait (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-2">§14.2</a>). The price is latency variance: some writers
+wait up to the full window (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM6</a>).</p>
+<h3 id="ex-recovery-two-passes-restartable-18-2-18-8-i8-p10-p13">Recovery: two passes, restartable (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-8">§18.8</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-8">I8</a>, P10, P13)</h3>
+<p>Recovery is a seven-step procedure (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-2">§18.2</a>): validate the superblock (refuse mount if its checksum
+fails); start at <code>oldest_uncheckpointed</code>; scan forward collecting every <code>Revoke</code> record; re-scan
+and apply each transaction with a valid commit record, skipping revoked blocks; flush; update and
+<code>fsync</code> the superblock; accept new transactions. The first pass builds the revocation set so the
+second pass can skip stale writes (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-6">§18.6</a>). The state machine is:</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">stateDiagram-v2
+  [*] --&gt; Mount
+  Mount --&gt; SuperblockRead
+  SuperblockRead --&gt; RefuseMount: CRC fail
+  SuperblockRead --&gt; BuildRevocationSet
+  BuildRevocationSet --&gt; ReplayForward
+  ReplayForward --&gt; FlushDevice
+  FlushDevice --&gt; UpdateSuperblock
+  UpdateSuperblock --&gt; AcceptWrites</pre></figure>
+<p><code>BuildRevocationSet</code>, <code>ReplayForward</code>, <code>FlushDevice</code> and <code>UpdateSuperblock</code> can each be re-run
+from a crash with the same result, and a crash during recovery re-enters at <code>SuperblockRead</code>
+(<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-6">§18.6</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-8">§18.8</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-8">I8</a>). Once <code>AcceptWrites</code> is reached, a new
+crash is the next mount&#39;s recovery problem (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-8">§18.8</a>). Cost is two full passes over the uncheckpointed
+region, linear in journal size (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-7">§18.7</a>, P10). Recovery is a normal mode of operation, the third
+alongside append and checkpoint, and is tested as often as the happy path (P13, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM7</a>).</p>
+<h3 id="ex-revocation-a-tombstone-not-a-delete-19-2-p8-i5-mm5">Revocation: a tombstone, not a delete (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-2">§19.2</a>, P8, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM5</a>)</h3>
+<p>Suppose block B is written by an older committed transaction, then freed and reallocated, and a
+newer transaction rewrites B. If the older transaction&#39;s descriptor is still in the journal (a
+wrap-around artifact), replaying it after the newer one would undo the newer write (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-5">§19.5</a>). The
+fix is a <code>Revoke</code> record, emitted in the same transaction as the metadata change (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-2">§19.2</a>). Recovery
+keeps a <code>BTreeMap&lt;BlockId, TxnId&gt;</code> (the <code>RevokeTable</code>) recording the highest revoking <code>TxnId</code> per
+block, and skips any replay the table says is revoked (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-2">§19.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-22">ADR-22</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-5">I5</a>).</p>
+<p>The skip rule is stated three ways. <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-2">§19.2</a>&#39;s <code>is_revoked(block, txn)</code> answers <code>txn &lt;= revoking_txn</code>,
+which also covers the revoking transaction&#39;s own write. <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-5">I5</a> uses a strict <code>T1 &lt; T2</code>, and <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-5">§19.5</a>&#39;s
+fixture has <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-2">T2</a> both revoke and rewrite B and expects <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-2">T2</a>&#39;s content after recovery (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-4">§19.4</a>). <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-2">§18.2</a>
+step 4 skips any block &quot;revoked at or before that transaction&#39;s id&quot;. The blueprint does not
+reconcile them (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-2">§19.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-5">§19.5</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-5">I5</a>).</p>
+<p>The table is coalesced at checkpoint: once a transaction is checkpointed, older revokes are
+implicitly satisfied (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-2">§19.2</a>). A missing revoke is the most insidious bug class in the layer because recovery silently
+restores stale data while the filesystem looks healthy (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-6">§19.6</a>, P8).</p>
+<h2 id="ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</h2>
+<h3 id="ex-default-consistency-mode-ordered-adr-01-p5">Default consistency mode: <code>ordered</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-1">ADR-01</a>, P5)</h3>
+<p><strong>Chosen:</strong> <code>ordered</code>, matching 15 years of ext4 operational experience (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>).
+<strong>Rejected:</strong> <code>journal</code>-default and <code>writeback</code>-default.
+<strong>When the rejected choice is right:</strong> <code>journal</code>-default for regulatory or database workloads that
+need byte-exact post-crash file size (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-16-3">§16.3</a>); <code>writeback</code>-default for build systems that re-derive
+their outputs (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-17-3">§17.3</a>).</p>
+<h3 id="ex-checksum-crc32c-adr-02-p7">Checksum: CRC32C (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-2">ADR-02</a>, P7)</h3>
+<p><strong>Chosen:</strong> CRC32C, hardware-accelerated and sufficient for accidental-corruption detection at this
+rate (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>).
+<strong>Rejected:</strong> SHA-256, or no checksum.
+<strong>When the rejected choice is right:</strong> SHA-256, under an active-adversary threat model; the
+blueprint defers it (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-21-6">§21.6</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-36">§36</a>). Note that <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-2">ADR-02</a> cites <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-1">T1</a> and <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-2">T2</a> as that adversarial regime,
+while <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-23">§23</a> lists CRC32C as the mitigation for <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-1">T1</a> and <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-2">T2</a>; the blueprint does not reconcile the two
+(<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-23">§23</a>).</p>
+<h3 id="ex-journal-structure-a-fixed-size-circular-log-adr-03-p2">Journal structure: a fixed-size circular log (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-3">ADR-03</a>, P2)</h3>
+<p><strong>Chosen:</strong> fixed-size ring, for predictable size and recovery time (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>).
+<strong>Rejected:</strong> an append-only growing file, or a BTRFS-style B-tree log.
+<strong>When the rejected choice is right:</strong> append-only, when journal size truly cannot be bounded in
+advance, which <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a> calls rare (an archival write-ahead log is its example).</p>
+<h3 id="ex-group-commit-window-5-ms-default-adr-04-mm6">Group-commit window: 5 ms default (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-4">ADR-04</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM6</a>)</h3>
+<p><strong>Chosen:</strong> 5 ms default, configurable 0 to 50 ms, JBD2&#39;s proven default (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>).
+<strong>Rejected:</strong> fixed 1 ms, fixed 20 ms, or no window.
+<strong>When the rejected choice is right:</strong> 1 ms, for callers that are sensitive to sub-millisecond
+commit latency, such as application-level <code>fsync</code> at the database layer (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>). <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-7">§14.7</a> adds that
+throughput-only callers want 20 to 50 ms.</p>
+<h3 id="ex-writer-concurrency-one-commit-thread-per-journal-adr-08-p14-i10">Writer concurrency: one commit thread per journal (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-8">ADR-08</a>, P14, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-10">I10</a>)</h3>
+<p><strong>Chosen:</strong> one commit thread, which removes concurrent-write-ordering bugs; group commit absorbs
+the throughput need (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>).
+<strong>Rejected:</strong> multiple concurrent writer threads.
+<strong>When the rejected choice is right:</strong> only with multiple independent journal regions; multi-journal
+sharding is deferred (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-30">§30</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-36">§36</a>).</p>
+<h3 id="ex-commit-execution-model-a-synchronous-thread-adr-07-adr-13">Commit execution model: a synchronous thread (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-7">ADR-07</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-13">ADR-13</a>)</h3>
+<p><strong>Chosen:</strong> synchronous <code>fsync</code> on a dedicated <code>std::thread</code>, because <code>fsync</code> is physically
+synchronous (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>).
+<strong>Rejected:</strong> <code>io_uring</code> async submission from day one.
+<strong>When the rejected choice is right:</strong> once the kernel floor is 5.10 or later everywhere and the
+win is benchmark-proven (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-9">§9</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-21-7">§21.7</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-36">§36</a>).</p>
+<h3 id="ex-roads-not-taken">Roads not taken</h3>
+<p><em>Log-structured filesystem</em> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-35">§35</a> A1): the log is the filesystem. It wins on media with poor
+random-write performance (Sprite LFS, f2fs). Rejected because it replaces the whole storage layout
+and adds segment-cleaning latency spikes, while this layer&#39;s scope is journaling only (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-35">§35</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-1">§1</a>).</p>
+<p><em>Shadow paging / copy-on-write</em> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-35">§35</a> A2): no separate journal. It wins when snapshot-everywhere and
+full-tree checksumming are first-class (ZFS, BTRFS). Rejected because this layer journals around
+fixed final locations for a filesystem that owns its own allocator (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-35">§35</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-1">§1</a>).</p>
+<p><em>Soft updates</em> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-35">§35</a> A3): dependency-ordered in-place writes, no log. It wins when the write-twice
+cost of journaling (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-5">M5</a>) is unacceptable and CPU for dependency tracking is available (FreeBSD FFS).
+Rejected because it is more complex than the commit-record pivot and composes less cleanly with
+group commit and an external journal (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-35">§35</a>).</p>
+<p><em>Application-level journaling</em> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-35">§35</a> A4): the caller owns a log. It wins for databases with their
+own write-ahead log, which is the <code>writeback</code>-mode use case (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-35">§35</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-17-3">§17.3</a>). Rejected as the only
+mode because most callers do not want to build crash consistency themselves (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-35">§35</a>).</p>
+<p><em>Deferred</em> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-36">§36</a>): HMAC journal authentication, multi-journal sharding, <code>io_uring</code>, a
+persistent-memory journal and a backup superblock, each with its own un-defer trigger (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-36">§36</a>).</p>
+<h2 id="ex-what-must-never-be-false">What must never be false</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-1">I1</a></strong>: a transaction is durable iff its commit record is <code>fsync</code>&#39;d, checksum-valid and chained.
+Noticed by recovery re-validating the CRC on every commit record; <code>jbd_commits_total</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-2">I2</a></strong>: no final-location write is claimed durable before its commit record is. Noticed by a
+code-review checklist and conformance; <code>jbd_commit_latency_seconds</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-3">I3</a></strong>: in ordered mode, data flushes before the metadata commit record. Noticed by the
+<code>mode_ordered</code> bucket; <code>jbd_ordered_flush_seconds</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-4">I4</a></strong>: recovery applies a transaction only if every checksum in its chain validates. Noticed as
+a CRC mismatch classified as a torn write; <code>jbd_torn_writes_total</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-5">I5</a></strong>: a block revoked by a newer transaction is never replayed from an older one. Noticed by
+the <code>revocation</code> bucket; <code>jbd_revoke_table_size</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-6">I6</a></strong>: <code>TxnId</code> is monotonic and never reused. Noticed by an assertion in the submit path;
+<code>jbd_txn_id_gap_total</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-7">I7</a></strong>: the ring never overwrites a block of an uncheckpointed transaction. Noticed by a
+wrap-around check before write; <code>jbd_journal_used_fraction</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-8">I8</a></strong>: recovering twice from the same pre-image yields the same post-image. Noticed by the
+<code>recovery_idempotence</code> bucket; <code>jbd_recovery_seconds</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-9">I9</a></strong>: the superblock is updated and <code>fsync</code>&#39;d strictly after the commit records it references
+are durable. Noticed by a code-review checklist; <code>jbd_checkpoint_lag_txns</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-10">I10</a></strong>: exactly one commit thread writes a given journal. Noticed by a single-writer assertion
+(no telemetry; <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-11">I11</a></strong>: a data block starting with the journal magic is escaped on write and restored on read.
+Noticed by the <code>escape_rule</code> bucket; <code>jbd_escaped_blocks_total</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-12">I12</a></strong>: a group-commit batch is atomic: one commit record covers every transaction in it.
+Noticed by the <code>group_commit</code> bucket; <code>jbd_group_commit_batch_size</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-13">I13</a></strong>: <code>BlockDevice::flush()</code> is the only durability barrier the layer trusts. Noticed by a
+device-conformance test at mount, which refuses mount if flush is unverifiable;
+<code>jbd_flush_calls_total</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-14">I14</a></strong>: the active mode never breaks metadata atomicity, only data timing. Noticed by the
+mode-specific conformance buckets; <code>jbd_commits_total{mode}</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-7">§7</a>).</li>
+</ul>
+<h2 id="ex-what-breaks-in-production">What breaks in production</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#fm-1">FM-1</a> and <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#fm-2">FM-2</a>: a block or commit record fails its CRC at recovery.</strong> A torn write from power
+loss, caught by a per-block CRC or <code>crc_self</code> mismatch. Recovery discards the owning transaction;
+<code>jbd dump</code> shows its boundary and <code>jbd fsck-journal</code> isolates the failing record (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-24">§24</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-4">I4</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#fm-4">FM-4</a>: a gap between a descriptor and its expected data blocks.</strong> Cause is a lost write, where
+the device dropped it. The scan detects the missing journal block and discards the incomplete
+transaction; the data was never durable. <code>jbd dump --pre-recovery</code> shows the gap (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-24">§24</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-5">T5</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#fm-5">FM-5</a>: checkpoint incomplete after a crash.</strong> Cause is power loss during checkpoint writeback.
+Detected when <code>oldest_uncheckpointed</code> is behind <code>last_committed</code> at mount. Recovery re-replays
+from the journal, which is safe because it is idempotent (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-24">§24</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-8">I8</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#fm-6">FM-6</a>: <code>begin_txn</code> blocks indefinitely.</strong> The journal is full and checkpoint is not advancing.
+Detected by <code>jbd_journal_used_fraction</code> staying above 0.85. Recovery is a forced checkpoint, or
+<code>jbd-cli compact-journal</code> by hand; see <code>docs/runbooks/journal-full.md</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-24">§24</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-7">I7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#fm-9">FM-9</a>: two recovery runs on the same pre-image give different post-images.</strong> A non-deterministic
+recovery bug. The <code>recovery_idempotence</code> diff check catches it. There is no auto-recovery: it is
+a code defect, fixed by patching and re-running conformance (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-24">§24</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-9">§18.9</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#fm-12">FM-12</a>: some transactions in a batch look durable and others do not.</strong> The commit-record CRC
+does not cover the whole batch. Caught by the <code>group_commit</code> bucket&#39;s crash-mid-batch case; a code
+defect with no auto-recovery (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-24">§24</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-12">I12</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-5">§14.5</a>).</li>
+</ul>
+<p>Threats worth knowing (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-23">§23</a>). <strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-3">T3</a></strong> is a torn write from power loss, answered by per-block CRCs
+(P7). <strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-5">T5</a></strong> is a lost write: the device acknowledges and then drops the write. The journal layer
+alone has no mitigation and relies on <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-13">I13</a>&#39;s flush contract (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#sec-23">§23</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM3</a>). <strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-7">T7</a></strong> is a stale write
+replayed over a freed and reallocated block, answered by revoke records (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-5">I5</a>). <strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-8">T8</a></strong> is journal-full
+livelock under a write burst, answered by a bounded <code>max_batch</code> and checkpoint backpressure (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-7">I7</a>).
+<strong><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-12">T12</a></strong> is a crafted malformed record meant to crash the recovery parser, answered by bounds-checked
+decoding and a consistency check between <code>MORE</code> and <code>tag_count</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-7">§8.7</a>).</p>
+<h2 id="ex-the-numbers">The numbers</h2>
+<p>Rows marked target are design targets gated by their phase (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-29">§29</a>); arithmetic rows are <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a>&#39;s.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Value</th>
+<th>Formula or source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Commit latency p50 (ordered, 4-block txn)</td>
+<td>&lt;= 300 us, target (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-1">M1</a>)</td>
+<td>one journal <code>fsync</code> + one data <code>flush</code>, NVMe-class (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Commit latency p99</td>
+<td>&lt;= 2 ms, target (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-2">M2</a>)</td>
+<td>tail from device queueing (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Group-commit throughput, 64 writers</td>
+<td>&gt;= 100,000 txn/s, target (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-3">M3</a>)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-4">§14.4</a></td>
+</tr>
+<tr>
+<td>Recovery time</td>
+<td>&lt;= 5 s per 1 GiB journal, target (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-4">M4</a>)</td>
+<td>linear in journal size (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-30">§30</a>)</td>
+</tr>
+<tr>
+<td>Journal-mode write amplification</td>
+<td>&lt;= 2.05x, target (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-5">M5</a>)</td>
+<td><code>(1 + 1 + descriptor overhead)</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 11)</td>
+</tr>
+<tr>
+<td>Checksum CPU overhead</td>
+<td>&lt;= 5% of journal throughput, target (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-6">M6</a>)</td>
+<td>hardware CRC32C (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Backpressure stall p99 at 90% fill</td>
+<td>&lt;= 50 ms, target (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-7">M7</a>)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a></td>
+</tr>
+<tr>
+<td>Superblock update latency</td>
+<td>&lt;= 1 ms, target (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-10">M10</a>)</td>
+<td>one <code>fsync</code>&#39;d 4 KiB block (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Journal size min / default / max</td>
+<td>4 MiB / 128 MiB / 4 GiB</td>
+<td><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a></td>
+</tr>
+<tr>
+<td>Recovery scan, 128 MiB / 1 GiB</td>
+<td>about 0.25 s / about 2.05 s, arithmetic</td>
+<td><code>journal_size / device_bandwidth</code> at 500 MB/s, as <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> evaluates it (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> items 2, 3)</td>
+</tr>
+<tr>
+<td>Batch per <code>fsync</code>, N=64, W=5 ms, r=1/ms</td>
+<td>320 txns, arithmetic</td>
+<td><code>N * W * r</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 4)</td>
+</tr>
+<tr>
+<td>Algorithmic throughput ceiling</td>
+<td>1,600,000 txn/s, arithmetic</td>
+<td><code>batch_size * fsync_rate = 320 * 5,000</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 6)</td>
+</tr>
+<tr>
+<td>Journal write-bandwidth ceiling</td>
+<td>about 30,500 txn/s, arithmetic</td>
+<td><code>500 MB/s / (4 blocks * 4 KiB)</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 7)</td>
+</tr>
+<tr>
+<td>Revoke table at R = 10^6</td>
+<td>16 MiB</td>
+<td><code>R * (sizeof(BlockId) + sizeof(TxnId))</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 8)</td>
+</tr>
+<tr>
+<td>Memory ceiling per open journal</td>
+<td>&lt;= 64 MiB resident</td>
+<td>revoke table plus in-flight buffers (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>)</td>
+</tr>
+<tr>
+<td>Backpressure onset, 128 MiB journal</td>
+<td>about 115 MiB uncheckpointed</td>
+<td><code>0.9 * 128 MiB</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 12)</td>
+</tr>
+</tbody></table></div>
+<p>Where the blueprint disagrees with itself, both statements stand:</p>
+<ul>
+<li><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 7 calls about 30,500 txn/s, at 500 MB/s and 4-block transactions, &quot;the real ceiling
+for typical workloads&quot;, while <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-3">M3</a> and the Phase 2 criterion ask for at least 100,000 txn/s from
+64 writers committing 4-block transactions on an NVMe-class device (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-4">§14.4</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-29">§29</a>).</li>
+<li><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-6">§14.6</a> gives throughput as <code>N*r</code>, which for <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-4">§14.4</a>&#39;s 64 writers each committing every 1 ms falls
+short of <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-4">§14.4</a>&#39;s 100,000 txn/s; the same <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-6">§14.6</a> paragraph and <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 6 instead multiply the
+320-transaction batch by 5,000 fsyncs/s for 1,600,000 txn/s.</li>
+<li><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 4 and <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-6">§14.6</a> put 320 transactions in each batch at N=64, while <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-2">§14.2</a> caps a batch at
+<code>max_batch</code> of 256.</li>
+<li><a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-4">§18.4</a> asks a 128 MiB journal to recover in at most 0.25 s on a 500 MB/s device, the same figure
+<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 2 gives for one scan pass, while <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-7">§18.7</a> says recovery makes two full passes.</li>
+</ul>
+<h2 id="ex-how-it-compares">How it compares</h2>
+<ul>
+<li><strong>ext4 (JBD2)</strong> is the direct ancestor. Its distinguishing choice is defaulting to <code>ordered</code>
+mode for 15 or more years, which wins for general-purpose Linux filesystems with mixed workloads
+(<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/compare/#sec-32">§32</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#adr-1">ADR-01</a>).</li>
+<li><strong>XFS</strong> journals metadata only, with in-core log buffers that many CPUs write to concurrently
+before one flush. That wins for metadata-heavy workloads at very high concurrency, where it
+outperforms a single-commit-thread ring (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/compare/#sec-32">§32</a>).</li>
+<li><strong>ZFS (ZIL)</strong> rejected journal-plus-fixed-final-locations for copy-on-write everywhere, using
+the ZIL as a narrow synchronous-write accelerator with the transaction-group pipeline as the
+primary mechanism. That wins when end-to-end checksumming and snapshots are first-class (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/compare/#sec-32">§32</a>,
+<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/trade-offs/#sec-35">§35</a> A2).</li>
+<li><strong>BTRFS (log tree)</strong> is also copy-on-write but keeps a lightweight metadata-only log tree to speed
+up <code>fsync</code> without a full tree commit. That wins for frequent small synchronous metadata updates,
+such as mail servers and VM images (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/compare/#sec-32">§32</a>).</li>
+</ul>
+<h2 id="ex-building-it-the-phase-plan">Building it — the phase plan</h2>
+<p>Phase N is section N+12 of the blueprint, and each phase&#39;s acceptance criteria are subsection .4
+of that section (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-12">§12</a> to <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-22">§22</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-39">§39</a>). Build card: <code>blueprints/build-cards/Filesystem-Journaling.md</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>What exists afterwards</th>
+<th>The proof</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>repo skeleton and an in-memory correctness kernel (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-12">§12</a>)</td>
+<td><code>hello_journal</code> passes and <code>make conformance</code> reports 3 pass, 0 fail, 9 deferred (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-12-4">§12.4</a>)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>on-disk layout, superblock, escape rule, checkpoint thread (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-13">§13</a>)</td>
+<td>a 1,000-transaction restart test: 0 false positives, 0 false negatives (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-13-4">§13.4</a>)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>group commit (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-14">§14</a>)</td>
+<td>64 writers sustain &gt;= 100,000 txn/s and a crash mid-batch discards the whole batch (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-3">M3</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-12">I12</a>; <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-4">§14.4</a>)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>ordered mode as mount default (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-15">§15</a>)</td>
+<td>a crash injected at every line of the commit path leaves one of two allowed states (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-15-4">§15.4</a>)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>journal mode (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-16">§16</a>)</td>
+<td>a crashed transaction replays byte-identical data and metadata (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-16-4">§16.4</a>)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>writeback mode plus a runbook (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-17">§17</a>)</td>
+<td>throughput &gt;= 1.5x ordered mode; metadata durability asserted, data durability not (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-17-4">§17.4</a>)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>recovery and replay (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-18">§18</a>)</td>
+<td>recovery &lt;= 5 s per 1 GiB (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-4">M4</a>); crash at every byte offset in a block is correct (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-4">§18.4</a>)</td>
+</tr>
+<tr>
+<td>7</td>
+<td>revocation records and a coalescing <code>RevokeTable</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-19">§19</a>)</td>
+<td>free, reallocate, write, crash, recover yields the new content (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-19-4">§19.4</a>)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>external journal device (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-20">§20</a>)</td>
+<td>removing the journal device mid-mount gives a clean mount failure (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-20-4">§20.4</a>)</td>
+</tr>
+<tr>
+<td>9</td>
+<td>full checksumming (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-21">§21</a>)</td>
+<td>a single-bit-flip on any journal block is detected and the transaction discarded (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-21-4">§21.4</a>)</td>
+</tr>
+<tr>
+<td>10</td>
+<td>snapshot hook and online resize (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-22">§22</a>)</td>
+<td>a resize from 128 MiB to 256 MiB loses zero transactions (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-22-4">§22.4</a>)</td>
+</tr>
+</tbody></table></div>
+<h2 id="ex-questions-to-test-yourself">Questions to test yourself</h2>
+<ol>
+<li>Why does a crash between the data flush and the commit-record <code>fsync</code> in ordered mode never
+produce a &quot;metadata points at garbage&quot; state? — <em>Hint: the worked trace in <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-6">§8.6</a>, then <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-3">I3</a>.</em></li>
+<li>Why is group commit&#39;s batch CRC coverage a correctness requirement and not merely a performance
+nicety? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-2">§14.2</a> and <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-12">I12</a>; <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#fm-12">FM-12</a> shows the failure.</em></li>
+<li>Why must the superblock update strictly follow the commit records it references, and what
+specific recovery bug does reversing that order reintroduce? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-9">I9</a> and the Phase 1
+pitfalls in <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-13-6">§13.6</a>.</em></li>
+<li>Why does writeback mode&#39;s anomaly window exist even though metadata durability holds? What
+determines its size? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-17-1">§17.1</a> and <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-17-8">§17.8</a>.</em></li>
+<li>Why is recovery required to be idempotent, and what real operational scenario makes that a
+load-bearing requirement rather than a theoretical nicety? — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-8">I8</a>, the state machine in
+<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-18-8">§18.8</a> and <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#fm-9">FM-9</a>.</em></li>
+</ol>
+<h2 id="ex-if-you-only-remember-three-things">If you only remember three things</h2>
+<p>A transaction is atomic because of one bit, whether its commit record is durable, and everything
+else is scaffolding to make that bit trustworthy (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-2">§2</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM1</a>). The fixed-size circular log buys
+predictable recovery time and write amplification, paid for by checkpoint backpressure, and group
+commit amortises the single commit thread&#39;s <code>fsync</code> across many writers (P2, P6, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-14-6">§14.6</a>). Recovery is
+a normal, constantly tested, restartable path, and the whole design rests on the device&#39;s <code>flush()</code>
+meaning what it says (P13, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-13">I13</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/study/#sec-31">MM3</a>).</p>
+<h2 id="ex-words-used-here">Words used here</h2>
+<ul>
+<li><strong>Transaction</strong>: a set of block writes committed together as the unit of durability (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-1">§8.1</a>).</li>
+<li><strong>Journal</strong>: the fixed-size circular log of in-flight transactions, on the same device or an
+external one (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-2">§8.2</a>).</li>
+<li><strong>Commit record</strong>: the journal record that marks a transaction durable; the pivot bit (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-1">I1</a>,
+<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-11-4">§11.4</a>).</li>
+<li><strong>Descriptor record</strong>: the record that announces a transaction and lists its block tags (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-11-3">§11.3</a>).</li>
+<li><strong>Write-ahead logging</strong>: making the log durable before the change it describes touches its final
+location (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-3">§8.3</a>).</li>
+<li><strong>Checkpoint</strong>: copying committed blocks to final locations and advancing the tail, which frees
+journal space (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/architecture/#sec-8-3">§8.3</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-9">I9</a>).</li>
+<li><strong>Group commit</strong>: batching many transactions into one journal write and one <code>fsync</code> (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-14">§14</a>).</li>
+<li><strong>Torn write</strong>: a write that started but did not finish before a crash, detected by checksum
+mismatch (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#t-3">T3</a>).</li>
+<li><strong>Revoke record</strong>: a tombstone telling recovery to ignore an older transaction&#39;s write to a block
+(<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/build/#sec-19">§19</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-5">I5</a>).</li>
+<li><strong>Escape rule</strong>: zeroing a data block&#39;s first four bytes if they match the journal magic, and
+restoring them on read (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/reliability/#inv-11">I11</a>).</li>
+<li><strong>Superblock</strong>: journal block 0, the first thing recovery reads (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/blueprint/#sec-11-5">§11.5</a>).</li>
+<li><strong>Write amplification</strong>: bytes written to the journal plus final locations, relative to bytes the
+caller wrote (<a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#m-5">M5</a>, <a class="cite" href="/system-design-blueprints/systems/filesystem-journaling/numbers/#sec-33">§33</a> item 11).</li>
+</ul>
+</div> </div> </div> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

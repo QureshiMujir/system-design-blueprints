@@ -1,0 +1,413 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Time-Series Database from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Time-Series Database from Scratch, hld: §3 overview + §8 domain model. Build ChronoDB, an embeddable, single-binary time-series database engine: ingest timestamped numeric samples tagged with label sets, persist them in time-partitioned, Gorilla-compressed immutable…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/time-series-database/">Time-Series Database from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Time-Series Database from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~18 weeks</li> <li>2,097 lines</li> <li>blueprint #83</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/time-series-database/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/time-series-database/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/time-series-database/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/time-series-database/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/time-series-database/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/time-series-database/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/time-series-database/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/time-series-database/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/time-series-database/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/time-series-database/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Time-Series Database from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                 ┌─────────────────────────── chronodb-server ───────────────────────────┐
+                 │  ingest.rs (remote-write)        query_api.rs (range/aggregate)        │
+                 │       │                                    │                           │
+                 │  cardinality_guard.rs (P4,I11)              │                           │
+                 └───────┼────────────────────────────────────┼───────────────────────────┘
+                         ▼                                    ▼
+                 ┌──────────────┐                      ┌──────────────┐
+                 │ chronodb-wal │◀── fsync before ack ─│ chronodb-query│
+                 │ segment.rs   │                      │ plan.rs/exec.rs│
+                 └──────┬───────┘                      └──────┬───────┘
+                        ▼                                     │  reads
+                 ┌──────────────────────── chronodb-storage ──┼─────────┐
+                 │  head.rs (mutable, in-memory, I13)          │         │
+                 │       │ flush (atomic swap)                 │         │
+                 │       ▼                                      ▼         │
+                 │  block.rs (immutable, mmap, ADR-20) ◀── manifest.rs   │
+                 │       │                                                │
+                 │       ▼                                                │
+                 │  compactor.rs (P7,ADR-09) ──▶ retention.rs (P14,I7)    │
+                 └───────┬────────────────────────────────────────────────┘
+                         ▼
+                 ┌──────────────┐        ┌──────────────┐
+                 │chronodb-index│        │chronodb-codec│
+                 │postings.rs   │        │delta_of_delta│
+                 │labelindex.rs │        │xor_float.rs  │
+                 └──────────────┘        └──────────────┘
+                         ▲
+                 ┌──────────────┐
+                 │chronodb-rollup│  (reads persisted blocks, writes rollup blocks)
+                 │tiers.rs/job.rs│
+                 └──────────────┘</code></pre>
+<p><strong>chronodb-server</strong> is the trust and process boundary: it authenticates/limits ingestion
+(cardinality_guard, <a class="cite" href="/system-design-blueprints/systems/time-series-database/reliability/#t-1">T1</a>/<a class="cite" href="/system-design-blueprints/systems/time-series-database/reliability/#t-3">T3</a>) and terminates the query API. <strong>chronodb-wal</strong> is the
+durability boundary — no sample is acknowledged until its WAL record is fsynced (P5, <a class="cite" href="/system-design-blueprints/systems/time-series-database/reliability/#inv-5">I5</a>).
+<strong>chronodb-storage</strong> is the persistence and concurrency boundary: <code>head.rs</code> is the only
+mutable structure in the system (P1); <code>block.rs</code>/<code>manifest.rs</code> are strictly immutable once
+written (<a class="cite" href="/system-design-blueprints/systems/time-series-database/reliability/#inv-10">I10</a>); <code>compactor.rs</code> and <code>retention.rs</code> run as background, throttleable workers
+(P7) that never hold locks the ingest path needs. <strong>chronodb-index</strong> is shared,
+read-mostly state consulted by both ingestion (series lookup/creation) and query (label
+selection); it is the cardinality-economics chokepoint (P4). <strong>chronodb-codec</strong> is a pure,
+allocation-free library with no knowledge of blocks, WAL, or index — it only knows bytes
+in, bytes out (testable in isolation, <a class="cite" href="/system-design-blueprints/systems/time-series-database/build/#sec-14">§14</a>). <strong>chronodb-rollup</strong> is a downstream reader/
+writer that treats persisted blocks as its only input, guaranteeing rollups never touch
+the mutable head (P10).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-1">8.1 Ingestion grammar (line-protocol-style, EBNF)</h3>
+<pre class="diagram"><code>sample      ::= metric labels? SP value SP timestamp
+metric      ::= identifier
+labels      ::= &quot;{&quot; label (&quot;,&quot; label)* &quot;}&quot;
+label       ::= identifier &quot;=&quot; quoted_string
+value       ::= float
+timestamp   ::= int64            (* unix millis, ADR-18 *)
+identifier  ::= letter (letter | digit | &quot;_&quot;)*</code></pre>
+<p>Conforms to the shape of both the OpenMetrics exposition format and InfluxDB line
+protocol (<a class="cite" href="/system-design-blueprints/systems/time-series-database/study/#sec-5">§5</a>, RFCs/Specifications); <code>chronodb-server::ingest.rs</code> accepts either via a
+pluggable front-end parser, normalizing into the internal <code>Sample</code>/<code>SeriesRef</code> types
+(<a class="cite" href="/system-design-blueprints/systems/time-series-database/design/#sec-11">§11</a>).</p>
+<h3 id="sec-8-2">8.2 Chunk wire layout (Gorilla-style, per series, per chunk)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Width</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>magic</code></td>
+<td>2 B</td>
+<td>format sentinel</td>
+</tr>
+<tr>
+<td><code>encoding</code></td>
+<td>1 B</td>
+<td><code>0x01</code> = delta-of-delta+XOR (<a class="cite" href="/system-design-blueprints/systems/time-series-database/trade-offs/#adr-3">ADR-03</a>/04)</td>
+</tr>
+<tr>
+<td><code>num_samples</code></td>
+<td>varint</td>
+<td>count in this chunk</td>
+</tr>
+<tr>
+<td><code>first_ts</code></td>
+<td>8 B</td>
+<td>absolute i64 millis</td>
+</tr>
+<tr>
+<td><code>first_value</code></td>
+<td>8 B</td>
+<td>absolute f64 bits</td>
+</tr>
+<tr>
+<td><code>ts_stream</code></td>
+<td>bitstream</td>
+<td>delta-of-delta encoded, samples 2..n</td>
+</tr>
+<tr>
+<td><code>val_stream</code></td>
+<td>bitstream</td>
+<td>XOR encoded, samples 2..n</td>
+</tr>
+<tr>
+<td><code>crc32c</code></td>
+<td>4 B</td>
+<td>trailer, covers all preceding bytes</td>
+</tr>
+</tbody></table></div>
+<p>Worked example (5 samples, 15 s nominal interval, one late sample):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>i</th>
+<th>ts (ms)</th>
+<th>Δ</th>
+<th>ΔΔ</th>
+<th>ts bits written</th>
+<th>value</th>
+<th>XOR-vs-prev bits</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>1000000</td>
+<td>—</td>
+<td>—</td>
+<td>64 (absolute)</td>
+<td>10.0</td>
+<td>64 (absolute)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>1015000</td>
+<td>15000</td>
+<td>—</td>
+<td>varint(15000)</td>
+<td>10.0</td>
+<td><code>0</code> (identical)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>1030000</td>
+<td>15000</td>
+<td>0</td>
+<td><code>0</code> (1 bit, &quot;same delta&quot;)</td>
+<td>10.1</td>
+<td>control+meaningful-XOR bits</td>
+</tr>
+<tr>
+<td>3</td>
+<td>1045200</td>
+<td>15200</td>
+<td>200</td>
+<td>control+varint(200)</td>
+<td>10.1</td>
+<td><code>0</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>1060000</td>
+<td>14800</td>
+<td>-400</td>
+<td>control+varint(-400)</td>
+<td>9.9</td>
+<td>control+meaningful-XOR bits</td>
+</tr>
+</tbody></table></div>
+<p>Malformed-input example: a chunk whose <code>num_samples</code> disagrees with the bit-length
+implied by decoding the streams to exhaustion — rejected by <code>chunk.rs</code> decode with
+<code>ChunkError::LengthMismatch</code>, never partially returned (ties to <a class="cite" href="/system-design-blueprints/systems/time-series-database/reliability/#inv-10">I10</a>).</p>
+<p>Failure-path example: process crashes after the WAL fsync for sample i=4 but before
+<code>head.rs</code> updates its in-memory chunk buffer — on restart, <code>replay.rs</code> re-applies the WAL
+record for i=4 to a freshly-initialized head, producing the identical chunk buffer state
+(<a class="cite" href="/system-design-blueprints/systems/time-series-database/reliability/#inv-14">I14</a>) — no data loss, no duplication.</p>
+<h3 id="sec-8-3">8.3 WAL record framing</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Width</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>len</code></td>
+<td>4 B</td>
+<td>record body length</td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td>1 B</td>
+<td>Series / Samples / Tombstone / Checkpoint</td>
+</tr>
+<tr>
+<td><code>body</code></td>
+<td><code>len</code> B</td>
+<td>type-specific payload (<a class="cite" href="/system-design-blueprints/systems/time-series-database/design/#sec-11">§11</a>)</td>
+</tr>
+<tr>
+<td><code>crc32c</code></td>
+<td>4 B</td>
+<td>covers <code>type</code>+<code>body</code> (<a class="cite" href="/system-design-blueprints/systems/time-series-database/reliability/#inv-4">I4</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-4">8.4 Head-block lifecycle (state machine)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entered when</th>
+<th>Exits to</th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Empty</code></td>
+<td>process start, no head yet</td>
+<td><code>Active</code></td>
+<td>first sample appended</td>
+</tr>
+<tr>
+<td><code>Active</code></td>
+<td>samples being appended</td>
+<td><code>Sealing</code></td>
+<td>time range boundary reached or memory ceiling near (P13)</td>
+</tr>
+<tr>
+<td><code>Sealing</code></td>
+<td>flush in progress</td>
+<td><code>Persisted</code></td>
+<td>manifest write completes (<a class="cite" href="/system-design-blueprints/systems/time-series-database/reliability/#inv-13">I13</a> atomic swap)</td>
+</tr>
+<tr>
+<td><code>Persisted</code></td>
+<td>flush complete</td>
+<td><code>Compacting</code> (as input)</td>
+<td>compactor picks it up (P7)</td>
+</tr>
+<tr>
+<td><code>Compacting</code></td>
+<td>selected as compaction input</td>
+<td><code>Superseded</code></td>
+<td>compaction output sealed (<a class="cite" href="/system-design-blueprints/systems/time-series-database/reliability/#inv-6">I6</a>)</td>
+</tr>
+<tr>
+<td><code>Superseded</code></td>
+<td>replaced by compaction output</td>
+<td><code>Reclaimable</code></td>
+<td>retention grace period (<a class="cite" href="/system-design-blueprints/systems/time-series-database/reliability/#inv-7">I7</a>) elapses</td>
+</tr>
+<tr>
+<td><code>Reclaimable</code></td>
+<td>grace period elapsed</td>
+<td>(deleted)</td>
+<td>janitor physical delete (P14)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Block directory layout</h3>
+<pre class="diagram"><code>blocks/01HK7.../
+  meta.json      block time range, series/sample counts, checksums (P11)
+  index          label→postings, series→chunk offsets (ADR-07/08)
+  chunks         concatenated per-series chunk streams (§8.2)</code></pre>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

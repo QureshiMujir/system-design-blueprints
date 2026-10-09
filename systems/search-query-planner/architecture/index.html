@@ -1,0 +1,544 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Search Query Planner from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Search Query Planner from Scratch, hld: §3 overview + §8 domain model. Build a cost-based query planner + executor over an existing inverted index (Lucene / Tantivy-class). Pipeline, end to end:"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/search-information-retrieval/">Search &amp; Information Retrieval</a> </li><li> <a href="/system-design-blueprints/systems/search-query-planner/">Search Query Planner from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:340"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/search-information-retrieval/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Search &amp; Information Retrieval</span></a> </p> <h1>Search Query Planner from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~27 weeks</li> <li>2,306 lines</li> <li>blueprint #294</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/search-query-planner/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/search-query-planner/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/search-query-planner/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/search-query-planner/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/search-query-planner/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/search-query-planner/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/search-query-planner/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/search-query-planner/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/search-query-planner/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/search-query-planner/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Search Query Planner from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<p>Canonical diagram. All later sections reference these box names verbatim. The pipeline is shown in two panels: <strong>Panel 1 — Front-end &amp; Planning (A–I)</strong> lowers query text to a physical plan; <strong>Panel 2 — Execution &amp; Coordination (J–N)</strong> runs it. The seam is the physical plan handed from (I) to (J).</p>
+<p><strong>Panel 1 — Front-end &amp; Planning (boxes A–I): query text → physical plan.</strong></p>
+<pre class="diagram"><code>                              ┌──────────────────────────────────────────────────────────┐
+   query DSL text  ──────────▶│  (A) LEXER  ──▶  (B) PARSER  ──▶  query AST                │
+                              └───────────────────────────────┬──────────────────────────┘
+                                                               │ AST
+                                                               ▼
+                              ┌──────────────────────────────────────────────────────────┐
+                              │  (C) QUERY-TIME ANALYSIS  (tokenize/lowercase/stem/stop/   │
+                              │       synonym)  ──▶  analyzed AST                          │
+                              └───────────────────────────────┬──────────────────────────┘
+                                                               ▼
+                              ┌──────────────────────────────────────────────────────────┐
+                              │  (D) REWRITE/NORMALIZE  (flatten, dedupe, NOT push-down,   │
+                              │       constant-score promote)  +  (E) EXPANSION            │
+                              │       (wildcard/prefix/fuzzy via FST + Levenshtein DFA)    │
+                              └───────────────────────────────┬──────────────────────────┘
+                                                               ▼
+        ┌────────────────┐    ┌──────────────────────────────────────────────────────────┐
+        │ (F) STATISTICS │◀──▶│  (G) LOGICAL PLANNER  ──▶ logical plan (op tree)           │
+        │  / CATALOG     │    └───────────────────────────────┬──────────────────────────┘
+        │  (df,cf,norms, │                                     ▼
+        │  selectivity)  │    ┌──────────────────────────────────────────────────────────┐
+        └────────────────┘───▶│  (H) COST-BASED OPTIMIZER  (rarest-first order, clause     │
+                              │      cost, strategy: bitset|iterator|PQ, rewrite)          │
+                              └───────────────────────────────┬──────────────────────────┘
+                                                               ▼
+                              ┌──────────────────────────────────────────────────────────┐
+                              │  (I) PHYSICAL PLAN BUILDER  ──▶ Scorer/Iterator tree       │
+                              └───────────────────────────────┬──────────────────────────┘
+                                                               ▼  physical plan → Panel 2 (J)</code></pre>
+<p><strong>Panel 2 — Execution &amp; Coordination (boxes J–N): physical plan → ranked hits.</strong> The threshold feedback edge (L→J) and the per-segment-top-k → coordinator (M) edge are the load-bearing data flows.</p>
+<pre class="diagram"><code>                                          physical plan from Panel 1 (I)
+                                                 │
+                                                 ▼
+   ┌──────────────────────────────────────────────────────────────────────────────────────────┐
+   │                          (J) EXECUTOR  (per segment)                                       │
+   │   ┌───────────────┐  ┌──────────────────┐  ┌───────────────────┐  ┌────────────────────┐  │
+   │   │ DocIdSetIter   │  │ Conjunction      │  │ Disjunction (PQ)  │  │ WAND/BMW/MaxScore  │  │
+   │   │ next/advance   │  │ (leap-frog/galp) │  │  + TwoPhaseIter   │  │  dynamic pruning   │  │
+   │   └───────┬────────┘  └────────┬─────────┘  └────────┬──────────┘  └─────────┬──────────┘  │
+   │           └────────────────────┴───────────────┬─────┴──────────────────────┘             │
+   │                                                 ▼                                          │
+   │                                   ┌──────────────────────────┐                            │
+   │                                   │ (K) SCORING (BM25 + norms │                            │
+   │                                   │     + explain tree)       │                            │
+   │                                   └────────────┬─────────────┘                            │
+   │                                                ▼                                          │
+   │                                   ┌──────────────────────────┐                            │
+   │                                   │ (L) COLLECTOR / TOP-K heap│ ◀─ threshold feeds back ─▶ │
+   │                                   │     + tie-break + total   │     to pruning (J)         │
+   │                                   └──────────────────────────┘                            │
+   └──────────────────────────────────────────────────────────────────────────────────────────┘
+                                                 │ per-segment top-k
+                                                 ▼
+              ┌────────────────┐    ┌──────────────────────────────────────────────────────────┐
+              │ (N) CACHES     │◀──▶│  (M) SEGMENT/SHARD COORDINATOR                             │
+              │  filter cache  │    │   segment-parallel merge ─▶ shard scatter-gather           │
+              │  (Roaring)     │    │   query phase (top-k ids) ─▶ fetch phase (docs)            │
+              │  query cache   │    │   partial results on timeout / shard failure               │
+              └────────────────┘    └───────────────────────────────┬──────────────────────────┘
+                                                                     ▼
+                                                              ranked hits + meta</code></pre>
+<p><strong>One paragraph per box.</strong></p>
+<p><strong>(A) Lexer.</strong> Converts DSL text into a token stream (terms, operators <code>+ - AND OR NOT</code>, field separators <code>:</code>, quote <code>&quot;</code>, range brackets <code>[ ] { }</code>, <code>TO</code>, wildcard <code>* ?</code>, fuzzy <code>~</code>, boost <code>^</code>, parens, whitespace). Tracks byte spans for error reporting. Handles escaping (<code>\:</code>, <code>\&quot;</code>). Pure, deterministic, no index access. Owns no state beyond the cursor.</p>
+<p><strong>(B) Parser.</strong> Recursive-descent + Pratt precedence for boolean operators; produces the query AST (<a class="cite" href="/system-design-blueprints/systems/search-query-planner/architecture/#sec-8">§8</a>). Resolves operator precedence (<code>NOT</code> &gt; <code>AND</code> &gt; <code>OR</code>; explicit grouping overrides), default operator (OR or AND configurable), <code>+</code>/<code>-</code> must/must-not semantics. Error recovery: on malformed token, emits a diagnostic with span and attempts resync at the next clause boundary. No analysis yet — terms are raw.</p>
+<p><strong>(C) Query-time analysis.</strong> Applies the field&#39;s analyzer chain to term/phrase text: tokenize, lowercase, stem, stopword removal, synonym expansion. A single <code>TermQuery(&quot;running&quot;)</code> may become <code>TermQuery(&quot;run&quot;)</code> (stemming) or a synonym <code>SynonymQuery</code>/disjunction. Must mirror index-time analysis or recall breaks. Stateless given the analyzer config; reads no postings.</p>
+<p><strong>(D) Rewrite/Normalize.</strong> Algebraic simplification on the analyzed AST: flatten nested booleans of same type, dedupe identical clauses, push <code>NOT</code> down (De Morgan where it lowers cost), drop empty clauses, promote subtrees that don&#39;t need scoring into <code>ConstantScoreQuery</code>. Idempotent rewrite-rule engine; each rule is cost-monotone or cost-neutral. Pure AST-&gt;AST.</p>
+<p><strong>(E) Expansion.</strong> Turns multi-term queries (wildcard <code>te*</code>, prefix, fuzzy <code>term~2</code>) into concrete term sets by walking the term dictionary FST under an automaton (prefix DFA, Levenshtein-k DFA). Bounds expansion (max-expansions); above the bound, rewrites to <code>ConstantScoreQuery</code> over a bitset to avoid scoring blow-up. Reads the term dictionary (an <code>index-api</code> call) but not postings.</p>
+<p><strong>(F) Statistics / Catalog.</strong> Per-collection and per-term stats: doc-count <code>N</code>, document frequency <code>df(t)</code>, collection frequency <code>cf(t)</code>, sum of doc lengths, average field length, field norms summary. Source: <code>index-api</code> (precomputed at index time). Feeds IDF (scoring), selectivity (optimizer), and clause cost. Read-mostly, cached per searcher generation.</p>
+<p><strong>(G) Logical planner.</strong> Lowers the rewritten AST into a logical operator tree (<code>LogicalScan(term)</code>, <code>LogicalAnd</code>, <code>LogicalOr</code>, <code>LogicalNot</code>, <code>LogicalConstantScore</code>, <code>LogicalPhrase</code>). Decouples <em>what</em> (logical) from <em>how</em> (physical). Annotates each node with estimated cardinality from (F).</p>
+<p><strong>(H) Cost-based optimizer.</strong> Rewrites/reorders the logical plan to minimize estimated cost: orders conjunction children rarest-first (lowest <code>df</code> leads, drives leap-frog), chooses per-node physical strategy (sorted bitset intersection vs leap-frog iterator vs PQ disjunction vs MaxScore), decides whether a clause is a <em>filter</em> (cacheable bitset, no score) or a scored <em>query</em>, and selects the pruning algorithm (WAND vs BMW vs MaxScore vs none). Uses a clause cost model (Phase 8). Produces an annotated physical plan request.</p>
+<p><strong>(I) Physical plan builder.</strong> Instantiates concrete <code>Scorer</code>/<code>DocIdSetIterator</code> objects from the optimized plan: <code>Bm25Scorer</code> leaves, <code>ConjunctionIterator</code> (leap-frog), <code>DisjunctionIterator</code> (PQ), <code>WandScorer</code>/<code>BlockMaxWandScorer</code>/<code>MaxScoreScorer</code>, <code>TwoPhaseIterator</code> wrappers for phrases/expensive predicates, <code>ConstantScoreScorer</code> for filters. Binds postings handles from <code>index-api</code>. Per segment.</p>
+<p><strong>(J) Executor.</strong> Drives the iterator tree to completion per segment. <code>DocIdSetIterator</code> advances monotonically (<code>next_doc</code>, <code>advance(target)</code>). Conjunctions leap-frog (advance the lead, sync others, gallop). Disjunctions merge via a PQ keyed by docId. Two-phase iterators do cheap <code>matches()</code>/<code>approximation()</code> then expensive <code>confirm()</code>. Dynamic pruning (WAND/BMW/MaxScore) uses scorer upper bounds + the collector&#39;s current min-competitive score to skip docs/blocks. Single-threaded per segment; parallel across segments.</p>
+<p><strong>(K) Scoring.</strong> Computes per-doc relevance: BM25 with parameters k1, b, IDF form, doc-length norm (field norm, quantized). Each <code>Scorer</code> exposes <code>score()</code>, <code>max_score()</code> (a <em>true upper bound</em> — safety invariant), and block-level <code>block_max_score()</code> for BMW. <code>explain()</code> produces a tree of score contributions for debugging/tuning. Composed bottom-up matching the iterator tree.</p>
+<p><strong>(L) Collector / top-k heap.</strong> Maintains the running top-k via a min-heap of size k keyed by (score, docId). Exposes the current <em>min-competitive score</em> (heap root) back to (J) so pruning can raise its threshold as the heap fills. Tie-break deterministically by ascending docId (or a configured secondary sort). Also counts total hits subject to <code>track_total_hits</code> (exact, capped, or approximate via early termination).</p>
+<p><strong>(M) Segment/shard coordinator.</strong> Within a node: schedules per-segment executor tasks across a thread pool, merges segment top-ks into a node top-k. Across nodes: the <strong>query phase</strong> scatters the query to each shard, gathers per-shard top-k <em>doc ids + scores</em>, merges to a global top-k; the <strong>fetch phase</strong> asks the owning shards for the actual documents/fields of the global top-k. On timeout or shard failure, returns <strong>partial results</strong> with a <code>partial: true</code> flag and which shards were missing.</p>
+<p><strong>(N) Caches.</strong> <strong>Filter cache</strong>: Roaring bitmaps of doc-id sets for cacheable filter clauses (e.g. <code>status:active</code>), keyed by (segment-generation, filter), cost-aware LRU eviction. <strong>Query cache</strong>: optional cache of fully-scored top-k per (query, shard, generation) for repeated queries; conservative, invalidated on generation bump. Both bounded by a memory ceiling (<a class="cite" href="/system-design-blueprints/systems/search-query-planner/numbers/#sec-4">§4</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Source Language</h2>
+<p>The <strong>query DSL</strong> (string form) plus its JSON form share one AST. Below: tokens, EBNF, AST catalog, rewrite/normalization rules, worked + malformed + failure-path examples.</p>
+<h3 id="sec-8-1">8.1 Tokens</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Token</th>
+<th>Lexeme</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>TERM</td>
+<td><code>cat</code>, <code>running</code>, escaped <code>\:</code></td>
+<td>unquoted word; analyzed later</td>
+</tr>
+<tr>
+<td>PHRASE</td>
+<td><code>&quot;quick brown&quot;</code></td>
+<td>quoted; optional <code>~slop</code></td>
+</tr>
+<tr>
+<td>FIELD</td>
+<td><code>title:</code></td>
+<td>identifier + <code>:</code></td>
+</tr>
+<tr>
+<td>AND / OR / NOT</td>
+<td><code>AND</code> <code>OR</code> <code>NOT</code> (case-insensitive)</td>
+<td>boolean operators</td>
+</tr>
+<tr>
+<td>MUST / MUST_NOT</td>
+<td><code>+term</code> / <code>-term</code></td>
+<td>prefix occur flags</td>
+</tr>
+<tr>
+<td>LPAREN / RPAREN</td>
+<td><code>(</code> <code>)</code></td>
+<td>grouping</td>
+</tr>
+<tr>
+<td>LBRACK/RBRACK</td>
+<td><code>[</code> <code>]</code></td>
+<td>inclusive range</td>
+</tr>
+<tr>
+<td>LBRACE/RBRACE</td>
+<td><code>{</code> <code>}</code></td>
+<td>exclusive range</td>
+</tr>
+<tr>
+<td>TO</td>
+<td><code>TO</code></td>
+<td>range separator</td>
+</tr>
+<tr>
+<td>WILDCARD</td>
+<td><code>te*t</code>, <code>te?t</code></td>
+<td><code>*</code> (≥0), <code>?</code> (1)</td>
+</tr>
+<tr>
+<td>PREFIX</td>
+<td><code>te*</code></td>
+<td>special wildcard at end</td>
+</tr>
+<tr>
+<td>FUZZY</td>
+<td><code>term~</code>, <code>term~2</code></td>
+<td>optional edit distance (default 2, max 2)</td>
+</tr>
+<tr>
+<td>BOOST</td>
+<td><code>^2.0</code></td>
+<td>float multiplier on preceding clause</td>
+</tr>
+<tr>
+<td>STAR</td>
+<td><code>*</code></td>
+<td>match-all when standalone</td>
+</tr>
+<tr>
+<td>WS</td>
+<td>spaces</td>
+<td>separates clauses; default operator applies</td>
+</tr>
+</tbody></table></div>
+<p>Escaping: backslash escapes any operator char (<code>\+ \- \: \&quot; \( \) \[ \] \{ \} \* \? \~ \^ \\</code>). Unterminated phrase / unmatched bracket -&gt; lexer/parser diagnostic with byte span.</p>
+<h3 id="sec-8-2">8.2 EBNF Grammar</h3>
+<pre class="diagram"><code>query        = disjunction ;
+disjunction  = conjunction , { &quot;OR&quot; , conjunction } ;          (* default op configurable *)
+conjunction  = unary , { [ &quot;AND&quot; ] , unary } ;                 (* juxtaposition = default op *)
+unary        = [ occur ] , boostable ;
+occur        = &quot;+&quot; | &quot;-&quot; | &quot;NOT&quot; ;                             (* + must, - / NOT must_not *)
+boostable    = primary , [ &quot;^&quot; , float ] ;
+primary      = group | fielded | clause ;
+group        = &quot;(&quot; , query , &quot;)&quot; ;
+fielded      = field , &quot;:&quot; , ( group | clause ) ;
+field        = identifier ;
+clause       = phrase | range | term_clause | matchall ;
+matchall     = &quot;*&quot; ;
+phrase       = &#39;&quot;&#39; , { token } , &#39;&quot;&#39; , [ &quot;~&quot; , uint ] ;        (* ~slop *)
+range        = ( &quot;[&quot; | &quot;{&quot; ) , range_end , &quot;TO&quot; , range_end , ( &quot;]&quot; | &quot;}&quot; ) ;
+range_end    = term | &quot;*&quot; ;                                    (* * = unbounded *)
+term_clause  = term , [ fuzzy | wildcard_marker ] ;
+fuzzy        = &quot;~&quot; , [ uint ] ;                                (* default 2, clamp ≤2 *)
+term         = identifier_with_wildcards ;                     (* may contain * ? -&gt; wildcard/prefix *)
+float        = digit , { digit } , [ &quot;.&quot; , { digit } ] ;
+uint         = digit , { digit } ;
+identifier   = letter , { letter | digit | &quot;_&quot; | &quot;.&quot; | &quot;-&quot; } ;</code></pre>
+<p>Precedence (high-&gt;low): grouping/field-scope &gt; boost <code>^</code> &gt; unary occur (<code>+ - NOT</code>) &gt; implicit/<code>AND</code> &gt; <code>OR</code>. Default operator (when two clauses are juxtaposed with no operator) is configurable: <code>OR</code> (Lucene default) or <code>AND</code> (more precise). Locked default: <code>OR</code>, overridable per request.</p>
+<h3 id="sec-8-3">8.3 Query AST Catalog</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>AST node</th>
+<th>Fields</th>
+<th>Scored?</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>MatchAllQuery</code></td>
+<td>(boost)</td>
+<td>constant</td>
+<td>matches every live doc</td>
+</tr>
+<tr>
+<td><code>TermQuery</code></td>
+<td>field, term</td>
+<td>yes (BM25)</td>
+<td>leaf; the workhorse</td>
+</tr>
+<tr>
+<td><code>PhraseQuery</code></td>
+<td>field, [terms], slop</td>
+<td>yes</td>
+<td>positional; two-phase</td>
+</tr>
+<tr>
+<td><code>BooleanQuery</code></td>
+<td>[(occur, sub)], minShouldMatch</td>
+<td>yes</td>
+<td>occur ∈ {MUST,SHOULD,MUST_NOT,FILTER}</td>
+</tr>
+<tr>
+<td><code>WildcardQuery</code></td>
+<td>field, pattern (<code>* ?</code>)</td>
+<td>rewrites</td>
+<td>-&gt; expansion (Domain Model <a class="cite" href="/system-design-blueprints/systems/search-query-planner/architecture/#sec-8-5">§8.5</a>)</td>
+</tr>
+<tr>
+<td><code>PrefixQuery</code></td>
+<td>field, prefix</td>
+<td>rewrites</td>
+<td>-&gt; expansion</td>
+</tr>
+<tr>
+<td><code>FuzzyQuery</code></td>
+<td>field, term, maxEdits, prefixLen</td>
+<td>rewrites</td>
+<td>-&gt; Levenshtein DFA expansion</td>
+</tr>
+<tr>
+<td><code>RangeQuery</code></td>
+<td>field, lo, hi, loIncl, hiIncl</td>
+<td>rewrites/filter</td>
+<td>numeric or term range</td>
+</tr>
+<tr>
+<td><code>ConstantScoreQuery</code></td>
+<td>sub</td>
+<td>constant</td>
+<td>wraps a matcher, no per-doc scoring</td>
+</tr>
+<tr>
+<td><code>BoostQuery</code></td>
+<td>sub, boost</td>
+<td>scaled</td>
+<td>multiplies sub&#39;s score by boost</td>
+</tr>
+<tr>
+<td><code>SynonymQuery</code></td>
+<td>field, [terms]</td>
+<td>yes</td>
+<td>post-analysis; blended IDF</td>
+</tr>
+</tbody></table></div>
+<p><code>occur</code> semantics inside <code>BooleanQuery</code>:</p>
+<ul>
+<li><strong>MUST</strong> (<code>+</code>): must match; contributes to score. <code>AND</code> lowers to all-MUST.</li>
+<li><strong>SHOULD</strong>: optional; contributes to score; <code>minShouldMatch</code> controls how many SHOULD must match (default 0 if any MUST present, else 1).</li>
+<li><strong>MUST_NOT</strong> (<code>-</code>/<code>NOT</code>): must not match; no score; excludes.</li>
+<li><strong>FILTER</strong>: must match; <strong>no score</strong> (constant); cacheable. Produced by the optimizer from non-scoring constraints.</li>
+</ul>
+<h3 id="sec-8-4">8.4 Rewrite / Normalization Rules (analyzed AST -&gt; normalized AST)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Rule</th>
+<th>Transform</th>
+<th>Guard</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>RW-1 analyze</td>
+<td>term/phrase text -&gt; analyzer tokens (lowercase/stem/stop/synonym)</td>
+<td>per field analyzer</td>
+</tr>
+<tr>
+<td>RW-2 flatten</td>
+<td><code>BooleanQuery</code> whose child is same-occur <code>BooleanQuery</code> -&gt; merge</td>
+<td>only MUST∪MUST, SHOULD∪SHOULD</td>
+</tr>
+<tr>
+<td>RW-3 dedupe</td>
+<td>identical sibling clauses collapse (sum boosts)</td>
+<td>structural equality</td>
+</tr>
+<tr>
+<td>RW-4 NOT push-down</td>
+<td><code>NOT (A OR B)</code> -&gt; <code>NOT A AND NOT B</code> (De Morgan)</td>
+<td>only if it lowers estimated cost</td>
+</tr>
+<tr>
+<td>RW-5 single-clause unwrap</td>
+<td><code>BooleanQuery</code> with one MUST/SHOULD -&gt; the clause</td>
+<td>preserve boost</td>
+</tr>
+<tr>
+<td>RW-6 empty drop</td>
+<td>clause that analyzed to empty (all-stopwords) -&gt; remove</td>
+<td>warn if whole query empties</td>
+</tr>
+<tr>
+<td>RW-7 const-score promote</td>
+<td><code>WildcardQuery</code>/<code>PrefixQuery</code>/<code>RangeQuery</code> exceeding maxExpansions -&gt; <code>ConstantScoreQuery</code> over bitset</td>
+<td>expansion &gt; threshold</td>
+</tr>
+<tr>
+<td>RW-8 boost fold</td>
+<td><code>BoostQuery(BoostQuery(x,a),b)</code> -&gt; <code>BoostQuery(x,a*b)</code></td>
+<td>always</td>
+</tr>
+<tr>
+<td>RW-9 matchall absorb</td>
+<td><code>A AND MatchAll</code> -&gt; <code>A</code>; <code>A OR MatchAll</code> -&gt; <code>MatchAll</code></td>
+<td>always</td>
+</tr>
+<tr>
+<td>RW-10 filter classify</td>
+<td>SHOULD/MUST clause with no scoring need (e.g. ConstantScore, term used only to constrain) -&gt; FILTER occur</td>
+<td>optimizer pass</td>
+</tr>
+</tbody></table></div>
+<p>All rules idempotent; the rewrite engine iterates to fixpoint (bounded iterations).</p>
+<h3 id="sec-8-5">8.5 Expansion (multi-term) — worked</h3>
+<p><code>title:te*</code> (prefix) -&gt; walk term-dict FST from prefix <code>te</code> -&gt; enumerate <code>{tea, team, tech, ...}</code> -&gt; if count ≤ maxExpansions: <code>BooleanQuery(SHOULD: TermQuery(tea), TermQuery(team), ...)</code> (each scored, blended); else: <code>ConstantScoreQuery</code> over the union bitset (no per-term scoring; one constant score).</p>
+<p><code>name:jon~2</code> (fuzzy, maxEdits=2) -&gt; build Levenshtein-2 DFA for <code>jon</code> -&gt; intersect DFA with term-dict FST -&gt; enumerate terms within edit distance 2 <code>{jon, john, joan, jan, ...}</code> -&gt; bounded the same way; scores blended, optionally distance-weighted boost.</p>
+<h3 id="sec-8-6">8.6 Worked Examples (string -&gt; AST -&gt; normalized)</h3>
+<ol>
+<li><p><code>title:&quot;quick brown&quot;~1 +body:fox -status:archived</code> -&gt;
+<code>Boolean[ SHOULD PhraseQuery(title,[quick,brown],slop=1), MUST TermQuery(body,fox), MUST_NOT TermQuery(status,archived) ]</code>
+After RW-10: <code>status:archived</code> MUST_NOT stays exclusion (no score). <code>body:fox</code> MUST scores; phrase SHOULD scores.</p>
+</li>
+<li><p><code>(cat OR dog) AND color:black^2</code> -&gt;
+<code>Boolean[ MUST Boolean[SHOULD TermQuery(_default,cat), SHOULD TermQuery(_default,dog)], MUST BoostQuery(TermQuery(color,black), 2.0) ]</code>.</p>
+</li>
+<li><p><code>price:[10 TO 50}</code> -&gt; <code>RangeQuery(price, 10, 50, loIncl=true, hiIncl=false)</code> -&gt; if dense, optimizer makes it a FILTER (cacheable bitset, constant score).</p>
+</li>
+</ol>
+<h3 id="sec-8-7">8.7 Malformed Examples (must produce diagnostics, not panics)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Diagnostic</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>title:&quot;unterminated</code></td>
+<td>E-LEX-01 unterminated phrase at byte 6; recovery: treat rest as phrase to EOL, warn</td>
+</tr>
+<tr>
+<td><code>price:[10 TO]</code></td>
+<td>E-PARSE-02 missing upper range end; recovery: treat as <code>[10 TO *]</code>? -&gt; reject, ask explicit</td>
+</tr>
+<tr>
+<td><code>a AND OR b</code></td>
+<td>E-PARSE-03 unexpected <code>OR</code> after <code>AND</code>; resync at <code>b</code></td>
+</tr>
+<tr>
+<td><code>term~9</code></td>
+<td>W-SEM-04 fuzzy edits clamped to 2</td>
+</tr>
+<tr>
+<td><code>(((a)</code></td>
+<td>E-PARSE-05 unbalanced parens; report open count + spans</td>
+</tr>
+<tr>
+<td><code>field::value</code></td>
+<td>E-LEX-06 empty field; reject</td>
+</tr>
+<tr>
+<td><code>^2 term</code></td>
+<td>E-PARSE-07 boost with no preceding clause; ignore + warn</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-8">8.8 Failure-Path Examples</h3>
+<ul>
+<li>Whole query analyzes to empty (all stopwords, e.g. <code>the of a</code>) -&gt; RW-6 empties it -&gt; return zero hits + <code>W-SEM-EMPTY</code>, not an error.</li>
+<li>Wildcard <code>*</code> leading (<code>*cat</code>) -&gt; very expensive; default rejected with E-SEM-LEADING-WILDCARD unless <code>allow_leading_wildcard=true</code>.</li>
+<li>Fuzzy expansion exceeds maxExpansions and the field is huge -&gt; RW-7 to ConstantScore bitset; if even the bitset would exceed the memory ceiling -&gt; E-RESOURCE-EXPANSION, reject with guidance.</li>
+<li>Field unknown in schema -&gt; E-SEM-UNKNOWN-FIELD (or match-nothing, configurable; locked: warn + match-nothing).</li>
+</ul>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Correctness before speed; pruning must be provably safe.</strong> Dynamic pruning may skip a doc only if it provably cannot enter top-k. <em>Tradeoff</em>: safe upper bounds are looser than exact, so fewer skips. <em>Operational</em>: a <code>--exact</code> flag disables all pruning to A/B verify results. <em>Violation</em>: a scorer whose <code>max_score()</code> underestimates -&gt; WAND skips a true top-k hit -&gt; silent recall loss (the worst class of bug).</li><li id="p-2"><strong>Scorer upper bounds are a contract, not a hint.</strong> <code>max_score()</code> (and <code>block_max_score()</code>) MUST be ≥ any real score the scorer can produce for any doc (in the block). <em>Tradeoff</em>: computing tight-yet-safe bounds is subtle (BM25 monotonicity). <em>Operational</em>: invariant check INV-1 fuzzes score ≤ max_score on every doc in conformance. <em>Violation</em>: see #1.</li><li id="p-3"><strong>Iterators advance monotonically.</strong> <code>next_doc</code>/<code>advance(target)</code> never go backward; <code>advance(t)</code> lands on the first doc ≥ t. <em>Tradeoff</em>: forces leap-frog/galloping discipline; no random access. <em>Operational</em>: debug assertions on doc-id monotonicity in dev builds. <em>Violation</em>: non-monotonic advance -&gt; conjunction sync loops forever or skips matches.</li><li id="p-4"><strong>Determinism: identical query + identical index generation -&gt; identical ranked ids and scores.</strong> Tie-break by ascending docId. <em>Tradeoff</em>: secondary sorts cost a comparator. <em>Operational</em>: stable pagination depends on this; <code>search_after</code> correctness relies on it. <em>Violation</em>: nondeterministic tie-break -&gt; the same doc appears on two pages or is skipped.</li><li id="p-5"><strong>Two-phase approximation is always a superset.</strong> A <code>TwoPhaseIterator</code>&#39;s approximation must match a superset of true matches; <code>confirm()</code> removes false positives. <em>Tradeoff</em>: approximation cost vs how many false positives confirm must reject. <em>Operational</em>: phrase queries, expensive predicates use this. <em>Violation</em>: approximation missing a true match -&gt; recall loss that pruning cannot detect.</li><li id="p-6"><strong>Filters do not score.</strong> A clause used only to constrain (not rank) is evaluated as a 0/1 bitset and contributes constant score. <em>Tradeoff</em>: must classify clauses (filter vs query) correctly in the optimizer. <em>Operational</em>: filters are cacheable (Roaring); queries generally are not. <em>Violation</em>: scoring a filter wastes CPU and pollutes relevance; caching a scored query returns stale scores.</li><li id="p-7"><strong>Cost estimates drive ordering, never correctness.</strong> A wrong cost estimate yields a slower plan, never a wrong result. <em>Tradeoff</em>: invest in good <code>df</code>-based estimates but never let them gate output. <em>Operational</em>: a bad estimate is a perf incident, debuggable via plan dump; not a correctness incident. <em>Violation</em>: conflating &quot;estimated empty&quot; with &quot;is empty&quot; -&gt; dropping a clause.</li><li id="p-8"><strong>Bounded resource usage; every loop has a deadline.</strong> Timeout budget propagates to every shard and every segment task; checked at block boundaries. <em>Tradeoff</em>: deadline checks add a branch in the hot loop (amortized per block, not per doc). <em>Operational</em>: partial results on deadline, never a hung query. <em>Violation</em>: an unbounded fuzzy expansion or deep-page sort OOMs or stalls the pool.</li><li id="p-9"><strong>Backpressure + partial results over failure.</strong> A slow/failed shard degrades the result (flagged <code>partial</code>), it does not fail the request. <em>Tradeoff</em>: callers must handle partial results. <em>Operational</em>: SLO favors availability; <code>partial</code> is a first-class field + metric. <em>Violation</em>: fail-closed on one slow shard -&gt; whole-query unavailability.</li><li id="p-10"><strong>Observability by default: every query can explain its plan and its score.</strong> <code>explain()</code> for scores; plan dump for the chosen physical plan + costs + pruning mode. <em>Tradeoff</em>: explain path is slower; gated by a request flag. <em>Operational</em>: &quot;why is this slow / why did this rank here&quot; is answerable without a debugger. <em>Violation</em>: opaque planner -&gt; unfixable relevance/latency incidents.</li><li id="p-11"><strong>Analysis parity: query-time analysis must match index-time analysis.</strong> Same tokenizer/stemmer/normalizer or recall silently drops. <em>Tradeoff</em>: analyzer config is shared state between indexer (out of scope) and planner. <em>Operational</em>: analyzer version stamped in catalog; mismatch warns. <em>Violation</em>: query stems &quot;running&quot;-&gt;&quot;run&quot; but index stored &quot;running&quot; -&gt; zero matches.</li><li id="p-12"><strong>Plan nodes are an explicit, exhaustive type.</strong> Logical and physical plans are <code>enum</code>s; the optimizer is a total <code>match</code>. <em>Tradeoff</em>: adding a node touches all match sites (compiler-enforced completeness — a feature). <em>Operational</em>: no &quot;unknown node&quot; runtime path. <em>Violation</em>: stringly-typed plans -&gt; silent mishandling of a new node.</li><li id="p-13"><strong>Segment isolation; merge is the only cross-segment step.</strong> Each segment executes independently to a local top-k; the coordinator merges. <em>Tradeoff</em>: per-segment overhead (small heaps) vs trivial parallelism + isolation. <em>Operational</em>: one corrupt/slow segment is contained. <em>Violation</em>: shared mutable scorer across segments -&gt; data races, nondeterminism.</li><li id="p-14"><strong>Caches are correctness-neutral and generation-keyed.</strong> A cache hit must equal recomputation; all caches key on the immutable searcher generation. <em>Tradeoff</em>: generation bump invalidates caches (cold start). <em>Operational</em>: never serve a cached bitset/score from a stale generation. <em>Violation</em>: reusing a filter bitmap across a generation that deleted docs -&gt; returns deleted docs.</li><li id="p-15"><strong>Reference-equivalence is the bar.</strong> For the supported query subset, results must match a reference engine (Lucene/Tantivy) modulo documented score-formula differences. <em>Tradeoff</em>: constrains scoring-formula freedom. <em>Operational</em>: differential tests gate release (Phase 12). <em>Violation</em>: &quot;looks reasonable&quot; scoring with no oracle -&gt; undetectable ranking regressions.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

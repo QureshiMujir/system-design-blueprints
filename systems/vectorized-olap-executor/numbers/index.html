@@ -1,0 +1,317 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Vectorized OLAP Query Executor — Numbers · Engineering Blueprints</title><meta name="description" content="Vectorized OLAP Query Executor, constraints, perf targets, capacity. VOE is a single-node, multi-core, read-only physical-plan executor for analytical (OLAP) workloads: it consumes a pre-planned physical operator tree (schemas resolved, expressions bound, no…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/vectorized-olap-executor/">Vectorized OLAP Query Executor</a> </li><li> <span aria-current="page">Numbers</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Vectorized OLAP Query Executor</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~19 weeks</li> <li>3,006 lines</li> <li>blueprint #104</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/vectorized-olap-executor/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/" aria-current="page" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Vectorized OLAP Query Executor — Numbers">  <p class="note warn"><strong>Design targets, not measurements.</strong> Latency and throughput rows are the budgets the blueprint sets for its own benches; memory and capacity rows are arithmetic from stated inputs, formula shown. A build's <a href="/system-design-blueprints/systems/vectorized-olap-executor/build/">status</a> says what has actually been measured.</p> <section class="prose"><h2 id="sec-4">4. System Constraints</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Value</th>
+<th>Basis</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Default vector (batch) size</td>
+<td>2048 rows</td>
+<td>L1-fit across ≤ 8 columns of mixed width (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-3">ADR-03</a>; <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-33">§33</a> derivation)</td>
+</tr>
+<tr>
+<td>Default morsel size</td>
+<td>100,000 rows</td>
+<td>Leis et al. 2014, section 3; dispatch-overhead vs. load-balance sweet spot (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-4">ADR-04</a>)</td>
+</tr>
+<tr>
+<td>L1 data cache (assumed)</td>
+<td>32 KiB/core</td>
+<td>Typical x86-64 server core (Skylake–Zen4 generation)</td>
+</tr>
+<tr>
+<td>L2 cache (assumed)</td>
+<td>1 MiB/core</td>
+<td>Typical mid-range server core</td>
+</tr>
+<tr>
+<td>L3 cache (assumed)</td>
+<td>≥ 1.5 MiB/core shared</td>
+<td>Typical 16–64-core server socket</td>
+</tr>
+<tr>
+<td>Memory bandwidth (sustained)</td>
+<td>≥ 20 GB/s per NUMA node</td>
+<td>STREAM Triad, dual-channel DDR4-3200 class hardware</td>
+</tr>
+<tr>
+<td>SIMD lane width</td>
+<td>128 b (SSE4.2/NEON) – 512 b (AVX-512)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-13">ADR-13</a>/14; 4–16 lanes of <code>i32</code></td>
+</tr>
+<tr>
+<td>Default per-query memory budget</td>
+<td>4 GiB (configurable)</td>
+<td>Spill threshold at 80% (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-9">ADR-09</a>)</td>
+</tr>
+<tr>
+<td>Max concurrency</td>
+<td>1 worker/physical core/NUMA node</td>
+<td>No hyperthread oversubscription (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-8">I8</a>)</td>
+</tr>
+<tr>
+<td>p50 / p95 / p99 latency, single-pass scan-filter-agg, SF=1</td>
+<td>50 ms / 150 ms / 300 ms</td>
+<td>Warm page cache, single NUMA node</td>
+</tr>
+<tr>
+<td>Startup (process cold start)</td>
+<td>≤ 200 ms</td>
+<td>No JIT warm-up required (interpreted path mandatory)</td>
+</tr>
+<tr>
+<td>Cranelift compile latency</td>
+<td>≤ 10 ms/hot expression</td>
+<td>Amortized once &gt; 1M rows processed (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-6">P6</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-21">§21</a>)</td>
+</tr>
+<tr>
+<td>Shutdown (graceful drain)</td>
+<td>≤ 2 s</td>
+<td>Force-cancel path ≤ 100 ms</td>
+</tr>
+<tr>
+<td>Network RTT</td>
+<td>0 (no network boundary)</td>
+<td>Exchange is intra-host only in Phase 0–10 scope (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-30">§30</a>)</td>
+</tr>
+<tr>
+<td>Cross-NUMA transfer latency</td>
+<td>~150–300 ns/access</td>
+<td>vs. ~80–120 ns local (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-8">I8</a> basis)</td>
+</tr>
+<tr>
+<td>FD budget</td>
+<td>≤ 256 open spill files/query</td>
+<td>64 default partitions × up to 4 concurrent spilling operators</td>
+</tr>
+<tr>
+<td>Storage amplification (spill)</td>
+<td>≤ 1.3× in-memory size</td>
+<td>Arrow IPC framing overhead</td>
+</tr>
+<tr>
+<td>Availability / failure budget</td>
+<td>crash = query failure, no HA</td>
+<td>Single-process, read-only, stateless between queries</td>
+</tr>
+<tr>
+<td>RTO (process crash → ready)</td>
+<td>≤ 5 s</td>
+<td>Dominated by NUMA-topology detection + thread spin-up</td>
+</tr>
+<tr>
+<td>Max concurrent queries/process</td>
+<td>8 (default, memory-budget-gated)</td>
+<td>Configurable; gated by total memory budget</td>
+</tr>
+<tr>
+<td>Target data scale</td>
+<td>SF=1 / SF=10 / SF=100 (≈1/10/100 GB)</td>
+<td>TPC-H scale factors; <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-33">§33</a></td>
+</tr>
+</tbody></table></div>
+<p>The one defining property: <strong>VOE trades a bounded, quantified memory budget (with mandatory
+spill) for unbounded input size, and trades zero network RTT for zero horizontal scale</strong> — every
+other number in this table is downstream of those two trades.</p>
+<hr>
+</section><section aria-labelledby="sec-29"> <h2 id="sec-29">Performance targets (§29)</h2> <div class="table-wrap"><table class="data"><caption class="sr-only">Performance targets</caption><thead><tr><th scope="col">ID</th><th scope="col">Metric</th><th scope="col">Target</th><th scope="col">Phase Gate</th></tr></thead><tbody><tr id="m-1"><td><a class="row-anchor" href="#m-1"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-1">M1</a></a></td><td>Scan throughput, Parquet, single column, single core</td><td>≥ 1 GB/s</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-22">§22</a></td></tr><tr id="m-2"><td><a class="row-anchor" href="#m-2"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-2">M2</a></a></td><td>Scan throughput, in-memory, single column, single core</td><td>≥ 8 GB/s</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-13">§13</a></td></tr><tr id="m-3"><td><a class="row-anchor" href="#m-3"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-3">M3</a></a></td><td>Filter throughput, <code>gt_i32</code>, single core AVX2</td><td>≥ 8 GB/s</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-14">§14</a></td></tr><tr id="m-4"><td><a class="row-anchor" href="#m-4"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-4">M4</a></a></td><td>Arithmetic throughput, <code>add_i32</code> SIMD vs. scalar</td><td>≥ 4× speedup</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-14">§14</a></td></tr><tr id="m-5"><td><a class="row-anchor" href="#m-5"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-5">M5</a></a></td><td>Hash-join build throughput, single core</td><td>≥ 100M rows/s</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-17">§17</a></td></tr><tr id="m-6"><td><a class="row-anchor" href="#m-6"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-6">M6</a></a></td><td>Hash-join probe throughput, single core</td><td>≥ 200M rows/s</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-17">§17</a></td></tr><tr id="m-7"><td><a class="row-anchor" href="#m-7"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-7">M7</a></a></td><td>Hash-agg build throughput, single core</td><td>≥ 80M rows/s</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-16">§16</a></td></tr><tr id="m-8"><td><a class="row-anchor" href="#m-8"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-8">M8</a></a></td><td>TPC-H Q1 single-node throughput</td><td>≥ 1B rows/s (scan + agg)</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-16">§16</a></td></tr><tr id="m-9"><td><a class="row-anchor" href="#m-9"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-9">M9</a></a></td><td>TPC-H SF=100 full suite, 8-core</td><td>≤ 60 s wall-clock</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-22">§22</a></td></tr><tr id="m-10"><td><a class="row-anchor" href="#m-10"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-10">M10</a></a></td><td>TPC-H SF=100 vs. DuckDB</td><td>within ±20%</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-22">§22</a></td></tr><tr id="m-11"><td><a class="row-anchor" href="#m-11"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-11">M11</a></a></td><td>Morsel-parallelism efficiency, 32 cores</td><td>≥ 90%</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-15">§15</a></td></tr><tr id="m-12"><td><a class="row-anchor" href="#m-12"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-12">M12</a></a></td><td>Spill write throughput, local SSD</td><td>≥ 500 MB/s</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-20">§20</a></td></tr><tr id="m-13"><td><a class="row-anchor" href="#m-13"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-13">M13</a></a></td><td>Spill read throughput, local SSD</td><td>≥ 1 GB/s</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-20">§20</a></td></tr><tr id="m-14"><td><a class="row-anchor" href="#m-14"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-14">M14</a></a></td><td>Compiled-kernel speedup vs. interpreted, hot expression</td><td>≥ 30%</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-21">§21</a></td></tr><tr id="m-15"><td><a class="row-anchor" href="#m-15"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-15">M15</a></a></td><td>NUMA-local access rate, 2-node host</td><td>≥ 90%</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-15">§15</a></td></tr><tr id="m-16"><td><a class="row-anchor" href="#m-16"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-16">M16</a></a></td><td>24-hour soak: zero panics, zero memory growth</td><td>Pass</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-27">§27</a></td></tr><tr id="m-17"><td><a class="row-anchor" href="#m-17"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-17">M17</a></a></td><td>30-day fuzz canary (Sealed gate)</td><td>Pass</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-28">§28</a> (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-22">ADR-22</a>)</td></tr><tr id="m-18"><td><a class="row-anchor" href="#m-18"><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-18">M18</a></a></td><td>Cross-validation with DuckDB, TPC-H Q1–Q22</td><td>0 disagreements outside 1e-6</td><td><a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-22">§22</a></td></tr></tbody></table></div> </section><section class="prose"><h2 id="sec-33">33. Back-of-Envelope Capacity Model</h2>
+<ol>
+<li><strong>L1 working-set fit (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-3">ADR-03</a>&#39;s justification).</strong> A binary kernel (2 inputs + 1 output) over
+<code>i32</code> at the default 2048-row vector: <code>3 × 2048 rows × 4 B = 24,576 B ≈ 24 KiB</code>, fitting
+within the 32 KiB L1 (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-4">§4</a>) with headroom for validity bitmaps and register spill.</li>
+<li><strong>ClickHouse&#39;s 65536-row <code>Block</code> by the same formula.</strong> <code>3 × 65536 × 4 B ≈ 768 KiB</code> — exceeds
+both L1 (32 KiB) and most of L2 (1 MiB, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-4">§4</a>), confirming ClickHouse deliberately trades cache
+residency for lower per-batch dispatch overhead (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/compare/#sec-32">§32</a>).</li>
+<li><strong>Morsel dispatch-overhead ceiling.</strong> At a ~200 ns per-morsel dispatch cost (queue pop + push<ul>
+<li>branch) and 100,000 rows/morsel (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-4">ADR-04</a>): <code>100,000 rows / 200 ns ≈ 5 × 10¹¹ rows/s</code> ceiling
+from dispatch alone — roughly 500× above the ~10⁹ rows/s operator targets (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-8">M8</a>), confirming
+morsel size is not the throughput bottleneck.</li>
+</ul>
+</li>
+<li><strong>Memory-bandwidth scan ceiling.</strong> At 20 GB/s sustained per NUMA node (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-4">§4</a>) over an <code>i64</code>
+column (8 B/value): <code>20 × 10⁹ / 8 ≈ 2.5 × 10⁹ rows/s</code> per node — leaves ≈ 2.5× headroom over
+the <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-8">M8</a> target (≥ 1B rows/s scan + agg) for the additional arithmetic passes over the same
+bytes.</li>
+<li><strong>SIMD lane-width speedup ceiling.</strong> AVX2 (256-bit) over <code>i32</code> (32-bit): <code>256 / 32 = 8</code> lanes
+→ theoretical 8× speedup. <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-4">M4</a>&#39;s ≥ 4× target captures roughly <code>4/8 = 50%</code> vectorization
+efficiency, the realistic gap from bounds checks, tail loops, and load/store bubbles (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-14-7">§14.7</a>).</li>
+<li><strong>TPC-H Q1 hash-table footprint.</strong> Q1&#39;s <code>GROUP BY (l_returnflag, l_linestatus)</code> has at most 4
+distinct groups at any scale factor — hash-table memory is <code>O(1)</code>, a few KB regardless of SF,
+contrasted with #7 below.</li>
+<li><strong>A high-cardinality group-by&#39;s footprint.</strong> <code>GROUP BY l_orderkey</code> at SF=1 (≈ 1.5M orders):
+<code>(1.5 × 10⁶ / 0.7 load factor) × 64 B/bucket ÷ 4 keys/bucket ≈ 137 MB</code> — comfortably within
+the 4 GiB default budget (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-4">§4</a>) without spilling.</li>
+<li><strong>Hash-join build-side footprint at SF=100.</strong> <code>orders</code> as the build side (≈ 150M rows,
+SF × 1.5M): <code>(150 × 10⁶ / 0.7) × 16 B/row (amortized bucket share) ≈ 3.4 GB</code> — approaches the
+4 GiB default per-query budget (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-4">§4</a>), explaining why SF=100 benchmarks (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-9">M9</a>/<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-10">M10</a>) are exactly
+the regime that exercises spill (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-20">§20</a>) in practice, not a corner case.</li>
+<li><strong>Spill partition-count sizing (the formula <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-20-7">§20.7</a> promised).</strong> To keep each grace-hash
+sub-partition within a 256 MB target, given #8&#39;s 3.4 GB build side:
+<code>ceil(3.4 GB / 256 MB) = 14</code>, rounded up to the next power of two → <strong>16 partitions</strong>.</li>
+<li><strong>FD-budget validation.</strong> 16 partitions (#9) × up to 4 concurrently spilling operators/query
+(<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-4">§4</a>&#39;s FD assumption) = 64 open files for one query — the stated ≤ 256 FD budget/query (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-4">§4</a>)
+covers up to 4 such joins spilling simultaneously within one plan, validating that number
+against a realistic worst case rather than an arbitrary pick.</li>
+<li><strong>Cross-NUMA steal overhead.</strong> At a ~200 ns cross-NUMA latency delta (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-4">§4</a>) and a 100,000-row
+morsel taking ≈ 100 µs to process locally (from #4&#39;s per-node throughput), an occasional
+stolen morsel processed with some fraction of remote cache misses adds only a low
+single-digit percentage to that morsel&#39;s cost — why <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-8">I8</a>&#39;s 90%-local threshold (not 99%) is an
+engineered tradeoff, not an arbitrary number.</li>
+<li><strong>Worst-case spill disk provisioning.</strong> Storage amplification ≤ 1.3× (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-4">§4</a>) applied to a
+~100 GB SF=100 dataset gives ≈ 130 GB per full spill; combined with the 10× spill quota
+(<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-20-2">§20.2</a>), disk provisioning guidance for a production deployment should budget toward the
+upper end of that range per concurrently spilling query, not the typical (unspilled) case.</li>
+</ol>
+<hr>
+</section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

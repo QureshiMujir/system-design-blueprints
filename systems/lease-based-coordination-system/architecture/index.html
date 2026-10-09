@@ -1,0 +1,477 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Lease-Based Coordination System — Architecture · Engineering Blueprints</title><meta name="description" content="Lease-Based Coordination System, hld: §3 overview + §8 domain model. This project builds, from scratch in Python, the lease as a first-class distributed-systems primitive and the minimal coordination layer built directly on top of it: lease grant, renewal, expiry, and…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/lease-based-coordination-system/">Lease-Based Coordination System</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Lease-Based Coordination System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Python</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~25 weeks</li> <li>2,814 lines</li> <li>blueprint #199</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/lease-based-coordination-system/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/lease-based-coordination-system/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/lease-based-coordination-system/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/lease-based-coordination-system/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/lease-based-coordination-system/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/lease-based-coordination-system/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/lease-based-coordination-system/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/lease-based-coordination-system/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Lease-Based Coordination System — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>+-----------------------------------------------------------------------+
+|                          Client (Lease Holder)                        |
+|   acquires/renews leases | attaches fencing token to writes           |
++-----------------------------------------------------------------------+
+        |  grant/renew/revoke RPC         |  fenced write (token attached)
+        v                                  v
++-----------------------+       +---------------------------------------+
+|   Lease Manager        |       |        Protected Resource            |
+|  grant/renew/expire     |       |  ResourceGuard / TokenChecker        |
+|  state machine owner    |       |  rejects token &lt; highest seen        |
++-----------------------+       +---------------------------------------+
+   |         |        |
+   v         v        v
++--------+ +---------+ +------------------+
+| Leader | | Lock    | | Session Tracker  |
+| Elect. | | Module  | | (meta-lease)     |
++--------+ +---------+ +------------------+
+   |         |        |
+   +----+----+----+---+
+        |         |
+        v         v
++------------------+   +-----------------------+
+| Fencing-Token     |   | Timer Wheel           |
+| Issuer (monotonic)|   | renewal/expiry sched. |
++------------------+   +-----------------------+
+        |                          |
+        +------------+-------------+
+                     |
+                     v
+    ===================================  &lt;- lease-grant boundary
+    |     Clock / Skew Monitor        |     (every grant/renew/expiry
+    |  wall clock + monotonic clock    |      decision crosses here)
+    |  skew estimate, fail-safe trip   |
+    ===================================  &lt;- clock-safety boundary
+                     |
+                     v
++-----------------------------------------------------------------------+
+|              Replicated Lease Store (ConsensusStore)                   |
+|   Raft/Paxos-backed log | durable lease/session/fencing state          |
++-----------------------------------------------------------------------+</code></pre>
+<p>Client (lease holder). The application process that acquires, renews, and eventually releases a
+lease; it must attach the fencing token it currently holds to every write against a protected
+resource. It cannot be trusted to know, in real time, whether its lease has already expired
+(pause/GC-stall fault, <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-5">§8.5</a>) — this is precisely why the fencing token exists.</p>
+<p>Lease Manager. The single logical owner of the <code>Lease</code> state machine (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-1">§8.1</a>); it processes grant,
+renew, and revoke requests against the <code>ConsensusStore</code> and is the only component authorized to
+transition a <code>Lease</code> between states.</p>
+<p>Fencing-Token Issuer. Hands out a strictly monotonically increasing token with every successful
+grant or leadership hand-off; never reuses or decrements a token; persists the high-water mark in
+the <code>ConsensusStore</code> so a coordinator crash cannot roll it back (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-3">I3</a>).</p>
+<p>Leader Election module. A thin, named-lease-specific layer over the Lease Manager: whoever holds
+the &quot;leadership&quot; lease for a given election name is the leader; leadership hand-off is exactly a
+lease grant to a new holder plus a fencing-token bump.</p>
+<p>Lock module. Generalizes the same lease machinery to arbitrary named resources with a bounded FIFO
+wait queue, so a crashed lock holder&#39;s lease simply expires and the next waiter is granted the lock
+plus a fresh fencing token.</p>
+<p>Session tracker. A meta-lease: one heartbeat/liveness signal covers a whole set of resource leases,
+so a client does not need one heartbeat per resource (Chubby&#39;s session model; ZooKeeper&#39;s ephemeral
+session).</p>
+<p>Clock/Skew Monitor. Samples wall-clock and monotonic-clock offsets against the coordination
+service&#39;s own view of time (and, transitively, against NTP), maintains a live skew estimate, and
+trips a fail-safe (refuse renewals, page immediately) if the estimate exceeds the configured bound.
+This is the component that makes the clock-safety boundary in the diagram a <em>checked</em>, not merely
+<em>assumed</em>, boundary.</p>
+<p>Timer Wheel. A hashed timer wheel scheduling renewal reminders and expiry sweeps in O(1) amortized
+insert/cancel, sized to the configured lease-count ceiling (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/numbers/#sec-4">§4</a>).</p>
+<p>Replicated Lease Store (ConsensusStore). The durable, replicated home for lease/session/fencing
+state; backed by Raft or Paxos in production (delegated, not reimplemented — <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/blueprint/#sec-1">§1</a>); a coordinator
+crash and restart, or a coordinator failover, must not double-grant a lease or roll back a fencing
+token, which is why this state — and only this state — is required to be consensus-durable.</p>
+<p>The lease-grant boundary (top half of the diagram) marks the point past which a request has been
+accepted into the lease/lock/election/session subsystem; the clock-safety boundary (lower half)
+marks the point past which every decision is provably bound to the configured clock-skew model —
+crossing it without passing through the Clock/Skew Monitor is a correctness bug by construction.</p>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 The Lease State Machine</h3>
+<p>States: <code>Free</code>, <code>Granted</code>, <code>Renewing</code>, <code>Expired</code>, <code>Revoked</code>.</p>
+<pre class="diagram"><code>        grant(owner, ttl)
+ Free ─────────────────────────► Granted ──renew(owner)──► Renewing
+   ▲                                │  ▲                       │
+   │        release(owner)          │  └───renew_ok────────────┘
+   │        or expire-sweep         │
+   │        or revoke(admin)        │ renew_fail / ttl_elapsed
+   │                                ▼
+   └──────────────────────────  Expired ──── revoke(admin) ───► Revoked
+                                     │                              │
+                                     └──── reacquire(new_owner) ────┘
+                                              (only from Free/Expired,
+                                               never from Granted/Renewing)</code></pre>
+<p>Failure edges: <code>Granted → Expired</code> (ttl elapsed with no successful renewal, detected by the Timer
+Wheel, <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-4">I4</a>); <code>Renewing → Expired</code> (a renewal request that arrives after the grantor has already
+declared expiry per <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-4">I4</a>&#39;s margin — the request is rejected, not applied, <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-8">I8</a>); <code>Granted → Revoked</code>
+(administrative or fail-safe-triggered revocation, <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-9">I9</a>); <code>Expired → Free</code> (after the guard interval
+elapses with no reacquire, the resource returns to the pool). A <code>Revoked</code> lease can never transition
+back to <code>Granted</code> directly — it must pass through <code>Free</code> and a fresh <code>grant</code> (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-8">I8</a>).</p>
+<h3 id="sec-8-2">8.2 The Clock-Safety Argument</h3>
+<p>Let δ be the configured maximum pairwise clock skew bound (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/numbers/#sec-4">§4</a>, default 200 ms), L the lease
+duration, and G the guard interval. Let <code>grant</code> denote the grantor&#39;s wall-clock timestamp at grant
+time.</p>
+<p>The holder, using its own (possibly skewed) clock, believes the lease valid until:</p>
+<pre class="diagram"><code>T_holder_valid_until = grant + L</code></pre>
+<p>The grantor, to be safe against a holder whose clock reads up to δ <em>behind</em> the grantor&#39;s, must
+declare the lease expired no later than:</p>
+<pre class="diagram"><code>T_grantor_expires_at = grant + L − δ − G</code></pre>
+<p>For the grantor&#39;s expiry decision to never precede a moment the holder could still legitimately
+believe valid — the entire point of <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-4">I4</a> — the guard interval must absorb both the round-trip
+communication delay and the residual clock uncertainty:</p>
+<pre class="diagram"><code>G ≥ 2δ + RTT_p99</code></pre>
+<p>Worked example with the project defaults (δ = 200 ms, RTT_p99 = 20 ms, <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/numbers/#sec-4">§4</a>):</p>
+<pre class="diagram"><code>G ≥ 2(200 ms) + 20 ms = 420 ms   →   round up to G = 500 ms (§4 default)</code></pre>
+<p>With L = 10 s (default), the grantor treats the lease as expired at <code>grant + 10s − 0.2s − 0.5s = grant + 9.3s</code>, i.e. 700 ms before the holder&#39;s own clock would read <code>grant + 10s</code>. That 700 ms
+margin is the price of the stated clock-skew bound; failover time (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/numbers/#sec-34">§34</a>) is bounded below by L − 0.7s
+plus the time to complete a new grant, and bounded above by L + G if the grantor waits the full
+guard interval before declaring expiry to a <em>new</em> claimant (defensive posture, <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/trade-offs/#sec-9">§9</a> <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/trade-offs/#adr-11">ADR-11</a>).</p>
+<h3 id="sec-8-3">8.3 Fencing Tokens — The Kleppmann Scenario, Worked</h3>
+<p>Named steps, following Kleppmann&#39;s canonical example:</p>
+<ol>
+<li>Client A acquires the lease on resource R with lease duration L = 10 s and fencing token 33.</li>
+<li>Client A begins a long write to R, then experiences a stop-the-world GC pause of 15 s (exceeds
+L, and exceeds L + G).</li>
+<li>While A is paused, the grantor&#39;s Timer Wheel expires A&#39;s lease at <code>grant + 9.3s</code> (per <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-2">§8.2</a>) and
+the resource is returned to <code>Free</code>.</li>
+<li>Client B acquires the lease on R, receiving fencing token 34 (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-2">I2</a>: strictly greater than 33).</li>
+<li>B begins writing to R, tagging each write with token 34.</li>
+<li>Client A resumes from its GC pause, still believing (per its own clock, per <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-2">§8.2</a>&#39;s
+<code>T_holder_valid_until</code>) that its lease is valid, and issues its pending write to R tagged with
+its stale token 33.</li>
+<li>R&#39;s <code>ResourceGuard</code> (implementing <code>TokenChecker</code>) has already recorded 34 as the highest token
+seen (from step 5) and rejects A&#39;s write carrying token 33 (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-3">I3</a>).</li>
+<li>Result: mutual exclusion is preserved <em>despite</em> the pause, because the token check — not the
+clock, not A&#39;s own self-assessment — is the final arbiter at the point of actual resource
+mutation. This is exactly the gap Redlock leaves open (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-7">§8.7</a>, <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/trade-offs/#sec-36">§36</a>) and exactly what Chubby&#39;s
+sequencers close (Burrows 2006).</li>
+</ol>
+<h3 id="sec-8-4">8.4 Lease-Based Leader Election — Sequence Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Candidate C1</td>
+<td>requests grant on election lease <code>&quot;leader:svc-x&quot;</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Lease Manager</td>
+<td>resource <code>Free</code> → grants to C1, issues token 100</td>
+</tr>
+<tr>
+<td>3</td>
+<td>C1</td>
+<td>begins acting as leader, attaches token 100 to all leader-only actions</td>
+</tr>
+<tr>
+<td>4</td>
+<td>C1</td>
+<td>renews every L/3 interval; renewal preserves identity and token (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-5">I5</a>)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>C1</td>
+<td>crashes (or pauses beyond L + G)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Timer Wheel</td>
+<td>expires C1&#39;s lease at <code>grant + L − δ − G</code></td>
+</tr>
+<tr>
+<td>7</td>
+<td>Candidate C2</td>
+<td>requests grant, resource <code>Free</code> → grants to C2, issues token 101</td>
+</tr>
+<tr>
+<td>8</td>
+<td>C2</td>
+<td>begins acting as leader with token 101</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Downstream systems</td>
+<td>reject any lingering C1 action tagged token 100 (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-3">I3</a>)</td>
+</tr>
+<tr>
+<td>10</td>
+<td>C1 (if it resumes)</td>
+<td>observes its renewal fail (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-8">I8</a>: post-revocation renewal rejected), steps down voluntarily as a defense-in-depth measure even though token-fencing already made it harmless</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Lease-Bounded Distributed Locking — Sequence Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Client A</td>
+<td><code>LockRequest(&quot;resource-y&quot;, ttl=10s)</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Lock Module</td>
+<td>resource free, grants to A, token 7, wait queue empty</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Client B</td>
+<td><code>LockRequest(&quot;resource-y&quot;, ttl=10s)</code> while A holds</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Lock Module</td>
+<td>enqueues B in bounded FIFO wait queue (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/trade-offs/#sec-9">§9</a> <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/trade-offs/#adr-7">ADR-07</a>)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Client A</td>
+<td>crashes without releasing</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Timer Wheel</td>
+<td>expires A&#39;s lease at guard-adjusted deadline</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Lock Module</td>
+<td>pops B from wait queue, grants lock, issues token 8</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Protected resource</td>
+<td>rejects any late write from A carrying token 7 (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-3">I3</a>)</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Client B</td>
+<td>releases voluntarily; resource returns to <code>Free</code>, wait queue empty</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Session Model — The Meta-Lease</h3>
+<p>A session <code>S</code> is itself a <code>Lease</code> (state machine identical to <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-1">§8.1</a>) whose &quot;resource&quot; is the
+client&#39;s overall liveness rather than a single protected object; <code>S</code> maintains a set of <em>attached</em>
+resource leases <code>{R1, R2, ..., Rn}</code>. The session&#39;s own expiry (missed heartbeats past the threshold,
+<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/numbers/#sec-4">§4</a>) triggers cascading release of every <code>Ri</code> (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-7">I7</a>), each following its own <code>Granted → Expired</code>
+transition independently but atomically with respect to the session&#39;s expiry event — no <code>Ri</code> may
+be observed still <code>Granted</code> after <code>S</code> has transitioned to <code>Expired</code> (extension of <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-1">I1</a>/<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-4">I4</a> to the
+one-to-many case). This mirrors ZooKeeper&#39;s ephemeral-node-tied-to-session model and Chubby&#39;s
+session concept directly (Hunt et al. 2010; Burrows 2006).</p>
+<h3 id="sec-8-7">8.7 Renewal and the Grace Period</h3>
+<p>Renewal request <code>renew(owner, current_token)</code> succeeds only if: (a) the lease is in <code>Granted</code> or
+<code>Renewing</code> state, (b) <code>owner</code> matches the current holder (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-5">I5</a>), and (c) the request arrives before
+<code>T_grantor_expires_at</code> (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-2">§8.2</a>). A grace period (distinct from the guard interval) may optionally
+extend a <em>just-missed</em> renewal — one arriving within a small operator-configured window after
+<code>T_grantor_expires_at</code> but before the resource has been re-granted — back to the same owner without
+a fencing-token bump, trading a small safety-adjacent convenience (avoiding unnecessary token churn
+under transient renewal delay) for slightly relaxed strictness; this is a named, ADR-governed
+policy choice (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/trade-offs/#sec-9">§9</a> <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/trade-offs/#adr-10">ADR-10</a>), off by default, because it reintroduces a sliver of the exact ambiguity
+fencing tokens exist to eliminate and is therefore treated as a deliberate, audited exception.</p>
+<h3 id="sec-8-8">8.8 Interaction with the Consensus-Backed Store</h3>
+<p>Every state transition in <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-1">§8.1</a> that is not purely a read (grant, renew-commit, expire-commit,
+revoke) is proposed as a command to the <code>ConsensusStore</code> and only takes effect once committed
+(quorum-acknowledged); the Lease Manager applies committed commands deterministically, exactly the
+same way regardless of which physical coordinator node originated them, so a coordinator failover
+mid-grant either commits (and the new coordinator observes the committed grant on replay) or never
+commits (and the client must retry) — there is no partially-applied state (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-6">I6</a>).</p>
+<h3 id="sec-8-9">8.9 The Redlock Cautionary Analysis</h3>
+<p>Redlock (a quorum of N independent Redis nodes, each an independent timer with no shared
+consensus log and, critically, <strong>no fencing token</strong>) is unsafe under two realistic faults it was
+not designed to survive: (a) a process pause between acquiring the lock and using the protected
+resource — the resumed, still-token-less process cannot be told apart from a legitimately valid
+holder by the resource, because there is no token to check (contrast <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-3">§8.3</a> step 7, which <em>does</em>
+have a token to check); (b) a clock jump on any one of the N Redis nodes (NTP step correction, VM
+migration, manual clock set) can cause that node to believe a lock it already granted has expired
+far earlier or later than intended, and because Redlock&#39;s safety proof depends on <em>every</em> node&#39;s
+clock behaving monotonically and boundedly, a single misbehaving node can violate the majority
+argument. Kleppmann&#39;s critique (cited <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/study/#sec-5">§5</a>) formalizes both points; Antirez&#39;s rebuttal accepts the
+GC-pause point as valid for <em>any</em> lock without fencing (including this project&#39;s, absent <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-3">§8.3</a>) and
+argues clock jumps are an operational, not algorithmic, concern — this project resolves the debate
+operationally by (i) mandating fencing everywhere (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/trade-offs/#sec-9">§9</a> <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/trade-offs/#adr-5">ADR-05</a>, non-negotiable) and (ii) treating
+clock-jump detection as a first-class, alarmed invariant (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-9">I9</a>) rather than an assumed-away
+operational nicety.</p>
+<h3 id="sec-8-10">8.10 Malformed and Hard Examples</h3>
+<ul>
+<li><strong>GC pause exceeding the lease</strong>: covered fully in <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-3">§8.3</a>; resolved by fencing, not by clock policy
+alone.</li>
+<li><strong>Clock jump</strong> (NTP step correction moves a node&#39;s wall clock backward or forward by seconds):
+the Clock/Skew Monitor&#39;s continuous skew estimate detects the discontinuity (a monotonic-clock
+vs. wall-clock divergence spike) and trips the <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-9">I9</a> fail-safe before any grant decision uses the
+jumped clock reading.</li>
+<li><strong>Network partition isolating the leaseholder</strong>: the isolated holder cannot renew (no path to the
+<code>ConsensusStore</code> quorum side); its lease expires on schedule from the majority side; the isolated
+holder, even if it keeps acting, is fenced out the moment its writes reach a <code>ResourceGuard</code> that
+is reachable from the majority side (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-3">I3</a>) — this is the same mechanism as <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/architecture/#sec-8-3">§8.3</a>, with &quot;partition&quot;
+substituted for &quot;pause&quot; as the root cause of the holder&#39;s stale self-belief.</li>
+<li><strong>A renewal racing expiry</strong>: resolved by <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-8">I8</a> plus the strict ordering enforced by the
+<code>ConsensusStore</code>&#39;s single commit log — the renewal command and the expiry-commit command cannot
+both be accepted for the same lease generation; whichever commits first wins, and the loser is
+rejected deterministically on replay (no ambiguity survives past the commit point).</li>
+<li><strong>A token that goes backward</strong>: caught at issuance by <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-2">I2</a>&#39;s self-check before it ever reaches a
+client; if it were ever observed downstream (implying a bug elsewhere, e.g., a <code>ConsensusStore</code>
+rollback bug), it is caught at the <code>ResourceGuard</code> boundary by <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-3">I3</a>&#39;s core comparison regardless.</li>
+<li><strong>A split-brain attempt</strong> (two coordinators each believing themselves the current lease authority
+after a partition heals asymmetrically): prevented at the <code>ConsensusStore</code> layer by the backing
+consensus protocol&#39;s own term/leader uniqueness guarantee (delegated, <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/blueprint/#sec-1">§1</a>), and defended in depth
+at the fencing layer (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-3">I3</a>) even in the hypothetical case that the backing store&#39;s guarantee were
+violated.</li>
+</ul>
+<h3 id="sec-8-11">8.11 A Failure-Path Example, End to End</h3>
+<p>Coordinator crashes mid-commit of a grant to client A for resource R (WAL entry proposed to
+<code>ConsensusStore</code> but not yet quorum-acknowledged to the original coordinator, though it may have
+already reached a quorum of replicas). On failover, the new coordinator&#39;s Lease Manager replays the
+<code>ConsensusStore</code> log: if the entry is present in the committed prefix, the grant is honored and A is
+informed (idempotently, on retry) that its grant succeeded with its original fencing token; if the
+entry never reached a quorum, it is absent from the committed prefix and the grant is treated as
+never having happened — A&#39;s retry produces a fresh grant with a new (higher) token per <a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-2">I2</a>. In
+neither case does R end up with two simultaneously valid holders (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-1">I1</a>), and in neither case does a
+token get reused or decremented (<a class="cite" href="/system-design-blueprints/systems/lease-based-coordination-system/reliability/#inv-2">I2</a>).</p>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

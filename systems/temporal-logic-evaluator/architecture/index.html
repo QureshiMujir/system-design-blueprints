@@ -1,0 +1,911 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Temporal Logic Evaluator — Architecture · Engineering Blueprints</title><meta name="description" content="Temporal Logic Evaluator, hld: §3 overview + §8 domain model. Build a from-scratch, explicit-state / automata-theoretic temporal logic evaluator in Rust — parse LTL &#38; CTL (plus past-LTL &#38; finite-trace LTLf), model-check Kripke structures, and monitor event…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/formal-methods-solvers/">Formal Methods &amp; Solvers</a> </li><li> <a href="/system-design-blueprints/systems/temporal-logic-evaluator/">Temporal Logic Evaluator</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:183"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/formal-methods-solvers/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Formal Methods &amp; Solvers</span></a> </p> <h1>Temporal Logic Evaluator</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~28 weeks</li> <li>4,651 lines</li> <li>blueprint #283</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/temporal-logic-evaluator/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/temporal-logic-evaluator/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/temporal-logic-evaluator/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/temporal-logic-evaluator/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/temporal-logic-evaluator/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/temporal-logic-evaluator/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/temporal-logic-evaluator/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/temporal-logic-evaluator/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/temporal-logic-evaluator/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/temporal-logic-evaluator/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Temporal Logic Evaluator — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<p>The evaluator is a seven-crate Rust workspace. <code>tl-syntax</code> + <code>tl-formula</code> form the shared front end: untrusted formula text becomes a typed <code>Formula</code> AST in NNF. From that single AST, four disjoint evaluation paths fan out — CTL labeling, LTL automata-theoretic model checking, LTLf/past-LTL trace evaluation, and runtime monitoring — every one of them grounded on the <code>tl-trace</code> model (<code>State</code>, <code>Trace</code>, <code>KripkeStructure</code>). <code>tl-cli</code> (the <code>tl</code> binary) is the only <code>std</code> member and the only I/O surface. No path persists state; all structures are in-memory, single-process, deterministic.</p>
+<h3 id="sec-3-1">3.1 Canonical Architecture Diagram</h3>
+<pre class="diagram"><code>                       tl-cli   (tl: eval / to-buchi / check / monitor)            [std; only I/O surface]
+                           |  formula text  +  (trace | Kripke structure | event stream)
+   == TRUST BOUNDARY ======|=== untrusted: formula text + trace/Kripke/stream text ===========
+                           v
+   tl-syntax (Lexer/Parser -&gt; Formula) ----&gt; tl-formula (NNF; simplify; closure; well-formedness Kind)
+                           |  Formula (NNF, validated by Kind)
+        +------------------+------------------+----------------------+----------------------+
+        v (CTL + Kripke)   v (LTL + Kripke)   v (LTL/LTLf + trace)    v (LTL + event stream)
+   tl-eval CtlChecker    tl-automata:         tl-eval eval_ltlf       tl-monitor: progress
+     labeling             ltl_to_ngba (GPVW)   (progression over a     (LTL3 / RV-LTL 4-valued
+     EX/EU/EG fixpoints    -&gt; degeneralize      finite Trace) ;         Verdict; monitor
+     over Kripke states    -&gt; product           past-LTL DP             automaton)
+        |                  (Nba x Kripke)        |                       |
+        |                  -&gt; emptiness          |                       |
+        |                  (nested DFS) -&gt; Lasso |                       |
+        v                  v                     v                       v
+   sat labeling / holds  holds + lasso CE      bool verdict            streaming RvVerdict
+                       \           |              /
+                        v          v             v
+                       tl-trace (State = AP bitset ; Trace finite+lasso ; KripkeStructure)
+
+   == NO PERSISTENCE BOUNDARY == nothing below tl-cli touches disk/network; all in-memory, deterministic</code></pre>
+<p>Data flows:</p>
+<ul>
+<li><strong>In:</strong> formula text -&gt; <code>Lexer</code>/<code>Parser</code> -&gt; <code>Formula</code> -&gt; <code>nnf()</code> -&gt; NNF <code>Formula</code>; trace text -&gt; <code>Trace</code>; Kripke text -&gt; <code>KripkeStructure</code>; event lines -&gt; <code>State</code> stream.</li>
+<li><strong>Out:</strong> <code>Vec&lt;bool&gt;</code> per-state <code>sat</code> labeling + <code>holds: bool</code> (CTL); <code>holds</code> + <code>Lasso</code> counterexample (LTL); <code>bool</code> verdict (LTLf/past); streaming <code>RvVerdict</code> (monitor); <code>Ngba</code>/<code>Nba</code> as HOA/dot (<code>to-buchi</code>).</li>
+<li><strong>Trust boundary:</strong> drawn directly below <code>tl-cli</code>. Formula text, trace text, Kripke text, and the event stream are all untrusted; <code>tl-syntax</code> (bounded recursion, sized errors) + <code>tl-trace</code> validation (total transition relation, well-formed lasso) are the only sanitizers. Everything below treats inputs as already-typed and total.</li>
+<li><strong>Persistence boundary:</strong> none. No file/network/clock/RNG dependency below <code>tl-cli</code> (RNG appears only in Phase 13 test harnesses, not the engine). Each invocation is a pure function of its inputs.</li>
+</ul>
+<h3 id="sec-3-2">3.2 Per-Box Responsibilities</h3>
+<p><strong><code>tl-cli</code></strong> — the <code>tl</code> binary, the single <code>std</code> crate and sole I/O boundary. Subcommands: <code>eval</code> (formula + trace -&gt; verdict), <code>to-buchi</code> (formula -&gt; <code>Ngba</code>/<code>Nba</code> as HOA or dot), <code>check</code> (formula + Kripke -&gt; holds / <code>Lasso</code> counterexample), <code>monitor</code> (event stream -&gt; streaming <code>RvVerdict</code>). In: argv + stdin/files (formula, trace, Kripke, stream text). Out: stdout verdict/automaton/counterexample, exit codes (0 holds, 1 counterexample, 2 usage/parse error). Depends on all six lower crates. Invariant: it is the <em>only</em> member with side effects; all engine logic stays pure below the trust boundary. Built across Phase 0 (skeleton wiring) and finalized as each subcommand&#39;s path lands (Phases 4/5/8/9).</p>
+<p><strong><code>tl-syntax</code></strong> — <code>no_std + alloc</code> lexer + parser for LTL, CTL, past-LTL, and LTLf concrete syntax into the <code>Formula</code> AST, plus a pretty-printer. Exposes <code>Lexer</code>, <code>Token</code>, <code>Parser</code>, <code>ParseError</code>/<code>ParseErrorKind</code>; interns each atomic proposition to an <code>Ap = u32</code>. In: untrusted formula text. Out: <code>Formula</code> or a sized, positioned <code>ParseError</code>. Precedence (locked): unary <code>X</code>/<code>F</code>/<code>G</code>/past unaries/<code>Not</code> bind tightest, then binary <code>U</code>/<code>R</code>/<code>S</code>, then <code>And</code>, then <code>Or</code>. Invariant: bounded recursion depth — no stack overflow on adversarial nesting; every accepted string round-trips through the pretty-printer to an equal <code>Formula</code>. The outermost line of defense at the trust boundary. Built in Phases 1 (LTL/NNF tokens + precedence) and 2 (CTL fused path-quantifier operators).</p>
+<p><strong><code>tl-formula</code></strong> — <code>no_std + alloc</code> home of the <code>Formula</code> AST and its transformations, the semantic core every path shares. <code>Atom = Ap</code> id. Provides <code>nnf()</code> (push <code>Not</code> to atoms via the locked dualities: <code>not X = X not</code>, <code>not(p U q) = (not p) R (not q)</code>, <code>not F = G not</code>, <code>not G = F not</code>, <code>not(EX) = AX(not)</code>, etc.), simplification/rewrite, <code>closure()</code> (subformula closure feeding GPVW and CTL labeling), and <code>Kind</code> well-formedness classification (<code>Ltl</code>/<code>Ctl</code>/<code>PastLtl</code>/<code>Ltlf</code>, enforcing the CTL state-formula-vs-path-formula distinction). In: raw <code>Formula</code>. Out: NNF <code>Formula</code>, <code>Vec&lt;Formula&gt;</code> closure, <code>Kind</code>. Invariant: after <code>nnf()</code>, negation appears <em>only</em> on atoms and the operator set is fixed — GPVW and the labeling algorithm depend on this precondition. Built in Phases 1 (NNF) and 2 (CTL well-formedness).</p>
+<p><strong><code>tl-trace</code></strong> — <code>no_std + alloc</code> word/structure model shared by all four evaluation paths. <code>State { aps: Bitset }</code> (which APs hold), <code>Trace { prefix: Vec&lt;State&gt;, loop_start: Option&lt;usize&gt; }</code> (finite prefix; <code>Some</code> =&gt; lasso-shaped infinite word), <code>KripkeStructure { states, init, edges, /* successors */ }</code> (states, init set, successor edges, labeling). In: parsed model text from <code>tl-cli</code>. Out: validated structures consumed by <code>tl-eval</code>, <code>tl-automata</code>, <code>tl-monitor</code>. Invariant: a <code>KripkeStructure</code> has a <em>total</em> transition relation (every state has ≥1 successor — required for correct CTL/Buchi semantics) and a <code>Trace</code>&#39;s <code>loop_start</code>, when present, indexes a valid <code>prefix</code> position (well-formed lasso). The inner sanitizer of the trust boundary. Built in Phase 3.</p>
+<p><strong><code>tl-automata</code></strong> — <code>no_std + alloc</code> omega-automata layer, depends on <code>tl-formula</code> + <code>tl-trace</code>. Types: <code>Ngba</code> (generalized Buchi, <code>accept: Vec&lt;Vec&lt;usize&gt;&gt;</code> = set of accept sets), <code>Nba</code> (Buchi, single <code>accept: Vec&lt;usize&gt;</code>), <code>Guard</code> (boolean over APs as DNF / bitset mask+care), <code>Lasso { stem, cycle }</code>. Pipeline: <code>ltl_to_ngba</code> (GPVW on-the-fly tableau — nodes = obligation sets over the closure split into now-guard / next-obligations; one generalized accept set per <code>Until</code>-eventuality), <code>degeneralize</code> (<code>Ngba</code> k accept sets -&gt; <code>Nba</code> on <code>state x counter 0..k</code>), <code>product</code> (synchronous <code>Nba x Kripke</code>), <code>emptiness</code> (nested DFS -&gt; <code>Option&lt;Lasso&gt;</code>). In: NNF <code>Formula</code>, <code>KripkeStructure</code>. Out: <code>Ngba</code>/<code>Nba</code>, <code>Lasso</code>. Invariant: the constructed automaton&#39;s language exactly equals the LTL formula&#39;s models, and <code>emptiness</code> returns <code>Some(lasso)</code> iff a reachable accepting cycle exists — this is the gravest correctness surface, since a GPVW/degeneralization/nested-DFS bug silently flips a verdict with no crash (primary guard: Phase 13 differential testing vs Spot&#39;s <code>ltl2tgba</code>). Built in Phases 6 (GPVW-&gt;<code>Ngba</code>), 7 (degeneralize + simplify), 8 (product + nested-DFS emptiness), with lazy/on-the-fly product in Phase 12.</p>
+<p><strong><code>tl-eval</code></strong> — <code>no_std + alloc</code> evaluators, depends on <code>tl-formula</code> + <code>tl-trace</code> + <code>tl-automata</code>. <code>CtlChecker&lt;&#39;a&gt;</code> over a <code>KripkeStructure</code>: <code>sat(f) -&gt; Vec&lt;bool&gt;</code> per-state labeling (<code>sat(EX p)</code> = preimage; <code>sat(E[p U q])</code> = least fixpoint; <code>sat(EG p)</code> = greatest fixpoint via SCC quotient; EF/AG/AF/AX/A[U] by duality) and <code>holds(f) -&gt; bool</code> (every init state labeled). <code>eval_ltlf(f, t) -&gt; bool</code> (finite-trace LTL by formula progression, definitive at end-of-trace, weak/strong next distinction on finite words). <code>check_ltl(f, k) -&gt; Result&lt;(), Lasso&gt;</code> (the automata-theoretic check: <code>product(Nba(not phi), k)</code> then <code>emptiness</code>; <code>Ok</code> = holds, <code>Err(lasso)</code> = counterexample). Past-LTL DP. In: NNF <code>Formula</code> + <code>Trace</code>/<code>KripkeStructure</code>. Out: labeling <code>Vec&lt;bool&gt;</code>, <code>bool</code>, <code>Result&lt;(), Lasso&gt;</code>. Invariant: <code>K</code> satisfies <code>A phi</code> iff <code>L(product(Nba(not phi), K))</code> is empty; CTL <code>holds</code> iff every init state ∈ <code>sat(f)</code>. Built in Phases 4 (LTLf), 5 (CTL labeling), 8 (LTL model check), 10 (past-LTL DP), 11 (LTLf-&gt;DFA).</p>
+<p><strong><code>tl-monitor</code></strong> — <code>no_std + alloc</code> runtime verification, depends on <code>tl-formula</code> + <code>tl-automata</code>. <code>Verdict { True, False }</code> (2-valued definitive); <code>RvVerdict { True, False, PresumablyTrue, PresumablyFalse, Unknown }</code> (LTL3 / RV-LTL 4-valued); <code>Monitor</code> (current progressed <code>Formula</code> or monitor-automaton state). <code>Monitor::step(&amp;mut self, s) -&gt; RvVerdict</code> folds <code>progress(f, s) -&gt; Formula</code> (the LTL derivative: <code>progress(X f,s)=f</code>; <code>progress(f U g,s)=progress(g,s) OR (progress(f,s) AND f U g)</code>; <code>progress(G f,s)=progress(f,s) AND G f</code>; <code>progress(atom p,s)=True/False</code>) over the event stream. Monitorability classification + optional monitor-automaton synthesis. In: NNF <code>Formula</code> + streamed <code>State</code> events. Out: per-event <code>RvVerdict</code>; a <code>True</code>/<code>False</code> residual = definitive (good/bad prefix). Invariant: a definitive verdict is emitted iff the observed prefix is a good prefix (all extensions satisfy <code>phi</code> -&gt; <code>True</code>) or bad prefix (none do -&gt; <code>False</code>); otherwise <code>Unknown</code> and the verdict is <em>latched</em> once definitive (never reverts). Built in Phase 9.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — LTL/CTL Syntax, Automata, and Trace Semantics</h2>
+<p>This is the formal core: the grammar <code>tl-syntax</code> parses, the semantics <code>tl-eval</code>/<code>tl-monitor</code> implement, the NNF <code>tl-formula</code> produces, the omega-automata <code>tl-automata</code> builds, and the trace/Kripke structures <code>tl-trace</code> defines. Every later phase is an algorithm over these objects; ambiguity here is a verdict-flipping bug (the gravest failure class). All definitions LOCKED.</p>
+<h3 id="sec-8-1">8.1 Atomic propositions and alphabet</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Definition</th>
+<th>Representation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>AP (atomic proposition)</td>
+<td>named boolean observable, e.g. <code>p</code>, <code>req</code>, <code>ack_2</code></td>
+<td><code>Ap = u32</code>, interned by <code>tl-syntax</code></td>
+</tr>
+<tr>
+<td>AP universe</td>
+<td><code>Σ_AP = { all interned Ap }</code>, size <code>n</code></td>
+<td>symbol table; <code>n</code> fixed per formula/model</td>
+</tr>
+<tr>
+<td>Letter / valuation</td>
+<td>a subset of AP that hold simultaneously</td>
+<td><code>State { aps: Bitset }</code>, bit <code>i</code> set ⇔ AP <code>i</code> holds</td>
+</tr>
+<tr>
+<td>Alphabet <code>Σ</code></td>
+<td><code>2^Σ_AP</code> — power set of APs (one letter = one valuation)</td>
+<td>`</td>
+</tr>
+<tr>
+<td>omega-word</td>
+<td><code>w ∈ Σ^ω</code>, infinite sequence <code>w = w₀ w₁ w₂ …</code>, each <code>wᵢ ⊆ AP</code></td>
+<td>lasso-encoded <code>Trace</code> (<a class="cite" href="/system-design-blueprints/systems/temporal-logic-evaluator/architecture/#sec-8-7">§8.7</a>)</td>
+</tr>
+<tr>
+<td>finite word</td>
+<td><code>u ∈ Σ⁺</code>, <code>u = u₀ … u_{m-1}</code>, length <code>m ≥ 1</code></td>
+<td><code>Trace</code> with <code>loop_start = None</code></td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>AP id assignment: first-seen order during lex; identical lexeme ⇒ same <code>Ap</code>. Closed alphabet ⇒ <code>Guard</code> masks have fixed width <code>n</code>.</li>
+<li><code>Bitset</code> width = <code>n</code> rounded to machine words; <code>Σ</code> is NEVER materialized (<code>2^n</code> blowup) — guards stay symbolic (mask+care, DNF over APs).</li>
+</ul>
+<h3 id="sec-8-2">8.2 Grammar (EBNF) — LTL + past-LTL + LTLf + CTL</h3>
+<p>Single concrete syntax; <code>Kind ∈ {Ltl, Ctl, PastLtl, Ltlf}</code> is decided post-parse by <code>tl-formula</code> well-formedness (<a class="cite" href="/system-design-blueprints/systems/temporal-logic-evaluator/architecture/#sec-8-6">§8.6</a>), not by separate grammars. CTL fuses each path quantifier with exactly one temporal op (no bare <code>A</code>/<code>E</code>).</p>
+<pre class="code language-ebnf" data-lang="ebnf"><code>formula     = iff_expr ;
+
+(* boolean layer — lowest precedence first, all left-assoc except -&gt; right-assoc *)
+iff_expr    = imp_expr , { &quot;&lt;-&gt;&quot; , imp_expr } ;          (* &lt;-&gt; : equivalence  *)
+imp_expr    = or_expr  , [ &quot;-&gt;&quot; , imp_expr ] ;           (* -&gt; : right-assoc, lowest binary *)
+or_expr     = and_expr , { &quot;|&quot;  , and_expr } ;           (* | : disjunction *)
+and_expr    = bin_temp , { &quot;&amp;&quot;  , bin_temp } ;           (* &amp; : conjunction *)
+
+(* binary temporal — bind tighter than boolean, right-assoc *)
+bin_temp    = un_expr , { (&quot;U&quot; | &quot;R&quot; | &quot;W&quot; | &quot;M&quot; | &quot;S&quot;) , un_expr } ;
+                (* U until, R release, W weak-until, M strong-release (LTL);
+                   S since (past-LTL). W,M are sugar -&gt; U,R in NNF *)
+
+(* unary prefix — highest precedence, right-assoc, stackable: e.g. X X G p *)
+un_expr     = { un_op } , primary ;
+un_op       = &quot;!&quot; | &quot;X&quot; | &quot;F&quot; | &quot;G&quot;                       (* future LTL: ! not, X next, F eventually, G globally *)
+            | &quot;Y&quot; | &quot;O&quot; | &quot;H&quot;                             (* past-LTL: Y previous, O once, H historically *)
+            | ctl_un ;                                    (* CTL fused quantifier+op *)
+ctl_un      = &quot;EX&quot; | &quot;AX&quot; | &quot;EF&quot; | &quot;AF&quot; | &quot;EG&quot; | &quot;AG&quot; ;
+
+primary     = atom
+            | &quot;true&quot; | &quot;false&quot;
+            | &quot;(&quot; , formula , &quot;)&quot;
+            | ctl_bin_until ;                             (* fused CTL until needs explicit bracket form *)
+
+ctl_bin_until = (&quot;E&quot; | &quot;A&quot;) , &quot;[&quot; , formula , &quot;U&quot; , formula , &quot;]&quot; ;  (* E[φ U ψ], A[φ U ψ] *)
+
+atom        = lower_id ;                                  (* AP: [a-z][A-Za-z0-9_]*  e.g. p, req, ack_2 *)
+lower_id    = ? [a-z][A-Za-z0-9_]* ? ;</code></pre>
+<p>Precedence summary (tightest → loosest): unary prefix (<code>!</code>,<code>X</code>,<code>F</code>,<code>G</code>,<code>Y</code>,<code>O</code>,<code>H</code>,<code>EX</code>…<code>AG</code>) &gt; binary temporal (<code>U</code>,<code>R</code>,<code>W</code>,<code>M</code>,<code>S</code>) &gt; <code>&amp;</code> &gt; <code>|</code> &gt; <code>-&gt;</code> &gt; <code>&lt;-&gt;</code>. Examples disambiguated:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Parse</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>G p -&gt; F q</code></td>
+<td><code>(G p) -&gt; (F q)</code> — unary binds before <code>-&gt;</code></td>
+</tr>
+<tr>
+<td><code>a U b U c</code></td>
+<td><code>a U (b U c)</code> — <code>U</code> right-assoc</td>
+</tr>
+<tr>
+<td><code>! a U b</code></td>
+<td><code>(! a) U b</code> — <code>!</code> binds before <code>U</code></td>
+</tr>
+<tr>
+<td><code>a &amp; b U c</code></td>
+<td><code>a &amp; (b U c)</code> — <code>U</code> tighter than <code>&amp;</code></td>
+</tr>
+<tr>
+<td><code>EF p &amp; q</code></td>
+<td><code>(EF p) &amp; q</code> — <code>EF</code> unary, tighter than <code>&amp;</code></td>
+</tr>
+<tr>
+<td><code>A[p U q] -&gt; r</code></td>
+<td><code>(A[p U q]) -&gt; (r)</code></td>
+</tr>
+</tbody></table></div>
+<p>Sugar expansion (parse-time, before NNF): <code>p&lt;-&gt;q ⇒ (p-&gt;q)&amp;(q-&gt;p)</code>; <code>p-&gt;q ⇒ !p|q</code>; <code>p W q ⇒ (p U q)|G p</code>; <code>p M q ⇒ (p R q)&amp;F p</code>. <code>Formula</code> AST has no <code>W</code>/<code>M</code>/<code>-&gt;</code>/<code>&lt;-&gt;</code> nodes — only LOCKED variants.</p>
+<h3 id="sec-8-3">8.3 LTL semantics over omega-words</h3>
+<p><code>w ⊨ φ</code> (&quot;word <code>w</code> models <code>φ</code>&quot;); <code>wⁱ = wᵢ wᵢ₊₁ …</code> is the suffix from position <code>i</code>; <code>w ⊨ φ ≜ w⁰ ⊨ φ</code>. Future fragment (positions <code>i,j ∈ ℕ</code>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operator</th>
+<th><code>wⁱ ⊨ …</code> iff</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Atom(p)</code></td>
+<td><code>p ∈ wᵢ</code></td>
+</tr>
+<tr>
+<td><code>True</code> / <code>False</code></td>
+<td>always / never</td>
+</tr>
+<tr>
+<td><code>Not φ</code></td>
+<td>not <code>wⁱ ⊨ φ</code></td>
+</tr>
+<tr>
+<td><code>And φ ψ</code> / <code>Or φ ψ</code></td>
+<td>both / either</td>
+</tr>
+<tr>
+<td><code>X φ</code> (next)</td>
+<td><code>wⁱ⁺¹ ⊨ φ</code></td>
+</tr>
+<tr>
+<td><code>F φ</code> (eventually)</td>
+<td><code>∃ j ≥ i. wʲ ⊨ φ</code></td>
+</tr>
+<tr>
+<td><code>G φ</code> (globally)</td>
+<td><code>∀ j ≥ i. wʲ ⊨ φ</code></td>
+</tr>
+<tr>
+<td><code>U φ ψ</code> (until)</td>
+<td><code>∃ j ≥ i. (wʲ ⊨ ψ) ∧ ∀ i ≤ k &lt; j. wᵏ ⊨ φ</code></td>
+</tr>
+<tr>
+<td><code>R φ ψ</code> (release)</td>
+<td><code>∀ j ≥ i. (wʲ ⊨ ψ) ∨ ∃ i ≤ k &lt; j. wᵏ ⊨ φ</code></td>
+</tr>
+</tbody></table></div>
+<p>Identities (used by simplification + NNF): <code>F φ ≡ true U φ</code>; <code>G φ ≡ false R φ ≡ !F!φ</code>; <code>φ R ψ ≡ !(!φ U !ψ)</code>; <code>X(φ∧ψ) ≡ Xφ ∧ Xψ</code>; <code>X</code> is self-dual: <code>!Xφ ≡ X!φ</code>. Strong-until <code>U</code> requires <code>ψ</code> to actually occur; weak-until <code>W</code> (sugar) does not.</p>
+<h3 id="sec-8-4">8.4 CTL semantics over Kripke states</h3>
+<p>CTL is interpreted at a <em>state</em> <code>s</code> of a Kripke structure <code>K = (S, S₀, →, L)</code> where <code>L(s) ⊆ AP</code>. A <em>path</em> <code>π = s₀ s₁ …</code> satisfies <code>s_{k} → s_{k+1}</code> for all <code>k</code>; <code>π[i]</code> is its <code>i</code>-th state. <code>K, s ⊨ φ</code>:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operator</th>
+<th><code>K, s ⊨ …</code> iff</th>
+<th>Quantifier reading</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Atom(p)</code></td>
+<td><code>p ∈ L(s)</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>Not/And/Or</code></td>
+<td>boolean, pointwise</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>Ex φ</code>  (EX)</td>
+<td><code>∃ s&#39;. s → s&#39; ∧ K,s&#39; ⊨ φ</code></td>
+<td>exists-next</td>
+</tr>
+<tr>
+<td><code>Ax φ</code>  (AX)</td>
+<td><code>∀ s&#39;. s → s&#39; ⇒ K,s&#39; ⊨ φ</code></td>
+<td>all-next = <code>!EX!φ</code></td>
+</tr>
+<tr>
+<td><code>Ef φ</code>  (EF)</td>
+<td><code>∃ path π from s. ∃ i. K,π[i] ⊨ φ</code></td>
+<td>exists-eventually = <code>E[true U φ]</code></td>
+</tr>
+<tr>
+<td><code>Af φ</code>  (AF)</td>
+<td><code>∀ path π from s. ∃ i. K,π[i] ⊨ φ</code></td>
+<td>all-eventually = <code>!EG!φ</code></td>
+</tr>
+<tr>
+<td><code>Eg φ</code>  (EG)</td>
+<td><code>∃ path π from s. ∀ i. K,π[i] ⊨ φ</code></td>
+<td>exists-globally</td>
+</tr>
+<tr>
+<td><code>Ag φ</code>  (AG)</td>
+<td><code>∀ path π from s. ∀ i. K,π[i] ⊨ φ</code></td>
+<td>all-globally = <code>!EF!φ</code></td>
+</tr>
+<tr>
+<td><code>Eu φ ψ</code> (E[φUψ])</td>
+<td><code>∃ path π. ∃ j. K,π[j] ⊨ ψ ∧ ∀ k&lt;j. K,π[k] ⊨ φ</code></td>
+<td>exists-until</td>
+</tr>
+<tr>
+<td><code>Au φ ψ</code> (A[φUψ])</td>
+<td><code>∀ path π. ∃ j. K,π[j] ⊨ ψ ∧ ∀ k&lt;j. K,π[k] ⊨ φ</code></td>
+<td>all-until</td>
+</tr>
+</tbody></table></div>
+<p>CTL adequate basis: <code>{EX, EG, EU}</code> + boolean. Derivations (used by <code>CtlChecker</code>): <code>EF φ = E[true U φ]</code>; <code>AX φ = !EX !φ</code>; <code>AG φ = !EF !φ = !E[true U !φ]</code>; <code>AF φ = !EG !φ</code>; <code>A[φ U ψ] = !( E[!ψ U (!φ∧!ψ)] ) ∧ !EG !ψ</code>. <strong>State-vs-path</strong>: every CTL operator pairs a quantifier <code>{A,E}</code> with a temporal op <code>{X,F,G,U}</code> — a temporal op WITHOUT a quantifier (e.g. <code>EX(p U q)</code>) is a <em>path formula</em> in a state context ⇒ rejected (<a class="cite" href="/system-design-blueprints/systems/temporal-logic-evaluator/architecture/#sec-8-6">§8.6</a>). CTL* (full nesting) is a NON-GOAL.</p>
+<h3 id="sec-8-5">8.5 Finite-trace LTLf and past-LTL semantics</h3>
+<p><strong>LTLf</strong> (De Giacomo–Vardi): same syntax as LTL, interpreted over a <em>finite</em> word <code>u = u₀…u_{m-1}</code>, <code>m = |u| ≥ 1</code>. Suffix <code>uⁱ</code>, last index <code>m-1</code>. The end-of-trace boundary forces a weak/strong-next split:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operator</th>
+<th><code>uⁱ ⊨ …</code> (LTLf), <code>0 ≤ i &lt; m</code> iff</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>X φ</code> (strong next)</td>
+<td><code>i+1 &lt; m ∧ u^{i+1} ⊨ φ</code> — false at last index (no successor)</td>
+</tr>
+<tr>
+<td><code>weak-next N φ</code></td>
+<td><code>i+1 = m ∨ u^{i+1} ⊨ φ</code> — true at last index; <code>N φ ≜ !X!φ</code> on finite words</td>
+</tr>
+<tr>
+<td><code>F φ</code></td>
+<td><code>∃ i ≤ j &lt; m. uʲ ⊨ φ</code></td>
+</tr>
+<tr>
+<td><code>G φ</code></td>
+<td><code>∀ i ≤ j &lt; m. uʲ ⊨ φ</code> (vacuously true past the end)</td>
+</tr>
+<tr>
+<td><code>U φ ψ</code></td>
+<td><code>∃ i ≤ j &lt; m. uʲ ⊨ ψ ∧ ∀ i ≤ k &lt; j. uᵏ ⊨ φ</code></td>
+</tr>
+<tr>
+<td><code>R φ ψ</code></td>
+<td><code>∀ i ≤ j &lt; m. uʲ ⊨ ψ ∨ ∃ i ≤ k &lt; j. uᵏ ⊨ φ</code> (release weak at end)</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li><code>eval_ltlf(f, t)</code> returns a definitive <code>bool</code> (no <code>Unknown</code>) — the whole trace is observed. Computed by progression (<a class="cite" href="/system-design-blueprints/systems/temporal-logic-evaluator/architecture/#sec-8-8">§8.8</a>, Phase 4): <code>X</code> progresses to its arg; at the final state the residual is evaluated with <code>X φ ⇒ false</code>, <code>G φ ⇒ true</code>, etc. — the weak/strong-next distinction lives entirely at this last step.</li>
+<li>LTLf <code>≠</code> LTL on the same prefix: <code>G p</code> is true on any finite all-<code>p</code> trace but false on an infinite word that later drops <code>p</code>.</li>
+</ul>
+<p><strong>Past-LTL</strong>: future + past operators over a word, position <code>i</code>, looking <em>backward</em> (<code>Phase 10</code>, evaluated by DP):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operator</th>
+<th><code>wⁱ ⊨ …</code> iff</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Y φ</code> (previous, strong)</td>
+<td><code>i &gt; 0 ∧ w^{i-1} ⊨ φ</code> — false at <code>i = 0</code></td>
+</tr>
+<tr>
+<td><code>O φ</code> (once)</td>
+<td><code>∃ 0 ≤ j ≤ i. wʲ ⊨ φ</code> — past-<code>F</code></td>
+</tr>
+<tr>
+<td><code>H φ</code> (historically)</td>
+<td><code>∀ 0 ≤ j ≤ i. wʲ ⊨ φ</code> — past-<code>G</code> = <code>!O!φ</code></td>
+</tr>
+<tr>
+<td><code>S φ ψ</code> (since)</td>
+<td><code>∃ 0 ≤ j ≤ i. wʲ ⊨ ψ ∧ ∀ j &lt; k ≤ i. wᵏ ⊨ φ</code> — past-<code>U</code></td>
+</tr>
+</tbody></table></div>
+<p>Duals: <code>O φ = true S φ</code>; <code>H φ = !O !φ</code>; weak-previous <code>Ỹ φ = !Y!φ</code> (true at <code>i=0</code>). Past-LTL is evaluable left-to-right: each state&#39;s past-obligation vector derives from the previous state&#39;s (DP, <a class="cite" href="/system-design-blueprints/systems/temporal-logic-evaluator/design/#sec-10">§10</a>), <code>O(m·|cl|)</code> time.</p>
+<h3 id="sec-8-6">8.6 Well-formedness — <code>Kind</code> classification</h3>
+<p><code>tl-formula::Kind ∈ {Ltl, Ctl, PastLtl, Ltlf}</code> assigned by structural rules. Mixing fragments is rejected with the listed error (<code>ParseError</code>/well-formedness check):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Rule</th>
+<th>Holds</th>
+<th>Violation → error</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>CTL state-formula closure</td>
+<td>every temporal op carries a quantifier (<code>Ex/Ax/Ef/Af/Eg/Ag/Eu/Au</code>); the immediate arg of a quantifier is itself a state formula</td>
+<td>bare <code>X/F/G/U/R</code> under a state context ⇒ <code>PathFormulaWhereStateRequired</code></td>
+</tr>
+<tr>
+<td>LTL purity</td>
+<td>no <code>Ex…Au</code> nodes; future ops only</td>
+<td>CTL op in LTL ⇒ <code>MixedFragment</code></td>
+</tr>
+<tr>
+<td>Past purity (PastLtl)</td>
+<td><code>Y/O/H/S</code> present; combined with future LTL allowed; NO CTL</td>
+<td>CTL op ⇒ <code>MixedFragment</code></td>
+</tr>
+<tr>
+<td>LTLf</td>
+<td>same node set as LTL; flagged by CLI/context (<code>--finite</code>), not by distinct nodes</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Quantifier well-nesting</td>
+<td><code>Eu/Au</code> written <code>E[..U..]</code>/<code>A[..U..]</code>; both args state formulas</td>
+<td><code>A p U q</code> (no brackets) ⇒ <code>ParseError::ExpectedBracket</code></td>
+</tr>
+</tbody></table></div>
+<p><code>Kind</code> selects the evaluator: <code>Ltl</code>+Kripke → automata path (<code>check_ltl</code>); <code>Ctl</code>+Kripke → <code>CtlChecker</code>; <code>Ltl</code>/<code>Ltlf</code>+<code>Trace</code> → <code>eval_ltlf</code>; <code>PastLtl</code>+<code>Trace</code> → past-LTL DP; <code>Ltl</code>+stream → <code>tl-monitor</code>.</p>
+<h3 id="sec-8-7">8.7 NNF + duality rules</h3>
+<p><code>nnf(f: &amp;Formula) -&gt; Formula</code> pushes <code>Not</code> inward until it sits only on <code>Atom</code>. <strong>Why</strong>: GPVW tableau (<a class="cite" href="/system-design-blueprints/systems/temporal-logic-evaluator/architecture/#sec-8-10">§8.10</a>) and CTL labeling (<a class="cite" href="/system-design-blueprints/systems/temporal-logic-evaluator/architecture/#sec-8-12">§8.12</a>) assume negation only on atoms (so the subformula closure is positive and obligation sets are monotone). LOCKED dualities:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Negated form</th>
+<th>Rewrites to</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>!!φ</code></td>
+<td><code>φ</code></td>
+</tr>
+<tr>
+<td><code>!True</code> / <code>!False</code></td>
+<td><code>False</code> / <code>True</code></td>
+</tr>
+<tr>
+<td><code>!(φ ∧ ψ)</code></td>
+<td><code>!φ ∨ !ψ</code></td>
+</tr>
+<tr>
+<td><code>!(φ ∨ ψ)</code></td>
+<td><code>!φ ∧ !ψ</code></td>
+</tr>
+<tr>
+<td><code>!X φ</code></td>
+<td><code>X !φ</code> (<code>X</code> self-dual)</td>
+</tr>
+<tr>
+<td><code>!F φ</code></td>
+<td><code>G !φ</code></td>
+</tr>
+<tr>
+<td><code>!G φ</code></td>
+<td><code>F !φ</code></td>
+</tr>
+<tr>
+<td><code>!(φ U ψ)</code></td>
+<td><code>!φ R !ψ</code></td>
+</tr>
+<tr>
+<td><code>!(φ R ψ)</code></td>
+<td><code>!φ U !ψ</code></td>
+</tr>
+<tr>
+<td><code>!Y φ</code></td>
+<td><code>Ỹ !φ</code> (weak-previous; = <code>!Y!φ</code>, true at i=0)</td>
+</tr>
+<tr>
+<td><code>!O φ</code></td>
+<td><code>H !φ</code></td>
+</tr>
+<tr>
+<td><code>!H φ</code></td>
+<td><code>O !φ</code></td>
+</tr>
+<tr>
+<td><code>!(φ S ψ)</code></td>
+<td>weak-since of duals (<code>!φ S̃ !ψ</code>)</td>
+</tr>
+<tr>
+<td><code>!EX φ</code></td>
+<td><code>AX !φ</code></td>
+</tr>
+<tr>
+<td><code>!AX φ</code></td>
+<td><code>EX !φ</code></td>
+</tr>
+<tr>
+<td><code>!EF φ</code></td>
+<td><code>AG !φ</code></td>
+</tr>
+<tr>
+<td><code>!AG φ</code></td>
+<td><code>EF !φ</code></td>
+</tr>
+<tr>
+<td><code>!EG φ</code></td>
+<td><code>AF !φ</code></td>
+</tr>
+<tr>
+<td><code>!AF φ</code></td>
+<td><code>EG !φ</code></td>
+</tr>
+<tr>
+<td><code>!E[φ U ψ]</code></td>
+<td><code>A[!φ R !ψ]</code> (= AG/AF-derived; uses release form)</td>
+</tr>
+<tr>
+<td><code>!A[φ U ψ]</code></td>
+<td><code>E[!φ R !ψ]</code></td>
+</tr>
+</tbody></table></div>
+<p>NNF preserves semantics + <code>Kind</code>; size grows ≤ ×2 (one <code>Not</code> per negated leaf). After NNF, <code>Not</code> appears only as <code>Not(Atom(_))</code>; an <code>assert</code> in debug builds checks this invariant before GPVW/labeling.</p>
+<h3 id="sec-8-8">8.8 Formula progression (the LTL derivative)</h3>
+<p><code>progress(f, s) -&gt; Formula</code> rewrites <code>f</code> given current letter <code>s</code>, returning the obligation for the <em>next</em> step; folding it over a stream is the monitor + LTLf evaluator core. Recurrences (over NNF):</p>
+<pre class="diagram"><code>progress(true, s)        = true
+progress(false, s)       = false
+progress(p, s)           = if p ∈ s.aps then true else false       // Atom
+progress(!p, s)          = !progress(p, s)                          // p atomic post-NNF
+progress(φ ∧ ψ, s)       = progress(φ,s) ∧ progress(ψ,s)
+progress(φ ∨ ψ, s)       = progress(φ,s) ∨ progress(ψ,s)
+progress(X φ, s)         = φ                                        // discharge one step
+progress(F φ, s)         = progress(φ,s) ∨ F φ
+progress(G φ, s)         = progress(φ,s) ∧ G φ
+progress(φ U ψ, s)       = progress(ψ,s) ∨ (progress(φ,s) ∧ (φ U ψ))
+progress(φ R ψ, s)       = progress(ψ,s) ∧ (progress(φ,s) ∨ (φ R ψ))</code></pre>
+<ul>
+<li>Residual simplified after each step (constant folding) → bounded growth; residual <code>true</code>/<code>false</code> = definitive verdict.</li>
+<li>LTLf end-of-trace: after the last letter, evaluate the residual with <code>X φ ⇒ false</code> (strong next has no successor), <code>G φ ⇒ true</code>, <code>F φ ⇒ false</code>, <code>φ U ψ ⇒ false</code>, <code>φ R ψ ⇒ true</code>.</li>
+</ul>
+<h3 id="sec-8-9">8.9 omega-automata model — Nba / Ngba</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Concept</th>
+<th><code>Ngba</code> (generalized Buchi)</th>
+<th><code>Nba</code> (Buchi)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>States</td>
+<td><code>0..nstates</code></td>
+<td><code>0..nstates</code></td>
+</tr>
+<tr>
+<td>Init</td>
+<td><code>init: Vec&lt;usize&gt;</code></td>
+<td><code>init: Vec&lt;usize&gt;</code></td>
+</tr>
+<tr>
+<td>Transitions</td>
+<td><code>edges[q] = Vec&lt;(Guard, q&#39;)&gt;</code> — guard = boolean over APs</td>
+<td>same</td>
+</tr>
+<tr>
+<td>Acceptance</td>
+<td><code>accept: Vec&lt;Vec&lt;usize&gt;&gt;</code> — <strong>set of accept sets</strong> <code>F₁..F_k</code></td>
+<td><code>accept: Vec&lt;usize&gt;</code> — <strong>one</strong> set <code>F</code></td>
+</tr>
+<tr>
+<td>Run on <code>w∈Σ^ω</code></td>
+<td><code>ρ = q₀ q₁ …</code>, <code>q₀∈init</code>, <code>∃(g,q_{i+1})∈edges[qᵢ]</code> with <code>wᵢ ⊨ g</code></td>
+<td>same</td>
+</tr>
+<tr>
+<td>Accepting run</td>
+<td><code>∀ j. inf(ρ) ∩ Fⱼ ≠ ∅</code> (each <code>Fⱼ</code> hit infinitely often)</td>
+<td><code>inf(ρ) ∩ F ≠ ∅</code> (<code>F</code> hit infinitely often)</td>
+</tr>
+<tr>
+<td>Language</td>
+<td>`L(A) = { w</td>
+<td>A has an accepting run on w }`</td>
+</tr>
+<tr>
+<td><code>inf(ρ)</code></td>
+<td>set of states visited infinitely often</td>
+<td>same</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li><code>Guard(mask+care / small DNF over APs)</code>: a letter <code>wᵢ</code> satisfies <code>g</code> iff <code>wᵢ &amp; care == mask &amp; care</code>. One edge ⇒ a <em>set</em> of letters; <code>Σ</code> never enumerated.</li>
+<li>A <strong>lasso</strong> <code>Lasso { stem, cycle }</code> encodes an ultimately-periodic run/word <code>stem·cycle^ω</code>. By the pumping/Ramsey argument: <code>L(A) ≠ ∅ ⇔ A</code> accepts some lasso <code>⇔</code> there is a reachable cycle through an accept state (Nba) / through all accept sets (Ngba). <code>emptiness</code> returns <code>Some(Lasso)</code> iff non-empty.</li>
+</ul>
+<h3 id="sec-8-10">8.10 Worked GPVW example — <code>G(p -&gt; F q)</code> → <code>Ngba</code></h3>
+<p>Formula in NNF: <code>G(!p ∨ F q)</code>. Subformula closure <code>closure(φ)</code> (positive parts driving obligations): <code>{ G(!p∨Fq), !p∨Fq, !p, F q, q }</code>. A GPVW node = an <em>obligation set</em> = subformulas required to hold now, split into a <strong>now</strong>-part (atomic/boolean ⇒ the edge <code>Guard</code>) and a <strong>next</strong>-part (carried to the successor). Eventualities (<code>F</code>/<code>U</code> right side) tracked by one generalized accept set each.</p>
+<p>Obligation expansion: <code>G ψ</code> ⇒ require <code>ψ</code> now AND <code>G ψ</code> next. <code>F q</code> ⇒ either <code>q</code> now, OR <code>F q</code> next (deferred — must eventually discharge ⇒ accept-set membership). Resulting 2 reachable nodes:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Node</th>
+<th>Obligation (now / next)</th>
+<th>Edge guard</th>
+<th>Successor</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>n₀</code> (q pending free)</td>
+<td>now: <code>!p∨Fq</code>, G-recur; eventuality <code>Fq</code> not yet due</td>
+<td><code>true</code> (when <code>p</code> false: <code>!p</code> satisfies; when <code>p</code> true: need <code>Fq</code>)</td>
+<td>self-loop variants → <code>n₀</code>, <code>n₁</code></td>
+</tr>
+<tr>
+<td><code>n₁</code> (owes q)</td>
+<td>committed <code>Fq</code> deferred: must reach <code>q</code></td>
+<td><code>true</code></td>
+<td><code>n₁</code> (while <code>!q</code>) / <code>n₀</code> (when <code>q</code> seen)</td>
+</tr>
+</tbody></table></div>
+<pre class="diagram"><code>            !p | q                  p &amp; !q
+   ┌────────────────────┐      ┌──────────────┐
+   │                    v      │              v
+ ( n0 )  ───────────────────►  ( n1 )  ◄───────┘   self-loop while !q
+   ▲   p &amp; !q (owe q)            │
+   └──────── q ──────────────────┘   (q seen: eventuality discharged)
+ Ngba accept sets: F1 = { n0 }     (states NOT owing an unfulfilled Fq)
+   accepting run must hit F1 infinitely often  ⇒  q recurs whenever p holds</code></pre>
+<ul>
+<li>One accept set <code>F₁ = {n₀}</code> (one <code>F</code>-eventuality). An infinite run is accepting iff it leaves <code>n₁</code> (discharges <code>q</code>) infinitely often ⇒ exactly <code>G(p→Fq)</code> semantics: every <code>p</code> is eventually followed by <code>q</code>.</li>
+<li>Built <strong>on-the-fly</strong>: nodes generated lazily as obligation sets are explored; only reachable nodes materialized (Phase 6 + Phase 12 lazy product).</li>
+</ul>
+<p><strong>Degeneralize <code>Ngba</code> → <code>Nba</code></strong> (<a class="cite" href="/system-design-blueprints/systems/temporal-logic-evaluator/architecture/#sec-8-11">§8.11</a>, Phase 7): <code>k=1</code> accept set ⇒ degeneralization is trivial — the counter has range <code>0..1</code>, <code>Nba.accept = F₁ = {n₀}</code>, structure unchanged. (For <code>k&gt;1</code>: states become <code>(q, c)</code>, <code>c∈0..k</code>, <code>c</code> advances when current accept set <code>F_c</code> is visited; single Nba accept set = <code>{(q,0) : q∈F_k}</code>.)</p>
+<p><strong>Accepting lasso readoff</strong>: word <code>({p,q})^ω</code> — at each step <code>p</code> holds and <code>q</code> holds, run <code>n₀ →(p&amp;q? handled as q seen) n₀ …</code> stays in/returns to <code>n₀</code> ⇒ visits <code>F₁</code> infinitely ⇒ accepted. Word <code>({p})^ω</code> (p forever, q never): run forced into <code>n₁</code> and stuck (<code>!q</code> self-loop), never revisits <code>F₁</code> ⇒ rejected ⇒ correct (<code>p</code> never followed by <code>q</code>). Lasso for the rejected case in a model check = counterexample <code>stem=[], cycle=[{p}]</code>.</p>
+<h3 id="sec-8-11">8.11 Degeneralization correctness (counter construction)</h3>
+<p><code>degeneralize(g: &amp;Ngba) -&gt; Nba</code>: states <code>= {0..g.nstates} × {0..k}</code> where <code>k = g.accept.len()</code>; init <code>= {(q,0) : q∈g.init}</code>; from <code>(q,c)</code> on edge <code>(guard,q&#39;)</code>: go to <code>(q&#39;, c&#39;)</code> where <code>c&#39; = (c+1) mod k</code> if <code>q ∈ accept[c]</code> else <code>c</code>; single accept set <code>F = {(q, 0) : q ∈ accept[k-1]}</code> (chosen convention: accept when the counter wraps past the last set). State blowup ≤ <code>× k</code>. Invariant: an Nba run hits <code>F</code> infinitely often ⇔ the projected Ngba run hits every <code>accept[i]</code> infinitely often. <code>k=0</code> (no accept sets, e.g. a safety formula) ⇒ all states accepting (every infinite run accepted).</p>
+<h3 id="sec-8-12">8.12 Worked CTL labeling example — <code>EF q</code> and <code>AG p</code> over a Kripke structure</h3>
+<p><code>CtlChecker::sat(f) -&gt; Vec&lt;bool&gt;</code> returns per-state truth (index = state id). <code>holds</code> ⇔ all <code>init</code> states labeled true. Example <code>K</code>: 4 states.</p>
+<pre class="diagram"><code>   states: s0{p}   s1{p,q}   s2{p}   s3{}
+   init = { s0 }
+   edges:  s0 -&gt; s1, s2 ;  s1 -&gt; s1 ;  s2 -&gt; s3 ;  s3 -&gt; s3
+   L(s0)={p}  L(s1)={p,q}  L(s2)={p}  L(s3)={}</code></pre>
+<p><code>sat(EF q) = E[true U q]</code> — least fixpoint, seed = states with <code>q</code>, then add predecessors:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Iter</th>
+<th>Rule</th>
+<th>Set (state ids true)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td><code>sat(q)</code> (seed)</td>
+<td><code>{s1}</code></td>
+</tr>
+<tr>
+<td>1</td>
+<td>add <code>s : ∃ s→s&#39; ∈ set</code></td>
+<td><code>{s1, s0}</code> (s0→s1)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>fixpoint (no new preds of s1 besides s0)</td>
+<td><code>{s1, s0}</code> — stable</td>
+</tr>
+</tbody></table></div>
+<p><code>sat(EF q) = [s0:T, s1:T, s2:F, s3:F]</code>. <code>holds(EF q)</code>: init <code>{s0}</code> true ⇒ <strong>holds</strong> (some path from s0 reaches q via s0→s1).</p>
+<p><code>sat(AG p) = !EF !p</code>: first <code>sat(!p) = {s3}</code> (only s3 lacks p). <code>sat(EF !p)</code> lfp: seed <code>{s3}</code>; preds: <code>s2→s3</code> ⇒ add s2; preds of s2: <code>s0→s2</code> ⇒ add s0; preds of s3: s3(self) already in; preds of s0: none ⇒ <code>{s3,s2,s0}</code>. <code>sat(AG p) = ¬{s3,s2,s0} = {s1}</code> ⇒ <code>[s0:F,s1:T,s2:F,s3:F]</code>. <code>holds(AG p)</code>: init s0 false ⇒ <strong>fails</strong> (path s0→s2→s3 reaches <code>s3</code> where <code>!p</code>). Counterexample path: <code>s0 s2 s3</code>.</p>
+<p><code>sat(EG p)</code> (gfp via SCCs): restrict to <code>p</code>-states <code>{s0,s1,s2}</code>; an <code>EG p</code> state lies on an infinite <code>p</code>-path = a state that can reach a nontrivial SCC (or self-loop) within the <code>p</code>-subgraph. <code>s1</code> self-loops (in <code>p</code>-subgraph) ⇒ <code>s1∈sat(EG p)</code>; <code>s0→s1</code> reaches it ⇒ <code>s0</code>; <code>s2→s3</code> exits <code>p</code> ⇒ <code>s2∉</code>. <code>sat(EG p)=[s0:T,s1:T,s2:F,s3:F]</code>.</p>
+<p>Labeling complexity: <code>O(|f| · (|S| + |→|))</code> (each subformula one fixpoint/SCC pass over the graph) — Clarke-Emerson-Sistla.</p>
+<h3 id="sec-8-13">8.13 Worked runtime-monitoring example — <code>Monitor::step</code> over a stream for <code>G(req -&gt; F ack)</code></h3>
+<p>NNF <code>G(!req ∨ F ack)</code>. <code>Monitor::step(s)</code> folds <code>progress</code> then maps the residual to <code>RvVerdict</code> (<code>LTL3</code>/<code>RV-LTL</code>). Stream <code>s₀={req}, s₁={}, s₂={ack}, …</code>:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Event</th>
+<th><code>progress</code> residual (simplified)</th>
+<th>LTL3 verdict</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>s₀={req}</code></td>
+<td><code>F ack ∧ G(!req∨F ack)</code> (req fires ⇒ owes ack)</td>
+<td><code>Unknown</code></td>
+<td>both an extension satisfying and one violating exist</td>
+</tr>
+<tr>
+<td><code>s₁={}</code> (no ack)</td>
+<td><code>F ack ∧ G(…)</code> (still owes ack)</td>
+<td><code>Unknown</code></td>
+<td>ack could still come</td>
+</tr>
+<tr>
+<td><code>s₂={ack}</code></td>
+<td><code>G(!req∨F ack)</code> (ack discharged; back to base obligation)</td>
+<td><code>Unknown</code></td>
+<td>safety part can still be violated forever-after</td>
+</tr>
+<tr>
+<td>(hypothetical) <code>req</code> then <code>ack</code> never, run ends-ish</td>
+<td>residual keeps <code>F ack</code> undischarged on every extension that drops ack</td>
+<td>tends <code>False</code> only if a <strong>bad prefix</strong> is reached</td>
+<td><code>G(req→F ack)</code> is non-monitorable for <code>True</code> (no good prefix)</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li><strong>LTL3</strong> maps residual: residual <code>≡ true</code> ⇒ <code>True</code>; residual <code>≡ false</code> ⇒ <code>False</code>; else <code>Unknown</code>. <code>True</code>/<code>False</code> are <em>definitive</em> (every / no infinite extension satisfies φ — good/bad prefix).</li>
+<li><strong>RV-LTL</strong> (4-valued via <code>RvVerdict</code>): when LTL3 says <code>Unknown</code>, refine using the finite (LTLf) semantics of the residual to <code>PresumablyTrue</code>/<code>PresumablyFalse</code>; reserves <code>True</code>/<code>False</code> for definitive. <code>Verdict</code> (2-valued) used only where a definitive answer is guaranteed.</li>
+<li><strong>Monitorability</strong>: φ is monitorable from prefix <code>u</code> iff some extension of <code>u</code> reaches a definitive verdict. <code>G(req→F ack)</code> has <em>no</em> good prefix (cannot ever conclude <code>True</code>) but <em>has</em> bad prefixes only in the LTLf reading ⇒ classified by <code>tl-monitor</code> monitorability check.</li>
+</ul>
+<h3 id="sec-8-14">8.14 Malformed inputs and their errors</h3>
+<p><code>Lexer</code>/<code>Parser</code> (<code>ParseError{kind: ParseErrorKind, span}</code>) and <code>tl-formula</code> well-formedness reject these; each is a conformance fixture (Phase 13):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Malformed input</th>
+<th>Error</th>
+<th>Cause</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>G (p -&gt;</code></td>
+<td><code>ParseErrorKind::UnexpectedEof</code></td>
+<td>unbalanced <code>(</code> / missing operand</td>
+</tr>
+<tr>
+<td><code>p &amp; &amp; q</code></td>
+<td><code>ParseErrorKind::UnexpectedToken</code></td>
+<td>binary <code>&amp;</code> with no left/right operand</td>
+</tr>
+<tr>
+<td><code>EX(p U q)</code> <em>(as CTL)</em></td>
+<td>well-formedness <code>PathFormulaWhereStateRequired</code></td>
+<td><code>p U q</code> is a path formula under quantifier scope; CTL needs <code>E[p U q]</code></td>
+</tr>
+<tr>
+<td><code>A p U q</code></td>
+<td><code>ParseErrorKind::ExpectedBracket</code></td>
+<td>fused CTL until must be <code>A[p U q]</code></td>
+</tr>
+<tr>
+<td><code>G EX p</code> <em>(mixing)</em></td>
+<td><code>MixedFragment</code></td>
+<td>LTL <code>G</code> over CTL <code>EX</code> — not CTL* (NON-GOAL)</td>
+</tr>
+<tr>
+<td><code>U p q</code></td>
+<td><code>ParseErrorKind::UnexpectedToken</code></td>
+<td><code>U</code> is infix, not prefix</td>
+</tr>
+<tr>
+<td><code>0bad</code> / <code>Req</code></td>
+<td><code>ParseErrorKind::BadAtom</code></td>
+<td>AP must match <code>[a-z][A-Za-z0-9_]*</code> (lowercase-initial)</td>
+</tr>
+<tr>
+<td>empty <code>Trace</code> (<code>prefix=[]</code>) for <code>eval_ltlf</code></td>
+<td><code>EvalError::EmptyTrace</code></td>
+<td>LTLf requires <code>m ≥ 1</code> (semantics undefined at <code>m=0</code>)</td>
+</tr>
+<tr>
+<td><code>Trace{loop_start:Some(3), prefix.len()=2}</code></td>
+<td><code>TraceError::BadLoopStart</code></td>
+<td>lasso <code>loop_start</code> must index into <code>prefix</code></td>
+</tr>
+<tr>
+<td>Kripke with <code>s</code> having no successor</td>
+<td><code>KripkeError::NotTotal</code></td>
+<td>transition relation must be total (every state has ≥1 successor) for CTL/Buchi semantics</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-15">8.15 Domain invariants (carried into every phase)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Invariant</th>
+<th>Enforced where</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>D1</td>
+<td>post-<code>nnf</code>, <code>Not</code> wraps only <code>Atom</code></td>
+<td>debug assert before GPVW/labeling</td>
+</tr>
+<tr>
+<td>D2</td>
+<td><code>Guard</code> width = AP-universe size <code>n</code>; <code>Σ</code> never enumerated</td>
+<td><code>tl-automata</code></td>
+</tr>
+<tr>
+<td>D3</td>
+<td>Kripke transition relation total</td>
+<td><code>KripkeStructure</code> validation</td>
+</tr>
+<tr>
+<td>D4</td>
+<td><code>Trace</code> lasso well-formed: <code>loop_start &lt; prefix.len()</code> if <code>Some</code>; <code>prefix</code> non-empty</td>
+<td><code>tl-trace</code> validation</td>
+</tr>
+<tr>
+<td>D5</td>
+<td><code>Ngba</code> ⇒ <code>Nba</code> degeneralization preserves language (each accept set hit i.o. ⇔ single set i.o.)</td>
+<td>Phase 7 + differential test vs Spot</td>
+</tr>
+<tr>
+<td>D6</td>
+<td><code>K ⊨ Aφ ⇔ L(product(Nba(!φ), K)) = ∅</code>; counterexample = accepting lasso</td>
+<td>Phase 8</td>
+</tr>
+<tr>
+<td>D7</td>
+<td>LTL3 <code>True</code>/<code>False</code> are definitive (good/bad prefix); <code>Unknown</code> never downgrades a definitive verdict</td>
+<td>Phase 9</td>
+</tr>
+<tr>
+<td>D8</td>
+<td><code>Kind</code> correctly routes formula to its evaluator; cross-fragment formula rejected pre-eval</td>
+<td>Phase 2 + 5/8</td>
+</tr>
+<tr>
+<td>D9</td>
+<td>progression residual <code>≡ true</code>/<code>false</code> ⇔ definitive monitor verdict; LTLf end-of-trace uses strong-<code>X</code>⇒<code>false</code></td>
+<td>Phase 4 + 9</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

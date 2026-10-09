@@ -1,0 +1,398 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Incremental Computation Engine — Architecture · Engineering Blueprints</title><meta name="description" content="Incremental Computation Engine, hld: §3 overview + §8 domain model. Build an embeddable, deterministic incremental computation engine — a library that memoizes derived computations and recomputes, on demand, only the work transitively affected by a changed input. The…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/incremental-computation-engine/">Incremental Computation Engine</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Incremental Computation Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~37 weeks</li> <li>2,390 lines</li> <li>blueprint #298</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/incremental-computation-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/incremental-computation-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/incremental-computation-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/incremental-computation-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/incremental-computation-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/incremental-computation-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/incremental-computation-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/incremental-computation-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/incremental-computation-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/incremental-computation-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Incremental Computation Engine — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<p>Canonical architecture diagram. All later sections reference these box names.</p>
+<pre class="diagram"><code>                                  Host application (compiler / IDE / build tool / UI runtime)
+                                                       |
+                                          set_input(k,v)|   demand: db.query::&lt;Q&gt;(k)
+                                                       v
+   +------------------------------------------------------------------------------------------+
+   |                                  ice-runtime :: Database handle                          |
+   |                                                                                          |
+   |   +------------------+      +-----------------------+      +--------------------------+   |
+   |   |  Revision Clock   |&lt;---&gt;|   Input Cell Store     |      |   DependencyStack (TLS)  |   |
+   |   |  (R: AtomicU64,   |     |  Key-&gt;(value, changed_ |      |  per-thread Vec&lt;Frame&gt;;  |   |
+   |   |   durability map) |     |  at, durability)       |      |  active-query recorder   |   |
+   |   +--------+----------+     +-----------+-----------+      +-------------+------------+   |
+   |            |                            |                                | push edges      |
+   |            | current_rev                | read -&gt; record edge            v                 |
+   |            v                            v                    +--------------------------+   |
+   |   +-----------------------------------------------+          |   Query Evaluator         |   |
+   |   |            Memo Cache (sharded)               |&lt;--------&gt;|  validate-or-recompute    |   |
+   |   |  QueryKey(interned) -&gt; Memo{ value, verified_,|  lookup  |  (red-green state machine)|   |
+   |   |   changed_at, durability, deps:[Dependency] } |  insert  |  recursion via demand     |   |
+   |   +-----------------------+-----------------------+          +------------+--------------+   |
+   |                           |                                               | calls QueryFn    |
+   |           +---------------+------------+                                  v                  |
+   |           v                            v                       +--------------------------+  |
+   |   +-----------------+        +--------------------+             |   #[query] user function  |  |
+   |   |  Key Interner    |        |   DDG (forward +   |             |  (pure; reads via Db)     |  |
+   |   |  Key-&gt;NodeId u32 |        |   reverse edges)   |             +--------------------------+  |
+   |   +-----------------+        +---------+----------+                                            |
+   |                                        | reachability                                          |
+   |   +-----------------------------+      v                +-----------------------------------+  |
+   |   |  Cycle Detector (on-stack    |   +-------------+     |  Garbage Collector                |  |
+   |   |  set + recovery)             |   | Maybe-dirty |     | LRU eviction + reachability sweep |  |
+   |   +-----------------------------+    | frontier    |     | honoring memory ceiling           |  |
+   |                                       +-------------+     +-----------------------------------+  |
+   |                                                                                                 |
+   |   +-------------------------------------------------------------------------------------------+ |
+   |   |  Parallel Executor (Phase 9): thread pool, per-key compute lock, CancellationToken        | |
+   |   +-------------------------------------------------------------------------------------------+ |
+   +----------------------------------------------+--------------------------------------------------+
+                                                  | events
+                                                  v
+                              +--------------------------------------------+
+                              |  ice-trace : recompute log, reuse counters,|
+                              |  DDG dumps (DOT/JSON), tracing spans       |
+                              +--------------------------------------------+</code></pre>
+<p>Trust boundary: the only untrusted code is the host-supplied <strong>QueryFn</strong> body (assumed pure but not provably so). Concurrency boundary: the Memo Cache, Input Cell Store, and Revision Clock are shared across threads (Phase 9); the DependencyStack is thread-local. Persistence boundary: none in core — the entire state is in-process and volatile (on-disk memos deferred, <a class="cite" href="/system-design-blueprints/systems/incremental-computation-engine/design/#sec-11">§11</a>).</p>
+<h3 id="sec-3-per-box-detail">Per-box detail</h3>
+<p><strong>Host application.</strong> Owns the event loop, threads, and lifetime. Drives the engine by two operations only: <code>set_input(key, value)</code> (mutation) and <code>db.query::&lt;Q&gt;(key)</code> (demand). It must treat returned values as snapshots valid only until the next mutation it issues; it must never call <code>set_input</code> from inside a query body (that would violate purity). The host decides <em>when</em> to demand — the engine never computes speculatively in Phase 0.</p>
+<p><strong>Database handle (<code>ice-runtime</code>).</strong> The single owning object. Holds the Revision Clock, Input Cell Store, Memo Cache, Key Interner, DDG, and (Phase 9) the executor. <code>&amp;Database</code> is the capability passed to every query. It is <code>Sync</code>; mutation methods take <code>&amp;mut self</code> or use interior synchronization (durability-tagged). It mediates every read so dependencies can be captured. Cloning a handle shares the same underlying state (<code>Arc</code>-backed storage).</p>
+<p><strong>Revision Clock.</strong> A monotonic <code>Revision(u64)</code> — the global logical clock. Every <code>set_input</code> that actually changes a value increments it. The clock also stores, per durability class, the last revision at which an input <em>of that durability</em> changed (the durability map), enabling the &quot;if nothing of durability &gt;= D changed since <code>verified_at</code>, skip re-validation&quot; shortcut (<a class="cite" href="/system-design-blueprints/systems/incremental-computation-engine/reliability/#sec-7">§7</a>). Never decreases; wraps are unreachable in practice (u64) but treated as a fatal invariant breach.</p>
+<p><strong>Input Cell Store.</strong> Maps each input key to <code>(value, changed_at: Revision, durability: Durability)</code>. The leaves of the DDG. <code>set_input</code> compares new vs old by <code>Eq</code>; if equal, it is a no-op (no clock bump) — input-level early cutoff. If different, it writes the value, sets <code>changed_at = new current revision</code>, and updates the durability map. Reads of input cells from inside a query are intercepted to record a dependency edge on the DependencyStack.</p>
+<p><strong>DependencyStack (thread-local).</strong> A per-thread stack of <em>frames</em>, one per query currently executing on that thread. The top frame accumulates the set of <code>(NodeId, verified-at-read-time)</code> edges as the running query reads inputs and sub-queries. On query completion the frame&#39;s edge set becomes the memo&#39;s <code>deps</code>. This is <strong>dependency capture by execution tracing</strong> — the engine learns the dependency set by <em>running</em> the query, not by static analysis. Thread-local so parallel queries do not cross-contaminate edge recording.</p>
+<p><strong>Memo Cache (sharded).</strong> <code>QueryKey -&gt; Memo</code>. The heart. <code>Memo</code> carries the cached <code>value</code>, <code>verified_at</code> (last revision we confirmed it current), <code>changed_at</code> (last revision its value actually changed — drives downstream cutoff), <code>durability</code> (min over its inputs&#39; durabilities), and <code>deps</code> (the captured edge list). Sharded by key hash into N independent lock domains (<code>DashMap</code>-style) so parallel queries on different keys do not contend. Lookups return either a usable memo (fast path) or trigger validate-or-recompute.</p>
+<p><strong>Query Evaluator.</strong> Implements the red-green state machine. On demand for key <code>k</code>: if a memo exists and <code>verified_at == current_rev</code> -&gt; reuse (green). Else run <strong>maybe-dirty validation</strong>: for each dependency, recursively demand it; if every dep&#39;s <code>changed_at &lt;= memo.verified_at</code> (none changed since we last verified) -&gt; backdate (<code>verified_at = current_rev</code>, value reused) — <em>deep</em> early cutoff. Otherwise recompute: push a DependencyStack frame, call the QueryFn, capture deps, compare new value to old by <code>Eq</code>; if equal, keep <code>changed_at</code> (cutoff), else <code>changed_at = current_rev</code>; set <code>verified_at = current_rev</code>.</p>
+<p><strong>#[query] user function (QueryFn).</strong> The host-supplied pure function. Receives <code>&amp;Database</code> and the key; returns the value. All its reads of inputs/queries route through the Database so they are captured. It must be deterministic and side-effect-free (<a class="cite" href="/system-design-blueprints/systems/incremental-computation-engine/architecture/#sec-6">§6</a>, <a class="cite" href="/system-design-blueprints/systems/incremental-computation-engine/reliability/#sec-7">§7</a>). The engine cannot prove this; it provides best-effort detection (a debug-mode read-set replay check) and documents the contract loudly.</p>
+<p><strong>Key Interner.</strong> Maps each <code>QueryKey</code> to a compact <code>NodeId(u32)</code> so the DDG, reverse-edge index, and GC structures can use dense integer arrays instead of hashing full keys repeatedly. Interning is append-only within a process (keys are never un-interned while reachable); GC may recycle <code>NodeId</code>s only after a key&#39;s memo is evicted and all reverse edges are gone.</p>
+<p><strong>DDG (forward + reverse edges).</strong> The dynamic dependency graph. Forward edges: query -&gt; things it read. Reverse edges: input/query -&gt; queries that read it (the dependents index, needed to mark maybe-dirty on a change and to compute reachability for GC). Edges are versioned (each edge remembers the <code>verified_at</code> of the dependency when it was read) so validation can detect staleness precisely.</p>
+<p><strong>Maybe-dirty frontier.</strong> The set of nodes transitively reachable (via reverse edges) from a just-changed input, marked <em>maybe-dirty</em> (not <em>dirty</em>). &quot;Maybe&quot; because early cutoff might prove a node&#39;s value is unchanged despite an upstream change — so we cannot eagerly mark <em>dirty</em>. The frontier is what the validate pass walks lazily on demand.</p>
+<p><strong>Cycle Detector.</strong> A per-evaluation on-stack set of <code>NodeId</code>s currently being computed. If a demand re-enters a key already on the stack, that is a cycle -&gt; return a typed <code>CycleError</code> carrying the participating keys, unwind cleanly, and never cache a partial result. Query graphs must be acyclic at runtime (<a class="cite" href="/system-design-blueprints/systems/incremental-computation-engine/architecture/#sec-6">§6</a>, <a class="cite" href="/system-design-blueprints/systems/incremental-computation-engine/reliability/#sec-7">§7</a>).</p>
+<p><strong>Garbage Collector.</strong> Bounds memo memory. Combines <strong>LRU</strong> (evict least-recently-demanded memos first) with a <strong>reachability sweep</strong> (a memo reachable only from already-evicted memos and not currently demanded is collectible). Honors a configured memory ceiling (<a class="cite" href="/system-design-blueprints/systems/incremental-computation-engine/numbers/#sec-4">§4</a>). Eviction is always safe: a missing memo is simply recomputed on next demand (the oracle property — the engine is a <em>cache</em>, never the source of truth for derived values).</p>
+<p><strong>Parallel Executor (Phase 9).</strong> A thread pool that evaluates independent demanded queries concurrently. A per-key <strong>compute lock</strong> ensures two threads never recompute the same key simultaneously (the second waits on the first). A <strong>CancellationToken</strong> lets the host abandon an in-flight demand (e.g. a superseded IDE request); cancellation is cooperative — checked at demand boundaries. Cross-thread sharing of the Memo Cache and Input Cell Store is the central concurrency hazard the design controls.</p>
+<p><strong>ice-trace.</strong> The observability sink. Receives structured events (reuse, recompute, backdate, cutoff-fired, cycle, eviction, revision-bump), maintains counters (reuse ratio, recomputes per revision, memo count, bytes), and can dump the DDG as DOT/JSON for offline inspection. Emits <code>tracing</code> spans so a host can correlate engine work with its own.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<p>The domain is a <strong>dynamic dependency graph (DDG)</strong> of two node kinds (inputs, derived queries) connected by versioned dependency edges, evaluated against a monotonic revision clock.</p>
+<h3 id="sec-8-node-and-edge-schema">Node and edge schema</h3>
+<pre class="diagram"><code>Node        := Input | Derived
+Input       := { key: QueryKey, value: V, changed_at: Revision, durability: Durability }
+Derived     := { key: QueryKey, memo: Option&lt;Memo&gt; }          // None =&gt; never computed / evicted
+Memo        := { value: V, verified_at: Revision, changed_at: Revision,
+                 durability: Durability, deps: Vec&lt;Dependency&gt;, state: NodeState }
+Dependency  := { node: NodeId, changed_at_when_read: Revision } // versioned reverse-checkable edge
+NodeId      := u32                                              // interned, dense
+QueryKey    := (QueryTypeId, KeyBytes)                          // identifies one node
+Durability  := Low | Medium | High                             // High = changes rarely
+NodeState   := Unverified | Verifying | Verified(Revision) | MaybeDirty | Computing
+Revision    := u64                                             // monotonic, global</code></pre>
+<p>Forward edges live in each memo&#39;s <code>deps</code>; reverse edges live in a separate <code>dependents: NodeId -&gt; SmallVec&lt;NodeId&gt;</code> index maintained alongside.</p>
+<h3 id="sec-8-node-state-transition-table">Node state transition table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Side effects</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>(absent)</td>
+<td>first demand</td>
+<td>Computing</td>
+<td>push DependencyStack frame</td>
+</tr>
+<tr>
+<td>Computing</td>
+<td>QueryFn returns, value <code>Eq</code> old (or first run)</td>
+<td>Verified(R)</td>
+<td><code>verified_at=R</code>; <code>changed_at</code> set (R if first run, else kept)</td>
+</tr>
+<tr>
+<td>Computing</td>
+<td>QueryFn returns, value <code>!Eq</code> old</td>
+<td>Verified(R)</td>
+<td><code>verified_at=R</code>; <code>changed_at=R</code></td>
+</tr>
+<tr>
+<td>Computing</td>
+<td>re-entrant demand of self</td>
+<td>(error)</td>
+<td>emit <code>CycleError</code>; do not cache</td>
+</tr>
+<tr>
+<td>Verified(R)</td>
+<td><code>current_rev</code> advances, this node a maybe-dirty dependent</td>
+<td>MaybeDirty</td>
+<td>clear fast-path eligibility</td>
+</tr>
+<tr>
+<td>Verified(R)</td>
+<td>demand, <code>R == current_rev</code></td>
+<td>Verified(R)</td>
+<td>green hit; return memo value</td>
+</tr>
+<tr>
+<td>MaybeDirty</td>
+<td>demand; all deps&#39; <code>changed_at &lt;= verified_at</code></td>
+<td>Verified(cur)</td>
+<td>backdate: <code>verified_at=cur</code>, value reused (deep cutoff)</td>
+</tr>
+<tr>
+<td>MaybeDirty</td>
+<td>demand; some dep changed</td>
+<td>Computing</td>
+<td>recompute path</td>
+</tr>
+<tr>
+<td>MaybeDirty</td>
+<td>demand; a dep is itself MaybeDirty</td>
+<td>Verifying</td>
+<td>recurse: validate dep first, then re-decide</td>
+</tr>
+<tr>
+<td>any</td>
+<td>GC eviction (not on stack)</td>
+<td>(absent)</td>
+<td>drop memo; reverse edges removed</td>
+</tr>
+<tr>
+<td>Verifying</td>
+<td>dep validation completes</td>
+<td>MaybeDirty/Computing</td>
+<td>resume the decision with fresh dep timestamps</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-worked-example-a-1-b-a-1-c-b2">Worked example — A=1, B=A+1, C=B*2</h3>
+<p>Inputs/queries: input <code>A</code>; derived <code>B = A + 1</code>; derived <code>C = B * 2</code>. Reverse edges: <code>A -&gt; {B}</code>, <code>B -&gt; {C}</code>.</p>
+<p><strong>Cold build at R0</strong> (<code>set_input(A, 1)</code> made R1; demand C):</p>
+<pre class="diagram"><code>demand C@R1 -&gt; no memo -&gt; Computing
+  demand B@R1 -&gt; no memo -&gt; Computing
+    read A -&gt; value 1, A.changed_at=R1; record edge C? no: edge on B&#39;s frame: (A, changed_at=R1)
+  B computes 2; verified_at=R1, changed_at=R1, deps=[A@R1]
+  read B (edge on C&#39;s frame): (B, changed_at=R1)
+C computes 4; verified_at=R1, changed_at=R1, deps=[B@R1]
+Result: C=4. Recomputes: B,C (2). Reuses: 0.</code></pre>
+<p><strong>Real edit — <code>set_input(A, 5)</code> (-&gt; R2), demand C:</strong></p>
+<pre class="diagram"><code>set_input(A,5): 5 != 1 -&gt; bump to R2; A.value=5, A.changed_at=R2
+  dirtying: reverse-closure(A) = {B, C} marked MaybeDirty
+demand C@R2 -&gt; MaybeDirty -&gt; validate deps:
+  dep B (changed_at_when_read=R1): demand B@R2 -&gt; MaybeDirty -&gt; validate deps:
+    dep A: A.changed_at=R2 &gt; B.verified_at(R1) -&gt; A changed -&gt; recompute B
+    B recompute: reads A=5 -&gt; 6; 6 != 2 -&gt; changed_at=R2, verified_at=R2, deps=[A@R2]
+  back in C: B.changed_at=R2 &gt; C.verified_at(R1) -&gt; recompute C
+  C recompute: reads B=6 -&gt; 12; verified_at=R2, changed_at=R2
+Result: C=12. Recomputes: B,C (2 — all affected). Reuses: 0. Correct = from-scratch.</code></pre>
+<p><strong>Early cutoff — <code>set_input(A, 5)</code> again (already 5):</strong></p>
+<pre class="diagram"><code>set_input(A,5): 5 == 5 (Eq) -&gt; NO-OP; clock stays R2. Input-level cutoff.
+demand C@R2 -&gt; Verified(R2) == current -&gt; green hit. Recomputes: 0.</code></pre>
+<p><strong>Deep cutoff example — make B output insensitive.</strong> Redefine <code>B = min(A, 10)</code>. At R2, A goes 5 -&gt; 8 (R3):</p>
+<pre class="diagram"><code>set_input(A,8) -&gt; R3; dirty {B,C}
+demand C@R3 -&gt; MaybeDirty -&gt; validate B:
+  B MaybeDirty -&gt; A.changed_at=R3 &gt; B.verified_at(R2) -&gt; recompute B
+  B recompute: min(8,10)=8 ... wait prior B was min(5,10)=5; 8 != 5 -&gt; changed_at=R3
+  (cutoff would fire only if new B Eq old B)</code></pre>
+<p>Now A goes 8 -&gt; 12 (R4) with <code>B = min(A, 10)</code>:</p>
+<pre class="diagram"><code>set_input(A,12) -&gt; R4; dirty {B,C}
+demand C@R4 -&gt; validate B:
+  recompute B: min(12,10)=10; prior B (at R3) = 8; 10 != 8 -&gt; changed (no cutoff here)</code></pre>
+<p>And A goes 12 -&gt; 20 (R5):</p>
+<pre class="diagram"><code>recompute B: min(20,10)=10; prior B = 10; 10 Eq 10 -&gt; CUTOFF: verified_at(B)=R5, changed_at(B) stays R4
+back in C: B.changed_at=R4 &lt;= C.verified_at(R4)? C last verified at R4 -&gt; R4 &lt;= R4 -&gt; B did NOT change since -&gt; backdate C: verified_at(C)=R5, no recompute.
+Result: C reused. Recomputes: B only (1). C cut off by B&#39;s firewall.</code></pre>
+<h3 id="sec-8-malformed-failure-path-examples">Malformed / failure-path examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Setup</th>
+<th>Expected behavior</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Direct cycle</td>
+<td><code>A_q = f(A_q)</code> (query reads itself)</td>
+<td><code>CycleError{cycle:[A_q]}</code> on first demand; nothing cached.</td>
+</tr>
+<tr>
+<td>Indirect cycle</td>
+<td><code>X = g(Y)</code>, <code>Y = h(X)</code></td>
+<td><code>CycleError{cycle:[X,Y]}</code>; both frames dropped; optional fixpoint recovery (<a class="cite" href="/system-design-blueprints/systems/incremental-computation-engine/build/#sec-19">§19</a>).</td>
+</tr>
+<tr>
+<td>Dangling dep after GC</td>
+<td>C&#39;s dep B evicted, then C demanded</td>
+<td>B is <code>absent</code> -&gt; recompute B on demand (INV-10); C validates against fresh B.</td>
+</tr>
+<tr>
+<td>Wall-clock read</td>
+<td><code>T = now()</code> inside a query</td>
+<td>INV-9: debug re-run diff flags it; if <code>#[query(nondeterministic)]</code>, never memoized; else contract breach.</td>
+</tr>
+<tr>
+<td>Equality lie</td>
+<td><code>V</code> whose <code>Eq</code> returns true for unequal values</td>
+<td>INV-4/INV-1 differential test diverges; shrink to the lying type.</td>
+</tr>
+<tr>
+<td>Phantom edge</td>
+<td>query records a read it never used</td>
+<td>INV-5 read-set replay mismatch (debug).</td>
+</tr>
+<tr>
+<td>Missed edge</td>
+<td>query reads input via a back-door</td>
+<td>INV-5 mismatch + eventual stale read (INV-3) when that input changes.</td>
+</tr>
+<tr>
+<td>Durability lie</td>
+<td>volatile input marked <code>High</code></td>
+<td>INV-12 force-Low differential test diverges.</td>
+</tr>
+<tr>
+<td>Revision wrap</td>
+<td><code>current_rev == u64::MAX</code></td>
+<td>INV-2: <code>panic!</code> (unreachable in practice; ~5.8e11 yr at 10^9 bumps/s).</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

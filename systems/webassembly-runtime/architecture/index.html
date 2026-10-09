@@ -1,0 +1,997 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>WebAssembly Runtime — Architecture · Engineering Blueprints</title><meta name="description" content="WebAssembly Runtime, hld: §3 overview + §8 domain model. Build a from-scratch WebAssembly 2.0 runtime in Rust: binary decode → type-validate → instantiate → interpret/JIT-execute, exposed as an embeddable library (wrt-*) and the wrtc CLI."><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/webassembly-runtime/">WebAssembly Runtime</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>WebAssembly Runtime</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~24 weeks</li> <li>4,146 lines</li> <li>blueprint #396</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/webassembly-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/webassembly-runtime/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/webassembly-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/webassembly-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/webassembly-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/webassembly-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/webassembly-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/webassembly-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/webassembly-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/webassembly-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:WebAssembly Runtime — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-canonical-pipeline-diagram">Canonical pipeline diagram</h3>
+<pre class="diagram"><code>┌─────────────────────────────────────────────────────────────────┐
+│  Embedder / host app  (wrtc CLI  OR  library user)              │
+│  defines HostFunc callbacks; calls invoke(); receives Vec&lt;Val&gt;  │
+│  or Trap; never touches raw Wasm memory directly                │
+└───────────────────────┬─────────────────────────────────────────┘
+                        │  raw .wasm bytes  (UNTRUSTED)
+           ═══════ TRUST BOUNDARY ══════════════════════════════
+                        │
+                        ▼
+┌───────────────────────────────────┐
+│  wrt-decoder                      │
+│  leb128 + section framing         │
+│  + full Instr decode              │
+│  IN:  &amp;[u8]                       │
+│  OUT: Module  (or DecodeError)    │
+└───────────────┬───────────────────┘
+                │  Module
+                ▼
+┌───────────────────────────────────┐
+│  wrt-validator                    │
+│  Context + OperandStack/CtrlStack │
+│  abstract-interpretation pass     │
+│  IN:  &amp;Module                     │
+│  OUT: ValidatedModule (newtype)   │
+│       or ValidateError            │
+└───────────────┬───────────────────┘
+                │  ValidatedModule  (only valid modules cross here)
+     ═══════ SANDBOX BOUNDARY ══════════════════════════════════
+     (guest code addresses only its own MemInst; no host pointers)
+                │
+        ┌───────┴──────────┐
+        ▼                  ▼
+┌──────────────────┐  ┌──────────────────────────────┐
+│  wrt-runtime     │  │  wrt-jit                     │
+│  Store +         │  │  Compiler (single-pass)      │
+│  instantiate()   │  │  CodeBuffer (mmap, W^X)      │
+│  MemInst(pages)  │  │  Assembler (x86-64 subset)   │
+│  TableInst       │  │  trampolines + trap stubs    │
+│  GlobalInst      │  │  IN:  &amp;ValidatedModule       │
+│  Engine interp.  │  │  OUT: CompiledFunc           │
+│  (oracle)        │  │  ══ W^X BOUNDARY ══          │
+└────────┬─────────┘  └──────────────┬───────────────┘
+         │  Trap                     │  Trap
+         └──────────┬────────────────┘
+                    │  Vec&lt;Val&gt;  or  Trap
+           ═══════ TRUST BOUNDARY ══════════════════════════════
+                    ▼
+              Embedder result</code></pre>
+<h3 id="sec-3-trust-and-sandbox-boundaries">Trust and sandbox boundaries</h3>
+<ul>
+<li><strong>Trust boundary</strong>: raw <code>.wasm</code> bytes arrive from an untrusted source; everything after <code>wrt-decoder</code>/<code>wrt-validator</code> operates on validated, typed data. Host panics due to guest input = a bug.</li>
+<li><strong>Sandbox boundary</strong>: a guest module&#39;s <code>MemInst.data</code> is its only addressable heap. No host pointers cross into the guest; bounds-checked effective-address arithmetic enforces containment. <code>MemInst</code> is a <code>Vec&lt;u8&gt;</code> entirely within the <code>Store</code>.</li>
+<li><strong>Concurrency boundary</strong>: a <code>Store</code> is single-threaded; <code>ModuleInst</code> and <code>Engine</code> are <code>!Sync</code>. Parallelism = multiple <code>Store</code>s in separate threads, no shared memory.</li>
+<li><strong>W^X boundary</strong>: inside <code>wrt-jit</code>, <code>CodeBuffer</code> pages transition <code>PROT_WRITE</code> → <code>PROT_READ|PROT_EXEC</code> before first call; never both simultaneously.</li>
+</ul>
+<h3 id="sec-3-component-descriptions">Component descriptions</h3>
+<p><strong><code>wrt-decoder</code></strong> — stateless byte-stream reader; no heap beyond the output <code>Module</code>. Processes magic (<code>\0asm</code>), version (1), then sections in order. Each section: read <code>id: u8</code>, <code>size: u32</code> ULEB, then dispatch. Type section: N <code>FuncType</code> entries (ULEB count, then param-vec + result-vec). Code section: N function bodies; each body has RLE locals <code>[(count: u32, ty: ValType)]</code> then a flat <code>Box&lt;[Instr]&gt;</code>. Memory is bounded by <code>.wasm</code> size. Key invariant: decoder never skips validation; it produces structural IR only — semantic checks belong to <code>wrt-validator</code>.</p>
+<p><strong><code>wrt-validator</code></strong> — single-pass abstract interpretation over <code>Module</code>. Builds a <code>Context</code> (type/func/table/mem/global/elem/data index spaces, <code>locals</code>, <code>labels</code>, <code>return_</code>). Per function body: iterates <code>Instr</code>, calls <code>push/pop_operand</code> and <code>push/pop_ctrl</code>. <code>OperandType::Unknown</code> handles the polymorphic stack (post-<code>unreachable</code>). <code>pop_ctrl</code> checks the operand stack height matches <code>CtrlFrame.height</code> + <code>end_types</code>. Module-level: import type matching, export resolution, start-func arity check, active-segment constant expressions. Output: <code>ValidatedModule(Module)</code> newtype — the only token that unlocks instantiation.</p>
+<p><strong><code>wrt-runtime</code> Store</strong> — the sole mutable runtime state. Holds flat <code>Vec</code> pools: <code>funcs</code>, <code>tables</code>, <code>mems</code>, <code>globals</code>, <code>elems</code>, <code>datas</code>. Addresses are typed newtypes (<code>FuncAddr</code>, <code>MemAddr</code>, …) that index their respective vec. <code>ModuleInst</code> contains address vectors mapping module-local indices to store addresses + an export map. Instantiation: allocate entries in order (funcs, tables, mems, globals), evaluate constant init-exprs, populate active element/data segments, call start function.</p>
+<p><strong><code>MemInst</code></strong> — <code>data: Vec&lt;u8&gt;</code> whose length is always a multiple of <code>PAGE = 65536</code>. Effective address = <code>base_i as u64 + memarg.offset</code>; trap <code>OutOfBoundsMemory</code> if <code>effective_addr + N &gt; data.len() as u64</code>. <code>memory.grow(n)</code>: extend by <code>n * PAGE</code> bytes if <code>&lt;= max</code>; return old size in pages or -1. Little-endian load/store; alignment is a hint (never traps). <code>memory.fill/copy/init</code> use <code>ptr::copy</code>/<code>copy_nonoverlapping</code> for bulk ops. <code>data.drop</code> clears the <code>DataInst</code> vec.</p>
+<p><strong><code>Engine</code> interpreter</strong> — the correctness oracle. Three stacks: value stack <code>Vec&lt;Val&gt;</code>, frame stack <code>Vec&lt;Frame&gt;</code>, label stack <code>Vec&lt;Label&gt;</code>. <code>Frame.locals</code> holds arguments + declared locals (initialized to zero-for-type). Dispatch: <code>match instr { ... }</code> over <code>Instr</code> variants; validates nothing (validation already done). <code>block</code>/<code>loop</code>/<code>if</code> push a <code>Label { arity, cont }</code>; <code>end</code> pops and checks label arity; <code>br(depth)</code> unwinds to the depth-th label. Fuel: decrement per instruction; <code>Trap::CallStackExhausted</code> if <code>frame_stack.len() &gt; 1024</code>. Host functions call out via <code>FuncInst::Host { host }</code>.</p>
+<p><strong><code>wrt-jit</code> Compiler + CodeBuffer</strong> — <code>Compiler&lt;&#39;a&gt;</code> walks <code>ValidatedModule</code>&#39;s <code>Instr</code> list once. Maintains a compile-time value-stack-state tracker (types + location: register or stack slot). <code>Assembler</code> encodes x86-64: REX + opcode + ModRM for common ops; <code>push</code>/<code>pop</code>/<code>mov</code>/<code>add</code>/<code>sub</code>/<code>imul</code>/<code>cmp</code>/<code>jcc</code>/<code>call</code>/<code>ret</code>; memory-access with 32-bit displacement. <code>CodeBuffer</code>: <code>mmap(MAP_ANON|MAP_PRIVATE, PROT_READ|PROT_WRITE)</code>, fill, then <code>mprotect(PROT_READ|PROT_EXEC)</code>. Unknown opcodes (SIMD, some bulk ops) → emit a call to deopt stub which re-enters the interpreter.</p>
+<p><strong>Trampolines</strong> — <code>call</code> emits a direct call to <code>CompiledFunc.entry</code>; <code>call_indirect</code> emits: load <code>table[i]</code> (bounds-check → trap stub), null-check (→ <code>UninitializedElement</code> stub), type-check (→ <code>IndirectCallTypeMismatch</code> stub), then call through the funcref. Host→Wasm trampoline marshals <code>&amp;[Val]</code> through the SysV ABI; Wasm→host trampoline does the inverse. Trap stubs <code>jmp</code> to a per-Trap handler that unwinds and returns <code>Err(Trap)</code> to the host.</p>
+<p><strong><code>wrt-cli</code></strong> — thin orchestration: <code>validate</code> subcommand decodes + validates, prints section summary; <code>run</code> decodes + validates + instantiates + calls the export named <code>main</code> or <code>_start</code>; <code>dump</code> prints human-readable section listing (like <code>wasm-objdump -d</code>); <code>jit-dump</code> emits the emitted x86-64 bytes with pseudo-disassembly; <code>bench</code> runs a named export N times and reports mean/p99 latency. All subcommands share a common <code>--fuel</code> flag.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Wasm Binary Format, Type System, Execution</h2>
+<h3 id="sec-8-1">8.1 Binary Module Layout</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Offset</th>
+<th>Field</th>
+<th>Value / Encoding</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0–3</td>
+<td>Magic</td>
+<td><code>0x00 0x61 0x73 0x6D</code> (<code>\0asm</code>)</td>
+</tr>
+<tr>
+<td>4–7</td>
+<td>Version</td>
+<td><code>0x01 0x00 0x00 0x00</code> (little-endian u32 = 1)</td>
+</tr>
+<tr>
+<td>8+</td>
+<td>Sections</td>
+<td>Sequence of <code>(id: u8, size: u32 uleb, payload: [u8; size])</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Section IDs (ordered; custom=0 may appear anywhere, rest must be ascending):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Name</th>
+<th>Key Contents</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>Custom</td>
+<td><code>name</code> + arbitrary bytes; passthrough</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Type</td>
+<td><code>vec(FuncType)</code> — <code>0x60 params results</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Import</td>
+<td><code>vec(Import)</code> — <code>mod name ExternType</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Function</td>
+<td><code>vec(TypeIdx)</code> — one per internal func</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Table</td>
+<td><code>vec(TableType)</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Memory</td>
+<td><code>vec(MemType)</code> — at most 1 in MVP</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Global</td>
+<td><code>vec(GlobalType init_expr)</code></td>
+</tr>
+<tr>
+<td>7</td>
+<td>Export</td>
+<td><code>vec(Export)</code> — <code>name ExternIdx</code></td>
+</tr>
+<tr>
+<td>8</td>
+<td>Start</td>
+<td><code>FuncIdx</code> — called at instantiation</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Element</td>
+<td><code>vec(ElemSegment)</code></td>
+</tr>
+<tr>
+<td>10</td>
+<td>Code</td>
+<td><code>vec(FuncBody)</code> — locals RLE + opcodes</td>
+</tr>
+<tr>
+<td>11</td>
+<td>Data</td>
+<td><code>vec(DataSegment)</code></td>
+</tr>
+<tr>
+<td>12</td>
+<td>DataCount</td>
+<td><code>u32</code> — required if bulk-memory used</td>
+</tr>
+</tbody></table></div>
+<p><strong>LEB128 encoding:</strong></p>
+<ul>
+<li>ULEB128 <code>u32</code>/<code>u64</code>: 7-bit groups, MSB=1 means more; max 5 bytes (u32), 10 bytes (u64).</li>
+<li>SLEB128 <code>i32</code>/<code>i64</code>: same framing, sign-extended from MSB group; used for <code>i32.const</code>, <code>i64.const</code>, block typeidx.</li>
+<li><code>MemArg.align</code> is stored as log₂ power; <code>MemArg.offset</code> as u32 ULEB (memory64 extension: u64 ULEB).</li>
+</ul>
+<h3 id="sec-8-2">8.2 Type System</h3>
+<p><strong>Value and Reference Types:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Type</th>
+<th><code>ValType</code> variant</th>
+<th>Bit-width</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>i32</code></td>
+<td><code>I32</code></td>
+<td>32</td>
+<td>Two&#39;s complement</td>
+</tr>
+<tr>
+<td><code>i64</code></td>
+<td><code>I64</code></td>
+<td>64</td>
+<td>Two&#39;s complement</td>
+</tr>
+<tr>
+<td><code>f32</code></td>
+<td><code>F32</code></td>
+<td>32</td>
+<td>Stored as <code>u32</code> bit-pattern</td>
+</tr>
+<tr>
+<td><code>f64</code></td>
+<td><code>F64</code></td>
+<td>64</td>
+<td>Stored as <code>u64</code> bit-pattern</td>
+</tr>
+<tr>
+<td><code>v128</code></td>
+<td><code>V128</code></td>
+<td>128</td>
+<td>SIMD; stored as <code>u128</code></td>
+</tr>
+<tr>
+<td><code>funcref</code></td>
+<td><code>Ref(FuncRef)</code></td>
+<td>ptr-sized</td>
+<td>Nullable reference to function</td>
+</tr>
+<tr>
+<td><code>externref</code></td>
+<td><code>Ref(ExternRef)</code></td>
+<td>ptr-sized</td>
+<td>Nullable opaque host ref</td>
+</tr>
+</tbody></table></div>
+<p><strong>Composite Types:</strong></p>
+<pre class="diagram"><code>FuncType   ::= { params: [ValType], results: [ValType] }
+Limits     ::= { min: u32, max: Option&lt;u32&gt; }  — max &gt;= min invariant
+TableType  ::= { elem_type: RefType, limits: Limits }
+MemType    ::= { limits: Limits }               — in pages (64 KiB)
+GlobalType ::= { val_type: ValType, mutability: Mutability }</code></pre>
+<p><strong>Index Spaces (each is zero-based, flat):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Index Type</th>
+<th>Space</th>
+<th>Import offset</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>TypeIdx</code></td>
+<td>FuncType vec in Type section</td>
+<td>N/A</td>
+</tr>
+<tr>
+<td><code>FuncIdx</code></td>
+<td>imported funcs ++ internal funcs</td>
+<td>imports first</td>
+</tr>
+<tr>
+<td><code>TableIdx</code></td>
+<td>imported tables ++ internal tables</td>
+<td>imports first</td>
+</tr>
+<tr>
+<td><code>MemIdx</code></td>
+<td>imported mems ++ internal mems</td>
+<td>imports first</td>
+</tr>
+<tr>
+<td><code>GlobalIdx</code></td>
+<td>imported globals ++ internal globals</td>
+<td>imports first</td>
+</tr>
+<tr>
+<td><code>ElemIdx</code></td>
+<td>Element segments</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>DataIdx</code></td>
+<td>Data segments</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>LabelIdx</code></td>
+<td>Relative depth in ctrl stack</td>
+<td>0 = innermost</td>
+</tr>
+<tr>
+<td><code>LocalIdx</code></td>
+<td>params ++ declared locals in a func</td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<p><strong><code>ExternType</code></strong> unifies all importable/exportable entities: <code>Func(FuncType) | Table(TableType) | Mem(MemType) | Global(GlobalType)</code>.</p>
+<h3 id="sec-8-3">8.3 Instruction Set by Category</h3>
+<p><strong>Control:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Opcode</th>
+<th>Instr variant</th>
+<th>Stack effect summary</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>0x00</code></td>
+<td><code>Unreachable</code></td>
+<td>Trap; marks frame polymorphic</td>
+</tr>
+<tr>
+<td><code>0x01</code></td>
+<td><code>Nop</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>0x02</code></td>
+<td><code>Block(BlockType)</code></td>
+<td>Push ctrl frame; [t*] → [t*]</td>
+</tr>
+<tr>
+<td><code>0x03</code></td>
+<td><code>Loop(BlockType)</code></td>
+<td>Push ctrl frame; branch target = start</td>
+</tr>
+<tr>
+<td><code>0x04</code></td>
+<td><code>If(BlockType)</code></td>
+<td>Pop i32; push ctrl frame</td>
+</tr>
+<tr>
+<td><code>0x05</code></td>
+<td><code>Else</code></td>
+<td>Flip if frame</td>
+</tr>
+<tr>
+<td><code>0x0B</code></td>
+<td><code>End</code></td>
+<td>Pop ctrl frame; push end_types</td>
+</tr>
+<tr>
+<td><code>0x0C</code></td>
+<td><code>Br(LabelIdx)</code></td>
+<td>Branch to depth d; unwinds to label</td>
+</tr>
+<tr>
+<td><code>0x0D</code></td>
+<td><code>BrIf(LabelIdx)</code></td>
+<td>Conditional branch</td>
+</tr>
+<tr>
+<td><code>0x0E</code></td>
+<td><code>BrTable([LabelIdx],LabelIdx)</code></td>
+<td>Switch on i32; default = last</td>
+</tr>
+<tr>
+<td><code>0x0F</code></td>
+<td><code>Return</code></td>
+<td>Branch to implicit outermost label</td>
+</tr>
+<tr>
+<td><code>0x10</code></td>
+<td><code>Call(FuncIdx)</code></td>
+<td>Direct call; consumes params, pushes results</td>
+</tr>
+<tr>
+<td><code>0x11</code></td>
+<td><code>CallIndirect(TypeIdx,TableIdx)</code></td>
+<td>Pop i32 index, lookup, type-check, call</td>
+</tr>
+</tbody></table></div>
+<p><strong>Parametric:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Opcode</th>
+<th>Instr variant</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>0x1A</code></td>
+<td><code>Drop</code></td>
+<td>Pop top</td>
+</tr>
+<tr>
+<td><code>0x1B/0x1C</code></td>
+<td><code>Select(Option&lt;ValType&gt;)</code></td>
+<td>Pop i32 cond + 2 values, push one</td>
+</tr>
+</tbody></table></div>
+<p><strong>Variable:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Opcode range</th>
+<th>Instr variants</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>0x20–0x22</code></td>
+<td><code>LocalGet/Set/Tee(u32)</code></td>
+</tr>
+<tr>
+<td><code>0x23–0x24</code></td>
+<td><code>GlobalGet/Set(GlobalIdx)</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Table (reference-types):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Opcode</th>
+<th>Instr variant</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>0x25</code></td>
+<td><code>TableGet(TableIdx)</code></td>
+</tr>
+<tr>
+<td><code>0x26</code></td>
+<td><code>TableSet(TableIdx)</code></td>
+</tr>
+<tr>
+<td><code>0xFC 12–17</code></td>
+<td><code>TableInit/ElemDrop/TableCopy/TableGrow/TableSize/TableFill</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Memory:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Opcode</th>
+<th>Instr variant</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>0x28–0x3E</code></td>
+<td><code>Load(MemArg, LoadKind)</code> — i32/i64/f32/f64 + extends</td>
+</tr>
+<tr>
+<td><code>0x36–0x3E</code></td>
+<td><code>Store(MemArg, StoreKind)</code> — i32/i64/f32/f64 + truncated</td>
+</tr>
+<tr>
+<td><code>0x3F</code></td>
+<td><code>MemorySize</code></td>
+</tr>
+<tr>
+<td><code>0x40</code></td>
+<td><code>MemoryGrow</code></td>
+</tr>
+<tr>
+<td><code>0xFC 8/9/10/11</code></td>
+<td><code>MemoryInit/DataDrop/MemoryCopy/MemoryFill</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Numeric (Const / IUnOp / IBinOp / FUnOp / FBinOp / ITestOp / IRelOp / FRelOp):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Category</th>
+<th>Examples</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Const(Val)</code></td>
+<td><code>i32.const</code>, <code>i64.const</code>, <code>f32.const</code>, <code>f64.const</code></td>
+</tr>
+<tr>
+<td><code>IUnOp</code></td>
+<td><code>clz</code>, <code>ctz</code>, <code>popcnt</code> (×2 widths)</td>
+</tr>
+<tr>
+<td><code>IBinOp</code></td>
+<td><code>add/sub/mul/div_s/div_u/rem_s/rem_u/and/or/xor/shl/shr_s/shr_u/rotl/rotr</code></td>
+</tr>
+<tr>
+<td><code>FUnOp</code></td>
+<td><code>abs/neg/sqrt/ceil/floor/trunc/nearest</code></td>
+</tr>
+<tr>
+<td><code>FBinOp</code></td>
+<td><code>add/sub/mul/div/min/max/copysign</code></td>
+</tr>
+<tr>
+<td><code>ITestOp</code></td>
+<td><code>eqz</code></td>
+</tr>
+<tr>
+<td><code>IRelOp</code></td>
+<td><code>eq/ne/lt_s/lt_u/gt_s/gt_u/le_s/le_u/ge_s/ge_u</code></td>
+</tr>
+<tr>
+<td><code>FRelOp</code></td>
+<td><code>eq/ne/lt/gt/le/ge</code></td>
+</tr>
+<tr>
+<td><code>CvtOp</code></td>
+<td><code>wrap/extend/trunc/trunc_sat/convert/demote/promote/reinterpret</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Reference:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Opcode</th>
+<th>Instr variant</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>0xD0</code></td>
+<td><code>RefNull(RefType)</code></td>
+</tr>
+<tr>
+<td><code>0xD1</code></td>
+<td><code>RefIsNull</code></td>
+</tr>
+<tr>
+<td><code>0xD2</code></td>
+<td><code>RefFunc(FuncIdx)</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>SIMD (0xFD prefix):</strong> <code>V128(V128Op)</code> — splat, extract_lane, replace_lane, lanewise arith/compare, shuffle, load/store.</p>
+<h3 id="sec-8-4">8.4 BlockType Encoding</h3>
+<pre class="diagram"><code>BlockType ::= 0x40           -- empty (no results)
+            | ValType        -- single result (byte 0x7F..0x70)
+            | s33 (SLEB128)  -- typeidx into Type section (negative = above; only non-negative used)</code></pre>
+<p>Decoded by <code>wrt-decoder</code> into <code>enum BlockType { Empty, Val(ValType), FuncType(TypeIdx) }</code>.</p>
+<h3 id="sec-8-5">8.5 Validation Algorithm</h3>
+<p><strong>Structures:</strong></p>
+<pre class="diagram"><code>OperandType  ::= Known(ValType) | Unknown
+OperandStack ::= Vec&lt;OperandType&gt;
+CtrlFrame    ::= { opcode: CtrlOp, start_types: [ValType], end_types: [ValType],
+                   height: usize, unreachable: bool }
+CtrlStack    ::= Vec&lt;CtrlFrame&gt;</code></pre>
+<p><strong>Core operations (Wasm Core Spec Appendix B — pseudocode):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Precondition / Guard</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>push_operand(t)</code></td>
+<td>—</td>
+<td>Append <code>Known(t)</code> to operands</td>
+</tr>
+<tr>
+<td><code>pop_operand(expect)</code></td>
+<td>If <code>operands.len == ctrl.top().height &amp;&amp; ctrl.top().unreachable</code></td>
+<td>Yield <code>Unknown</code> (polymorphic pass)</td>
+</tr>
+<tr>
+<td><code>pop_operand(expect)</code></td>
+<td><code>t = operands.last()</code>; <code>t == Unknown ∥ expect == Unknown ∥ t == Known(expect)</code></td>
+<td>Pop and yield <code>t</code></td>
+</tr>
+<tr>
+<td><code>pop_operand(expect)</code></td>
+<td>Otherwise</td>
+<td>→ <code>ValidationError(TypeMismatch)</code></td>
+</tr>
+<tr>
+<td><code>push_ctrl(op, in_types, out_types)</code></td>
+<td>—</td>
+<td>Push <code>CtrlFrame{op, start_types, end_types, height=operands.len(), unreachable=false}</code>; push <code>in_types</code> onto operands</td>
+</tr>
+<tr>
+<td><code>pop_ctrl()</code></td>
+<td>—</td>
+<td>Pop <code>end_types</code> from operands; assert <code>operands.len == frame.height</code>; pop ctrl; yield frame</td>
+</tr>
+<tr>
+<td><code>label_types(frame)</code></td>
+<td>—</td>
+<td>Yields <code>frame.start_types</code> if <code>frame.opcode == Loop</code>; else <code>frame.end_types</code></td>
+</tr>
+<tr>
+<td><code>unreachable()</code></td>
+<td>—</td>
+<td>Truncate operands to <code>ctrl.top().height</code>; set <code>ctrl.top().unreachable = true</code></td>
+</tr>
+</tbody></table></div>
+<p><strong>Polymorphic-after-unreachable invariant:</strong> once <code>unreachable()</code> fires, <code>pop_operand</code> returns <code>Unknown</code> for any request until the frame is popped — no validation error for any type. Nested <code>block</code>/<code>loop</code>/<code>if</code> each push a new frame resetting <code>height</code>; <code>end</code> uses <code>pop_ctrl</code> which re-checks the frame&#39;s end types.</p>
+<p><strong>Worked example — <code>(func (param i32) (result i32) block (result i32) local.get 0 if (result i32) i32.const 1 else i32.const 2 end end)</code>:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Instruction</th>
+<th>Operand Stack</th>
+<th>Ctrl Stack top</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>entry</td>
+<td>—</td>
+<td><code>[I32]</code> (param)</td>
+<td>func frame, end=[I32]</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>block (result i32)</code></td>
+<td><code>[]</code></td>
+<td>block, end=[I32], h=0</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>local.get 0</code></td>
+<td><code>[I32]</code></td>
+<td>block</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>if (result i32)</code></td>
+<td><code>[]</code></td>
+<td>if, end=[I32], h=0</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>i32.const 1</code></td>
+<td><code>[I32]</code></td>
+<td>if</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>else</code></td>
+<td><code>[]</code></td>
+<td>if→else (flip; check [I32])</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>i32.const 2</code></td>
+<td><code>[I32]</code></td>
+<td>else</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>end</code> (if)</td>
+<td><code>[I32]</code></td>
+<td>block</td>
+</tr>
+<tr>
+<td>8</td>
+<td><code>end</code> (block)</td>
+<td><code>[I32]</code></td>
+<td>func</td>
+</tr>
+<tr>
+<td>valid</td>
+<td>return</td>
+<td><code>[]</code></td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<p><strong>Br depth resolution:</strong> <code>br 0</code> branches to innermost ctrl frame; <code>label_types</code> returns <code>start_types</code> for <code>loop</code> (back-edge) and <code>end_types</code> for <code>block</code>/<code>if</code>.</p>
+<p><strong>Module-level validation order:</strong> types → imports (match ExternType) → functions (TypeIdx in range) → tables → memories (≤1 for MVP) → globals (init expr type) → exports (uniqueness + ExternType match) → elements (ref types, func indices declared) → data (memory existence) → start (FuncType <code>[]→[]</code>).</p>
+<h3 id="sec-8-6">8.6 Execution — Small-Step Stack Evolution</h3>
+<p><strong>Example — loop with counter (<code>(loop $l br_if $l)</code>):</strong></p>
+<pre class="code language-wasm" data-lang="wasm"><code>(func (param i32) (result i32)   ;; i32 = counter
+  block $b (result i32)
+    loop $l
+      local.get 0       ;; push counter
+      i32.const 1
+      i32.sub           ;; counter - 1
+      local.tee 0       ;; store + leave on stack
+      br_if $l          ;; if nonzero, jump back to loop start
+    end
+    local.get 0         ;; = 0
+  end)</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Instr</th>
+<th>Value Stack</th>
+<th>Label Stack</th>
+<th>Frame locals[0]</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>enter</td>
+<td>—</td>
+<td><code>[]</code></td>
+<td><code>[block@end, loop@start]</code></td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>local.get 0</code></td>
+<td>—</td>
+<td><code>[3]</code></td>
+<td>same</td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>i32.const 1</code></td>
+<td>—</td>
+<td><code>[3,1]</code></td>
+<td>same</td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>i32.sub</code></td>
+<td>—</td>
+<td><code>[2]</code></td>
+<td>same</td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>local.tee 0</code></td>
+<td>—</td>
+<td><code>[2]</code></td>
+<td>same</td>
+<td>2</td>
+</tr>
+<tr>
+<td><code>br_if $l</code> (nonzero)</td>
+<td>—</td>
+<td><code>[]</code></td>
+<td>jump → <code>loop@start</code></td>
+<td>2</td>
+</tr>
+<tr>
+<td>… (iter 2)</td>
+<td>—</td>
+<td><code>[1]</code> → <code>[0]</code></td>
+<td>—</td>
+<td>1→0</td>
+</tr>
+<tr>
+<td><code>br_if $l</code> (zero)</td>
+<td>fall-through</td>
+<td><code>[0]</code></td>
+<td>same</td>
+<td>0</td>
+</tr>
+<tr>
+<td><code>end</code> (loop)</td>
+<td>—</td>
+<td><code>[0]</code></td>
+<td>pop loop label</td>
+<td>0</td>
+</tr>
+<tr>
+<td><code>local.get 0</code></td>
+<td>—</td>
+<td><code>[0,0]</code>→ already done by loop exit</td>
+<td>pop block</td>
+<td>0</td>
+</tr>
+<tr>
+<td><code>end</code> (block)</td>
+<td>—</td>
+<td><code>[0]</code></td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li><code>Label.arity</code> = number of values the branch carries; <code>br_if $l</code> pops i32 cond, then if nonzero pops <code>arity</code> values, jumps; otherwise fall-through.</li>
+<li><code>br</code> to a <code>block</code>/<code>if</code>: unwinds value stack to <code>Label.height</code>, pops <code>arity</code> results, continues after <code>end</code>.</li>
+<li><code>br</code> to a <code>loop</code>: same unwind but continues at <code>Label.cont = loop_start</code>.</li>
+</ul>
+<h3 id="sec-8-7">8.7 Malformed / Invalid — Error Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Phase</th>
+<th>Exact Error</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>First 4 bytes ≠ <code>0x00 0x61 0x73 0x6D</code></td>
+<td>Decode</td>
+<td><code>DecodeError::BadMagic</code></td>
+</tr>
+<tr>
+<td>Truncated ULEB128 (high bit set, no next byte)</td>
+<td>Decode</td>
+<td><code>DecodeError::UnexpectedEof</code></td>
+</tr>
+<tr>
+<td>Section ID 3 appears after section ID 7</td>
+<td>Decode</td>
+<td><code>DecodeError::SectionOutOfOrder</code></td>
+</tr>
+<tr>
+<td><code>i32.add</code> with top two stack = <code>[I32, F32]</code></td>
+<td>Validate</td>
+<td><code>ValidateError::TypeMismatch { expected: I32, got: F32 }</code></td>
+</tr>
+<tr>
+<td><code>br 5</code> when ctrl stack depth = 3</td>
+<td>Validate</td>
+<td><code>ValidateError::BranchDepthOutOfRange(5)</code></td>
+</tr>
+<tr>
+<td>Function section count ≠ code section count</td>
+<td>Validate</td>
+<td><code>ValidateError::FuncCodeCountMismatch</code></td>
+</tr>
+<tr>
+<td><code>call_indirect</code> with table[i].type ≠ static TypeIdx</td>
+<td>Runtime</td>
+<td><code>Trap::IndirectCallTypeMismatch</code></td>
+</tr>
+<tr>
+<td>Memory load: <code>addr + N &gt; mem.data.len()</code></td>
+<td>Runtime</td>
+<td><code>Trap::OutOfBoundsMemory</code></td>
+</tr>
+<tr>
+<td>Load with <code>align &gt; natural(op)</code></td>
+<td>Runtime</td>
+<td>Hint only; no trap (legal per spec)</td>
+</tr>
+<tr>
+<td><code>i32.div_s</code> with divisor = 0</td>
+<td>Runtime</td>
+<td><code>Trap::IntegerDivByZero</code></td>
+</tr>
+<tr>
+<td><code>i32.div_s</code> with <code>INT_MIN / -1</code></td>
+<td>Runtime</td>
+<td><code>Trap::IntegerOverflow</code></td>
+</tr>
+<tr>
+<td><code>i32.trunc_f32_s</code> NaN or ±∞</td>
+<td>Runtime</td>
+<td><code>Trap::InvalidConversionToInt</code></td>
+</tr>
+<tr>
+<td>table[i] = null (uninit funcref)</td>
+<td>Runtime</td>
+<td><code>Trap::UninitializedElement</code></td>
+</tr>
+<tr>
+<td>table[i] out of bounds</td>
+<td>Runtime</td>
+<td><code>Trap::UndefinedElement</code></td>
+</tr>
+<tr>
+<td>Value stack depth &gt; Engine cap at call</td>
+<td>Runtime</td>
+<td><code>Trap::CallStackExhausted</code></td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

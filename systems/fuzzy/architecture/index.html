@@ -1,0 +1,329 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Fuzzy — Architecture · Engineering Blueprints</title><meta name="description" content="Fuzzy, hld: §3 overview + §8 domain model. Fuzzy is a PostgreSQL 16+ extension that adds a first-class probabilistic column type, confident<T>, and the SQL surface (operators, a query rewriter, a planner hook, and a background decay worker)…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/products-platforms/">Products &amp; Platforms</a> </li><li> <a href="/system-design-blueprints/systems/fuzzy/">Fuzzy</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:288"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/products-platforms/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Products &amp; Platforms</span></a> </p> <h1>Fuzzy</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~32 weeks</li> <li>2,320 lines</li> <li>blueprint #8</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/fuzzy/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/fuzzy/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/fuzzy/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/fuzzy/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/fuzzy/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/fuzzy/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/fuzzy/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/fuzzy/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/fuzzy/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/fuzzy/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Fuzzy — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌───────────────────────────────────────────────────────────────────────┐
+│ Client (fuzzy-py / libpq)                                             │
+│   SQL: WHERE intent=&#39;churn&#39; WITH confidence &gt; 0.8                     │
+└──────────────────────────────┬─────────────────────────────────────────┘
+                                │ wire protocol (libpq, ADR-06)
+                                ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│ PostgreSQL 16+ backend (trust boundary: authenticated, untrusted SQL)  │
+│                                                                        │
+│  Parse ─▶ [fuzzy_planner: post-parse rewriter, ADR-23] ─▶ Plan         │
+│                     │                                                  │
+│                     ▼                                                  │
+│  [fuzzy_planner: planner hook — picks propagation mode, §8.4]          │
+│                     │                                                  │
+│                     ▼                                                  │
+│  Executor ─▶ [fuzzy_types operators: confident_eq/join/agg] ─▶ Heap    │
+│                     │                              ▲                  │
+│                     ▼                              │                  │
+│         [fuzzy_conflict: append-only log] ◀─────────┘ (Phase 7+)      │
+│                     ▲                                                  │
+│                     │                                                  │
+│         [fuzzy_feedback: correction ledger] (Phase 8+)                 │
+└───────────┬────────────────────────────────────────┬───────────────────┘
+            │ same-process, cooperative              │ SQL admin fns
+            ▼                                         ▼
+┌───────────────────────────────┐         ┌─────────────────────────────┐
+│ fuzzy_decay bgworker (Phase 5) │         │ fuzzy_source registry       │
+│ 1 per opted-in database        │◀───────▶│ (reliability priors, §8.4.3)│
+│ throttled, cooperatively        │         └─────────────────────────────┘
+│ cancellable (ADR-08, I9)        │
+└───────────────────────────────┘</code></pre>
+<p><strong>Boxes, one paragraph each.</strong></p>
+<p><em>Client.</em> Any libpq-speaking client, or <code>fuzzy-py</code> (Phase 9, <a class="cite" href="/system-design-blueprints/systems/fuzzy/build/#sec-21">§21</a>). No trust is placed in
+the client beyond standard Postgres role auth; the type input function must be robust to
+adversarial byte streams (<a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8-7">§8.7</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#t-4">T4</a>).</p>
+<p><em>fuzzy_planner.</em> Two hooks: a post-parse rewriter (desugars <code>WITH confidence &gt; X</code> into
+plain boolean predicates, <a class="cite" href="/system-design-blueprints/systems/fuzzy/trade-offs/#adr-23">ADR-23</a>) and a planner hook (attaches a propagation mode, <a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8-4">§8.4</a>,
+to each join over <code>confident&lt;T&gt;</code> columns). Both are pure, side-effect-free, and
+inspectable via <code>EXPLAIN (FUZZY)</code> (<a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-7">P7</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-5">I5</a>).</p>
+<p><em>Executor / fuzzy_types.</em> The operator implementations (<code>confident_eq</code>, <code>confident_join</code>,
+aggregates, <a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8-5">§8.5</a>) run in the standard executor, no custom execution nodes. They read/write
+<code>confident&lt;T&gt;</code> values through the type&#39;s I/O functions against the heap.</p>
+<p><em>fuzzy_conflict (Phase 7+).</em> When a column has <code>track_conflicts = true</code>, writes append to
+<code>fuzzy_conflict_log</code> instead of overwriting; the read path computes the canonical value per
+the column&#39;s resolution mode.</p>
+<p><em>fuzzy_feedback (Phase 8+).</em> SQL admin functions that record a correction and update the
+originating source&#39;s Beta(α, β) reliability prior (<a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8-4">§8.4</a>.3, Gelman et al. 2013).</p>
+<p><em>fuzzy_decay bgworker.</em> One process per database that opted in, walking columns with a
+configured decay function on a throttled schedule, cooperatively cancelled on checkpoint
+or shutdown (<a class="cite" href="/system-design-blueprints/systems/fuzzy/trade-offs/#adr-8">ADR-08</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-9">I9</a>). Crashes here never take down a backend (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-11">I11</a>).</p>
+<p><em>fuzzy_source registry.</em> Maps a <code>source_id</code> to a handle, kind, and <code>(α, β)</code> reliability
+prior consumed by BAYESIAN propagation (<a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8-4">§8.4</a>.3) and updated by feedback (Phase 8, <a class="cite" href="/system-design-blueprints/systems/fuzzy/build/#sec-20">§20</a>).</p>
+<p>All later sections (Domain Model <a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8">§8</a>, Repository Layout <a class="cite" href="/system-design-blueprints/systems/fuzzy/design/#sec-10">§10</a>, Core Schema <a class="cite" href="/system-design-blueprints/systems/fuzzy/design/#sec-11">§11</a>, and every
+phase) name exactly these boxes and no others; a module introduced later must be traced
+back to one of them or is out of scope (<a class="cite" href="/system-design-blueprints/systems/fuzzy/blueprint/#sec-1">§1</a> non-goals).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 The <code>confident&lt;T&gt;</code> Type (formal)</h3>
+<p>For <code>T ∈ { int, bigint, float8, text, boolean, uuid, timestamptz, jsonb }</code>:</p>
+<pre class="diagram"><code>confident&lt;T&gt; ≡ (
+    v          : T,                    -- the value
+    c          : float8 ∈ [0.0, 1.0],  -- confidence (I1)
+    s          : source_id (uuid),     -- FK → fuzzy_source (I2)
+    t          : timestamptz,          -- observation time, default now()
+    decay_ref  : decay_id NULL,        -- FK → fuzzy_decay_def
+    conflict_ix: bigint NULL           -- FK → fuzzy_conflict_log (Phase 7+)
+)</code></pre>
+<p>Wire format: 4-byte length prefix + packed binary tuple (<a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-14">P14</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzy/trade-offs/#adr-5">ADR-05</a>). Text I/O literal:
+<code>&#39;{&quot;v&quot;: &quot;churn&quot;, &quot;c&quot;: 0.83, &quot;s&quot;: &quot;model:gpt-4o-2025-09&quot;}&#39;</code>. Fixed overhead: 62 bytes/row
+(<a class="cite" href="/system-design-blueprints/systems/fuzzy/numbers/#sec-4">§4</a>), variable part is <code>T</code>&#39;s own encoding.</p>
+<h3 id="sec-8-2">8.2 Cast Rules</h3>
+<ul>
+<li><code>confident&lt;T&gt; → T</code>: allowed, yields <code>v</code>; confidence explicitly discarded (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-12">I12</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-3">P3</a>) —
+never implicit.</li>
+<li><code>T → confident&lt;T&gt;</code>: allowed only via <code>:: confident&lt;T&gt; SOURCE &#39;literal:default&#39;</code> (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-2">I2</a>).</li>
+<li><code>confident&lt;T&gt; → confident&lt;U&gt;</code>: allowed iff <code>T → U</code> is a known Postgres cast; <code>c</code>, <code>s</code>,
+<code>t</code> carry through unchanged.</li>
+<li>Aggregate casts: <code>confident&lt;T&gt;</code> columns aggregate to <code>confident&lt;T&gt;</code> per <a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8-5">§8.5</a>.</li>
+</ul>
+<h3 id="sec-8-3">8.3 Comparison and Filter Operators</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Operator</th>
+<th>Definition</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>a = b</code></td>
+<td><code>a.v = b.v</code></td>
+<td>confidence ignored</td>
+</tr>
+<tr>
+<td><code>a == b</code></td>
+<td><code>a.v = b.v ∧ |a.c − b.c| ≤ ε</code> (default <code>ε = 0.05</code>)</td>
+<td>confidence-aware eq</td>
+</tr>
+<tr>
+<td><code>a ~ b</code></td>
+<td><code>a.v = b.v</code>, output <code>c = min(a.c, b.c)</code></td>
+<td>locked MIN propagation, <a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8-4">§8.4</a>.1</td>
+</tr>
+<tr>
+<td><code>a &gt; x WITH confidence &gt; k</code></td>
+<td>rewrites to <code>a.v &gt; x ∧ a.c &gt; k</code></td>
+<td>desugared by <code>fuzzy_planner</code> (<a class="cite" href="/system-design-blueprints/systems/fuzzy/trade-offs/#adr-23">ADR-23</a>)</td>
+</tr>
+<tr>
+<td><code>confidence(a)</code> / <code>source(a)</code> / <code>value(a)</code></td>
+<td>scalar accessors</td>
+<td>pure functions</td>
+</tr>
+<tr>
+<td><code>a IS DECAYED</code></td>
+<td>true iff latest sweep put <code>a.c</code> below the column threshold</td>
+<td>Phase 5, <a class="cite" href="/system-design-blueprints/systems/fuzzy/build/#sec-17">§17</a></td>
+</tr>
+</tbody></table></div>
+<p><code>WITH confidence &gt; X</code> is a clause modifier on <code>WHERE</code>/<code>ON</code>, desugared in the post-parse
+hook (<a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-7">P7</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-5">I5</a>) — this is why Fuzzy does not fork the parser in Phase 0–9 (<a class="cite" href="/system-design-blueprints/systems/fuzzy/trade-offs/#adr-23">ADR-23</a>).</p>
+<h3 id="sec-8-4">8.4 Join Propagation Algebra (LOCKED)</h3>
+<p>Chosen per-join via <code>WITH PROPAGATION = MODE</code>, or per-column <code>DEFAULT PROPAGATION</code>.</p>
+<h4 id="sec-8-4-1">8.4.1 MIN (default)</h4>
+<p><code>c_out = min(c_left, c_right)</code>. Conservative, monotonic; matches
+naive intuition about weakest-link confidence. Provenance framing: a semiring-style
+<code>min</code>-combination (Green et al. 2007, <a class="cite" href="/system-design-blueprints/systems/fuzzy/study/#sec-5">§5</a>).</p>
+<h4 id="sec-8-4-2">8.4.2 PRODUCT (independent evidence)</h4>
+<p><code>c_out = c_left × c_right</code>. Correct when the two
+confidences are independent probabilities of correctness (Dalvi &amp; Suciu 2004, <a class="cite" href="/system-design-blueprints/systems/fuzzy/study/#sec-5">§5</a>).</p>
+<h4 id="sec-8-4-3">8.4.3 BAYESIAN (beta-binomial, locked variant)</h4>
+<p><code>c_out = (α_left + α_right) / (α_left + β_left + α_right + β_right)</code>, where each input&#39;s
+<code>(α, β)</code> is the effective-sample-size Beta prior stored per source in <code>fuzzy_source</code>
+(Gelman et al. 2013, <a class="cite" href="/system-design-blueprints/systems/fuzzy/study/#sec-5">§5</a>). Used when sources have known reliability priors.</p>
+<h4 id="sec-8-4-4">8.4.4 DEMPSTER-SHAFER — deferred (<code>PhaseDeferred(&quot;§35&quot;)</code>)</h4>
+<p>Combining belief masses via
+Dempster&#39;s rule of combination (Dempster 1967, Shafer 1976, <a class="cite" href="/system-design-blueprints/systems/fuzzy/study/#sec-5">§5</a>) requires a conflict-mass
+normalization step that is computationally heavier and only pays off for governance-tier,
+multi-source-fusion use cases; not in the Phase 0–9 algebra.</p>
+<h4 id="sec-8-4-5">8.4.5 Ambiguity resolution</h4>
+<p>If two joined columns declare conflicting <code>DEFAULT PROPAGATION</code>, the planner raises <code>ERRCODE_FUZZY_AMBIGUOUS_PROPAGATION</code> (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-4">I4</a>) unless the
+query specifies <code>WITH PROPAGATION =</code> explicitly.</p>
+<h3 id="sec-8-5">8.5 Aggregate Propagation</h3>
+<ul>
+<li><code>confident_avg(a)</code> → value-weighted mean; output <code>c = mean(c_i)</code>.</li>
+<li><code>confident_max(a)</code> → row with max <code>v</code>; output <code>c</code> = that row&#39;s <code>c</code>.</li>
+<li><code>confident_count(a) WITH confidence &gt; k</code> → counts rows clearing the threshold only.</li>
+<li><code>confident_consensus(a)</code> → modal <code>v</code>; output <code>c = Σc_i[agree] / Σc_i[all]</code>.</li>
+</ul>
+<h3 id="sec-8-6">8.6 <code>EXPLAIN (FUZZY)</code></h3>
+<p>Reports: the rewritten query (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-5">I5</a>), chosen propagation mode per join, confidence-threshold
+predicate hits, and decay state at plan time. Backed by <code>fuzzy_stat_columns</code>,
+<code>fuzzy_stat_propagation</code>, <code>fuzzy_stat_decay_runs</code> (<a class="cite" href="/system-design-blueprints/systems/fuzzy/blueprint/#sec-11-6">§11.6</a>).</p>
+<h3 id="sec-8-7">8.7 Worked Example — Write, Join, Decay</h3>
+<pre class="diagram"><code>-- write (two independent sources observe the same customer&#39;s intent)
+INSERT INTO customers(id, intent) VALUES
+  (42, &#39;{&quot;v&quot;:&quot;churn&quot;,&quot;c&quot;:0.90,&quot;s&quot;:&quot;model:gpt-4o-2025-09&quot;}&#39;),
+  (42, &#39;{&quot;v&quot;:&quot;churn&quot;,&quot;c&quot;:0.60,&quot;s&quot;:&quot;model:claude-haiku&quot;}&#39;);   -- Phase 7: 2nd write → conflict log
+
+-- confidence-aware join, explicit propagation
+SELECT c.id FROM customers c JOIN risk_flags r ON c.id = r.id
+  WITH PROPAGATION = PRODUCT
+WHERE r.flag = &#39;high&#39; WITH confidence &gt; 0.5;
+-- c_out = c.intent.c * r.flag.c, only rows clearing 0.5 pass
+
+-- 14 days later, half_life(14) decay sweep halves the first observation&#39;s confidence
+-- fuzzy_decay: c := c * 0.5^(elapsed_days / half_life_days)  ⇒ 0.90 → 0.45</code></pre>
+<h3 id="sec-8-8">8.8 Malformed-Input Example</h3>
+<p><code>INSERT INTO customers(intent) VALUES (&#39;{&quot;v&quot;:&quot;churn&quot;,&quot;c&quot;:1.4,&quot;s&quot;:&quot;model:x&quot;}&#39;)</code> — <code>c = 1.4</code>
+violates <a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-1">I1</a>; the type input function raises <code>ERRCODE_FUZZY_INVALID_CONFIDENCE</code> before any
+heap write, transaction aborts (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#t-4">T4</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#fm-3">FM-3</a>).</p>
+<h3 id="sec-8-9">8.9 Failure-Path Example</h3>
+<p><code>fuzzy_decay</code> crashes mid-sweep on database <code>db1</code> (e.g. OOM on a pathological <code>jsonb</code>
+payload). Postmaster detects the bgworker exit, logs a restart event, relaunches within
+the RTO budget (&lt; 60 s, <a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#fm-5">FM-5</a>); in-flight row updates from the crashed sweep are not
+partially applied because each row&#39;s decay write is a single-row <code>UPDATE</code> committed
+individually — worst case is a resumed sweep re-visiting a handful of already-decayed rows,
+which is idempotent (decay is a pure function of <code>t</code> and elapsed time, not a running delta).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-1">P1</a> — Postgres-native, always.</strong> Fuzzy is an extension, never a fork or wrapper. Tradeoff: caps what is possible to whatever the extension API exposes. Operational implication: every phase&#39;s exit criterion is buildable via <code>pgrx</code>/PGXS. Violating it (forking Postgres) forfeits the entire &quot;I already run Postgres&quot; adoption moat (<a class="cite" href="/system-design-blueprints/systems/fuzzy/blueprint/#sec-2">§2</a>).</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-2">P2</a> — The join-propagation algebra is locked once shipped (<a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8-4">§8.4</a>).</strong> Tradeoff: new propagation modes ship additively behind <code>WITH PROPAGATION =</code>, never as a silent default change. Violating it breaks every downstream query that depends on today&#39;s default (<code>MIN</code>).</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-3">P3</a> — Confidence and source are metadata, never a substitute for access control over the value.</strong> Tradeoff: Fuzzy must not become a covert channel for value exfiltration via confidence-derived side channels (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#t-5">T5</a>). Violating it turns a monitoring feature into a security bug.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-4">P4</a> — Every <code>confident&lt;T&gt;</code> write has a source; anonymous writes are rejected.</strong> Tradeoff: adds a mandatory registry lookup on every write path (<a class="cite" href="/system-design-blueprints/systems/fuzzy/numbers/#sec-28">§28</a> M-cost). Violating it collapses the entire feedback loop (Phase 8, <a class="cite" href="/system-design-blueprints/systems/fuzzy/build/#sec-20">§20</a>) which depends on attributable reliability priors.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-5">P5</a> — Decay is opt-in, but once configured, applied consistently and only by the bgworker — never silently at read time.</strong> Tradeoff: reads stay O(1); decayed values can lag the sweep schedule by up to one throttle interval. Violating it (computing decay inline at read time) reintroduces read-path variance the whole design avoids (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#inv-8">I8</a>).</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-6">P6</a> — OSS core is permanent and unconditional.</strong> Tradeoff: monetization must live entirely outside <code>fuzzy_types</code>/<code>fuzzy_ext</code>/<code>fuzzy_decay</code>/<code>fuzzy_conflict</code>/<code>fuzzy_feedback</code>. Violating it breaks the adoption thesis that the moat is the algebra, not a paywall.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-7">P7</a> — No silent query rewriting.</strong> Every transformation <code>fuzzy_planner</code> performs is visible via <code>EXPLAIN (FUZZY)</code> (<a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8-6">§8.6</a>). Tradeoff: extra bookkeeping to record rewrite provenance per plan node. Violating it makes the system undebuggable in production — the single highest-cost failure mode for any query rewriter (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#fm-2">FM-2</a>).</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-8">P8</a> — Postgres-version compatibility is a first-class deliverable, not an afterthought.</strong> Tradeoff: every phase carries CI cost across ≥2 major Postgres versions (<a class="cite" href="/system-design-blueprints/systems/fuzzy/blueprint/#sec-26">§26</a>). Violating it (targeting one pinned minor) creates <a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#t-2">T2</a>/<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#fm-1">FM-1</a> risk that compounds every release.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-9">P9</a> — Determinism over cleverness.</strong> Same inputs + same propagation mode ⇒ same output confidence, always. Tradeoff: rules out randomized/sampling-based propagation shortcuts even where they would be faster. Violating it makes conformance fixtures (N.5 of every phase) meaningless.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-10">P10</a> — Conflicts are stored, never silently overwritten (Phase 7+).</strong> Tradeoff: write amplification (<a class="cite" href="/system-design-blueprints/systems/fuzzy/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzy/numbers/#m-10">M10</a>) in exchange for auditability. Violating it destroys the provenance chain the feedback loop (<a class="cite" href="/system-design-blueprints/systems/fuzzy/build/#sec-20">§20</a>) depends on.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-11">P11</a> — The type input function is a hostile-input boundary.</strong> Tradeoff: every base <code>T</code> specialization pays a validation cost on write (<a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#sec-8-1">§8.1</a>). Violating it turns a parsing bug into a backend crash (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#t-4">T4</a>, <a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#fm-3">FM-3</a>).</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-12">P12</a> — Every propagation mode names its rejected alternatives and the regime where each wins (<a class="cite" href="/system-design-blueprints/systems/fuzzy/trade-offs/#sec-9">§9</a> ADR 6th column).</strong> Tradeoff: slower ADR authoring. Violating it produces an algebra nobody can reason about outside the original author&#39;s head.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-13">P13</a> — The bgworker is cooperatively cancellable and crash-isolated from backends.</strong> Tradeoff: sweep loops must check a cancellation flag at bounded intervals, adding branch overhead (<a class="cite" href="/system-design-blueprints/systems/fuzzy/numbers/#sec-28">§28</a> <a class="cite" href="/system-design-blueprints/systems/fuzzy/numbers/#m-9">M9</a>). Violating it risks stalling checkpoints or crashing user backends on a decay bug (<a class="cite" href="/system-design-blueprints/systems/fuzzy/reliability/#fm-5">FM-5</a>).</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/fuzzy/architecture/#p-14">P14</a> — Wire format changes are additive only (<a class="cite" href="/system-design-blueprints/systems/fuzzy/trade-offs/#sec-9">§9</a> <a class="cite" href="/system-design-blueprints/systems/fuzzy/trade-offs/#adr-5">ADR-05</a>).</strong> Tradeoff: old field-slots can never be repurposed, only appended after. Violating it breaks rolling-upgrade compatibility (<a class="cite" href="/system-design-blueprints/systems/fuzzy/blueprint/#sec-25">§25</a>) for every existing <code>confident&lt;T&gt;</code> column on disk.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

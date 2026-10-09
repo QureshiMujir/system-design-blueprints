@@ -1,0 +1,636 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Live Runtime State Inspector — Architecture · Engineering Blueprints</title><meta name="description" content="Live Runtime State Inspector, hld: §3 overview + §8 domain model. The Live Runtime State Inspector (LRSI) is a development-time instrumentation and inspection system for JavaScript/TypeScript runtimes. It attaches to a running target — a browser tab or a Node.js…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/products-platforms/">Products &amp; Platforms</a> </li><li> <a href="/system-design-blueprints/systems/live-runtime-state-inspector/">Live Runtime State Inspector</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:288"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/products-platforms/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Products &amp; Platforms</span></a> </p> <h1>Live Runtime State Inspector</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">TypeScript</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li>  <li>2,710 lines</li> <li>blueprint #1</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/live-runtime-state-inspector/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/live-runtime-state-inspector/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/live-runtime-state-inspector/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/live-runtime-state-inspector/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/live-runtime-state-inspector/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/live-runtime-state-inspector/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/live-runtime-state-inspector/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/live-runtime-state-inspector/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/live-runtime-state-inspector/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/live-runtime-state-inspector/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Live Runtime State Inspector — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌─────────────────── Target Runtime Process (trust boundary A) ───────────────────┐
+│ ┌────────────┐  calls   ┌──────────────────┐  emits    ┌──────────────────┐    │
+│ │ Instrumented│─────────▶│ Instrumentation  │──────────▶│ Snapshot          │    │
+│ │ Runtime (V8)│         │ Hooks  (§11 IH)   │           │ Serializer        │    │
+│ └────────────┘         └─────────┬────────┘           └─────────┬────────┘    │
+│                                   │ dep. edges                    │ StateSnapshot│
+│                                   ▼                                ▼            │
+│                         ┌──────────────────┐              ┌────────────────┐   │
+│                         │ Dependency Graph  │              │ Redaction Filter│   │
+│                         │ Tracker           │              │ (pre-transport) │   │
+│                         └─────────┬────────┘              └─────────┬───────┘   │
+│                                   │                                  │           │
+│                                   ▼                                  ▼           │
+│                    ┌────────────────────── Event Ring Buffer ────────────────┐  │
+│                    │   EventRecord[]  (LogicalClock-ordered, bounded, §4)     │  │
+│                    └────────────────────────────┬──────────────────────────────┘  │
+└─────────────────────────────────────────────────┼───────────────────────────────┘
+             concurrency boundary (per-session)    │  protocol boundary (wire)
+                                                    ▼
+                                    ┌───────────────────────────┐
+                                    │ Transport                  │
+                                    │ (WebSocket, CBOR, reconnect)│
+                                    └─────────────┬─────────────┘
+                                                   │ queue: bounded send-queue (ADR-27)
+                                                   ▼
+         ┌───────────────────────── Inspector Backend (trust boundary B) ───────────────┐
+         │  Session Manager (state machine, §8.6)                                       │
+         │        │                              │                                     │
+         │        ▼                              ▼                                     │
+         │  Query Engine (QuerySpec)     Time-Scrub / Replay Projector                  │
+         │        │                              │  (keyframe + delta apply)            │
+         │        └──────────────┬───────────────┘                                     │
+         │                       ▼            persistence boundary (IndexedDB/disk)     │
+         │                Telemetry Emitter ──▶ OTel exporter (opt-in)                  │
+         └───────────────────────┬───────────────────────────────────────────────────────┘
+                                  │ protocol boundary (wire, same transport)
+                                  ▼
+                        ┌────────────────────┐
+                        │  UI Client          │
+                        │  tree / graph / log /│
+                        │  scrubber views      │
+                        └────────────────────┘</code></pre>
+<p><strong>Instrumentation Hooks</strong> install into the target&#39;s own realm at attach time and are the only
+component with a hard zero-overhead-when-detached requirement (<a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/reliability/#inv-1">I1</a>); they call into the framework
+adapter (Phase 1) and forward raw mount/update/unmount/edge/event notifications.</p>
+<p><strong>Snapshot Serializer</strong> walks the live object graph reachable from tracked roots, applies
+cycle detection and truncation, and produces a <code>StateSnapshot</code> — the single artifact everything
+downstream operates on.</p>
+<p><strong>Dependency Graph Tracker</strong> observes signal reads, effect registrations, and subscription
+edges as they are established or torn down, and emits <code>DependencyEdge</code> records independent of the
+snapshot tree.</p>
+<p><strong>Redaction Filter</strong> applies <code>RedactionRule</code>s to a snapshot or event before it leaves trust
+boundary A; this is the only point downstream code may assume secrets have already been stripped.</p>
+<p><strong>Event Ring Buffer</strong> stores <code>EventRecord</code>s in a fixed-capacity, <code>LogicalClock</code>-ordered buffer
+inside the target process, so a hot-reload or crash doesn&#39;t require replaying history from zero.</p>
+<p><strong>Transport</strong> is a WebSocket connection carrying CBOR-encoded <code>TransportMessage</code>s, with a bounded
+send-queue and an explicit reconnect/resume handshake that survives a hot-reload disconnect.</p>
+<p><strong>Session Manager</strong> owns the per-attach state machine (<a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/architecture/#sec-8-6">§8.6</a>), routes messages to the query engine
+and replay projector, and is the only component permitted to change session state.</p>
+<p><strong>Query Engine</strong> compiles and evaluates <code>QuerySpec</code> predicates/projections over the current
+snapshot and the event log, without ever falling back to string-matching serialized JSON (P10).</p>
+<p><strong>Time-Scrub / Replay Projector</strong> reconstructs any historical <code>ScrubCursor</code> position from the
+nearest keyframe plus delta application, without re-invoking any target-side code (<a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/reliability/#inv-9">I9</a>).</p>
+<p><strong>UI Client</strong> renders the tree, the dependency graph, the event log, and the scrubber; it holds no
+direct reference to the target and communicates exclusively over the wire protocol.</p>
+<p><strong>Telemetry</strong> emits OpenTelemetry spans/metrics from the backend and transport only — never from
+the hooks, preserving the zero-overhead boundary (<a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/trade-offs/#adr-19">ADR-19</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 StateSnapshot Node Fields</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>nodeId</code></td>
+<td><code>NodeId</code></td>
+<td>stable identity within the session</td>
+</tr>
+<tr>
+<td><code>typeTag</code></td>
+<td>enum</td>
+<td><code>object</code> | <code>array</code> | <code>primitive</code> | <code>function</code> | <code>ref</code> | <code>component</code> | <code>store</code> | <code>signal</code></td>
+</tr>
+<tr>
+<td><code>shapeSummary</code></td>
+<td>string</td>
+<td>compact descriptor, e.g. <code>Object{12 keys}</code></td>
+</tr>
+<tr>
+<td><code>value</code></td>
+<td><code>SerializedValue?</code></td>
+<td>present iff <code>typeTag === &quot;primitive&quot;</code></td>
+</tr>
+<tr>
+<td><code>children</code></td>
+<td><code>NodeId[]?</code></td>
+<td>present iff container-shaped</td>
+</tr>
+<tr>
+<td><code>truncated</code></td>
+<td><code>TruncationMarker?</code></td>
+<td>present iff this subtree was cut off</td>
+</tr>
+<tr>
+<td><code>cycleRef</code></td>
+<td><code>CycleRef?</code></td>
+<td>present iff this node is a back-reference</td>
+</tr>
+<tr>
+<td><code>origin</code></td>
+<td><code>AdapterId</code></td>
+<td>which adapter produced this node</td>
+</tr>
+<tr>
+<td><code>clock</code></td>
+<td><code>LogicalClock</code></td>
+<td>snapshot logical time of capture</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Instrumentation Contract</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Hook Call</th>
+<th>When</th>
+<th>Ordering Guarantee</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>onMount(node)</code></td>
+<td>first materialization of a tracked node</td>
+<td>happens-before any <code>onUpdate</code> for that node</td>
+</tr>
+<tr>
+<td><code>onUpdate(node, prevRef)</code></td>
+<td>a value/shape change commits</td>
+<td>ordered by <code>LogicalClock</code>; never reordered relative to <code>onMount</code>/<code>onUnmount</code> for the same node</td>
+</tr>
+<tr>
+<td><code>onUnmount(node)</code></td>
+<td>node is removed</td>
+<td>happens-after all <code>onUpdate</code> calls for that node</td>
+</tr>
+<tr>
+<td><code>onDependencyEdge(from, to, kind)</code></td>
+<td>a signal/effect/subscription edge is (dis)established</td>
+<td>may interleave with <code>onUpdate</code>; always tagged with the triggering commit&#39;s clock</td>
+</tr>
+<tr>
+<td><code>onAsyncTaskStart</code> / <code>onAsyncTaskEnd</code></td>
+<td>an async boundary is crossed</td>
+<td>matched pair, single writer per task id</td>
+</tr>
+<tr>
+<td><code>onEvent(record)</code></td>
+<td>a discrete event occurs (dispatch, render, effect run)</td>
+<td>append-only, monotonic clock</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Dependency Graph Model</h3>
+<p>Nodes are signals, effects, and subscriptions. Edges are <code>DependencyEdge { from, to, kind }</code>
+where <code>kind ∈ { reads, writes, subscribes, triggers }</code>. The graph is captured independently of the
+snapshot tree so that &quot;what depends on this&quot; is a graph traversal, not a tree search (P10).</p>
+<h3 id="sec-8-4">8.4 Event Record Layout</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>eventId</code></td>
+<td>string</td>
+<td>unique within session</td>
+</tr>
+<tr>
+<td><code>clock</code></td>
+<td><code>LogicalClock</code></td>
+<td>monotonic, per <a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/reliability/#inv-4">I4</a></td>
+</tr>
+<tr>
+<td><code>kind</code></td>
+<td>enum</td>
+<td><code>dispatch</code> | <code>render</code> | <code>effect-run</code> | <code>subscription-fire</code> | <code>async-boundary</code></td>
+</tr>
+<tr>
+<td><code>subjectNodeId</code></td>
+<td><code>NodeId</code></td>
+<td>node the event concerns</td>
+</tr>
+<tr>
+<td><code>payloadSummary</code></td>
+<td><code>SerializedValue?</code></td>
+<td>bounded, redaction-filtered</td>
+</tr>
+<tr>
+<td><code>sourceAdapter</code></td>
+<td><code>AdapterId</code></td>
+<td>producing adapter</td>
+</tr>
+<tr>
+<td><code>sizeBytes</code></td>
+<td>number</td>
+<td>for ring-buffer accounting (<a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/reliability/#inv-8">I8</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Wire Protocol Message Catalogue</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Message</th>
+<th>Direction</th>
+<th>Kind</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Hello</code></td>
+<td>UI → Backend</td>
+<td>request</td>
+<td>protocol/capability negotiation (<a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/blueprint/#sec-27">§27</a>)</td>
+</tr>
+<tr>
+<td><code>AttachRequest</code></td>
+<td>UI → Backend</td>
+<td>request</td>
+<td>request attach to a discovered target</td>
+</tr>
+<tr>
+<td><code>AttachAck</code></td>
+<td>Backend → UI</td>
+<td>response</td>
+<td>attach succeeded; carries initial keyframe</td>
+</tr>
+<tr>
+<td><code>Detach</code></td>
+<td>UI → Backend</td>
+<td>request</td>
+<td>end the session cleanly</td>
+</tr>
+<tr>
+<td><code>Snapshot</code></td>
+<td>Backend → UI</td>
+<td>notification</td>
+<td>full keyframe</td>
+</tr>
+<tr>
+<td><code>SnapshotDelta</code></td>
+<td>Backend → UI</td>
+<td>notification</td>
+<td>structural diff since last keyframe</td>
+</tr>
+<tr>
+<td><code>EventBatch</code></td>
+<td>Backend → UI</td>
+<td>notification</td>
+<td>batched <code>EventRecord</code>s</td>
+</tr>
+<tr>
+<td><code>Heartbeat</code></td>
+<td>either</td>
+<td>notification</td>
+<td>liveness signal</td>
+</tr>
+<tr>
+<td><code>Query</code></td>
+<td>UI → Backend</td>
+<td>request</td>
+<td>a <code>QuerySpec</code> evaluation request</td>
+</tr>
+<tr>
+<td><code>QueryResult</code></td>
+<td>Backend → UI</td>
+<td>response</td>
+<td>query result set</td>
+</tr>
+<tr>
+<td><code>SavedViewSync</code></td>
+<td>UI → Backend</td>
+<td>notification</td>
+<td>persist/retrieve a saved query view</td>
+</tr>
+<tr>
+<td><code>RedactionPolicyUpdate</code></td>
+<td>UI → Backend</td>
+<td>request</td>
+<td>update active <code>RedactionRule</code> set</td>
+</tr>
+<tr>
+<td><code>ReconnectResume</code></td>
+<td>Backend → Backend (hooks side)</td>
+<td>request</td>
+<td>resume a session after transport drop</td>
+</tr>
+<tr>
+<td><code>Error</code></td>
+<td>either</td>
+<td>notification</td>
+<td>structured protocol-level error</td>
+</tr>
+</tbody></table></div>
+<p><strong>Sequence — normal attach and steady state:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>From → To</th>
+<th>Message</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>UI → Backend</td>
+<td><code>AttachRequest</code></td>
+<td>user opens the panel</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Backend → Hooks</td>
+<td>install trigger</td>
+<td>internal, not on the wire</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Hooks → Backend</td>
+<td><code>Snapshot</code></td>
+<td>initial keyframe</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Backend → UI</td>
+<td><code>AttachAck</code> + <code>Snapshot</code></td>
+<td>session now <code>Attached</code></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Hooks → Backend</td>
+<td><code>EventBatch</code></td>
+<td>continuous notification stream</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Backend → UI</td>
+<td><code>SnapshotDelta</code></td>
+<td>periodic notification</td>
+</tr>
+<tr>
+<td>7</td>
+<td>UI → Backend</td>
+<td><code>Query</code></td>
+<td>ad hoc investigation</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Backend → UI</td>
+<td><code>QueryResult</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Hooks ⇢ Backend</td>
+<td>(transport drop)</td>
+<td>hot reload; session → <code>Degraded</code>/<code>Reconnecting</code></td>
+</tr>
+<tr>
+<td>10</td>
+<td>Hooks → Backend</td>
+<td><code>ReconnectResume</code></td>
+<td>resumption token validated, session → <code>Attached</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Session Lifecycle State Machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Failure Edge?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Detached</code></td>
+<td>attach requested</td>
+<td><code>Attaching</code></td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>Attaching</code></td>
+<td>hooks respond within timeout</td>
+<td><code>Attached</code></td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>Attaching</code></td>
+<td>timeout / no target found</td>
+<td><code>Detached</code></td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>Attached</code></td>
+<td>unexpected transport drop</td>
+<td><code>Reconnecting</code></td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>Attached</code></td>
+<td>hook reports overload/error</td>
+<td><code>Degraded</code></td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>Degraded</code></td>
+<td>recovers within budget</td>
+<td><code>Attached</code></td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>Degraded</code></td>
+<td>exceeds recovery budget</td>
+<td><code>Reconnecting</code></td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>Reconnecting</code></td>
+<td>resumption token valid</td>
+<td><code>Attached</code></td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>Reconnecting</code></td>
+<td>resumption token invalid/expired</td>
+<td><code>Detached</code></td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>Reconnecting</code></td>
+<td>reconnect budget (<a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/numbers/#sec-4">§4</a> RTO) exceeded</td>
+<td><code>Detached</code></td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>Attached</code></td>
+<td>user detach</td>
+<td><code>Detached</code></td>
+<td>no</td>
+</tr>
+<tr>
+<td>any state</td>
+<td>fatal protocol error</td>
+<td><code>Detached</code></td>
+<td>yes</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 Time-Scrub Projection Model</h3>
+<p>A keyframe is captured every K commits (K derived in <a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/numbers/#sec-34">§34</a>). <code>ScrubCursor = { keyframeId, deltasApplied }</code>. Seeking forward from the cursor applies subsequent deltas in order; seeking to an
+earlier point replays from the nearest prior keyframe forward (deltas are not assumed invertible
+unless the adapter declares them so).</p>
+<h3 id="sec-8-8">8.8 Worked Example — Serializing a Cyclic Reactive Store</h3>
+<p>Store <code>S</code> has a computed signal <code>derived</code> whose value structurally embeds a back-reference to <code>S</code>
+itself (a common pattern: a store exposing <code>self</code> for chaining). The serializer visits <code>S</code>,
+assigns it <code>nodeId = N1</code>, walks into <code>derived</code>, and on encountering the embedded reference to <code>S</code>
+again, recognizes <code>N1</code> in the visited-<code>WeakMap</code> and emits <code>{ typeTag: &quot;ref&quot;, cycleRef: { target: &quot;N1&quot; } }</code> instead of recursing. The resulting payload is finite regardless of how many times <code>S</code>
+references itself, satisfying <a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/reliability/#inv-3">I3</a>.</p>
+<h3 id="sec-8-9">8.9 Malformed-Input Examples</h3>
+<ul>
+<li>An <code>EventBatch</code> containing an out-of-order <code>LogicalClock</code> value — quarantined per <a class="cite" href="/system-design-blueprints/systems/live-runtime-state-inspector/reliability/#inv-4">I4</a>, session
+flagged <code>Degraded</code> until the source stream is confirmed sane.</li>
+<li>A <code>Snapshot</code> referencing a <code>NodeId</code> absent from the id table (orphaned after a hot reload) —
+treated as a newly-mounted node; the orphan is flagged, never silently merged into stale state.</li>
+<li>A <code>TransportMessage</code> carrying a truncated CBOR frame — the decoder rejects the frame and
+requests retransmission rather than attempting partial decode.</li>
+</ul>
+<h3 id="sec-8-10">8.10 Failure-Path Example</h3>
+<p>A hot reload occurs mid-snapshot-serialization. The partial payload is discarded (never partially
+applied); the adapter is reinstalled; a fresh keyframe is requested; the UI shows a <code>Degraded</code>
+badge until the new keyframe arrives and the session returns to <code>Attached</code>.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

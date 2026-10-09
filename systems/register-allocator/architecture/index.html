@@ -1,0 +1,324 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Register Allocator — Architecture · Engineering Blueprints</title><meta name="description" content="Register Allocator, hld: §3 overview + §8 domain model. Build a production-grade register allocator that maps an unbounded set of virtual registers (vregs) in an SSA-form intermediate representation onto a fixed set of physical registers plus spill slots…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/register-allocator/">Register Allocator</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Register Allocator</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~22 weeks</li> <li>2,472 lines</li> <li>blueprint #144</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/register-allocator/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/register-allocator/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/register-allocator/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/register-allocator/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/register-allocator/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/register-allocator/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/register-allocator/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/register-allocator/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/register-allocator/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/register-allocator/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Register Allocator — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌───────────────────────────────────────────────────────────────────────┐
+│ Input: SSA IR (ra-ir) — vregs, RegisterFile, use/def constraints,      │
+│ calling-convention class, inline-asm constraint annotations            │
+└───────────────────────────────┬───────────────────────────────────────┘
+                                 │ Module + RegisterFile
+┌────────────────────────────────▼───────────────────────────────────────┐
+│ Liveness &amp; Live-Range Construction (Phase 2, §14) — ra-liveness         │
+│  dataflow fixpoint → per-vreg LiveRange { intervals, holes, uses, def } │
+└────────────────────────────────┬───────────────────────────────────────┘
+                                 │ LiveRanges  [cache boundary: invalidated
+                                 │  explicitly on IR mutation, never implicit]
+┌────────────────────────────────▼───────────────────────────────────────┐
+│ Interference Graph Construction (Phase 3, §15) — ra-igraph              │
+│  Sparse{adjacency,degree} | Dense{bitset,degree}, chosen per-function   │
+└──────────────┬──────────────────────────────────────┬──────────────────┘
+               │ chordal? (I12)                        │ non-chordal / JIT
+┌──────────────▼───────────────────┐    ┌──────────────▼──────────────────┐
+│ Chaitin-Briggs Graph Coloring    │    │ Linear Scan (Phase 8, §20)       │
+│ (Phase 4–6, §16–§18) — ra-graph  │    │ — ra-linear                      │
+│ simplify→coalesce→freeze→select  │    │ sorted active-list walk, Wimmer  │
+│ →spill (iterative, capped I8)    │    │ interval splitting, 2nd-chance   │
+└──────────────┬───────────────────┘    └──────────────┬──────────────────┘
+               │ Assignment (map, spills, remats)        │ Assignment
+               └───────────────────┬──────────────────────┘
+┌────────────────────────────────▼───────────────────────────────────────┐
+│ Resolver (Phase 7, §19) — ra-resolver                                   │
+│  applies Assignment: replaces vreg uses, inserts spill/reload/remat,    │
+│  splits every critical edge (I5), emits ordered phi-copy sequences      │
+└────────────────────────────────┬───────────────────────────────────────┘
+                                 │ Lowered IR, physical registers only
+┌────────────────────────────────▼───────────────────────────────────────┐
+│ Verifier (Phase 9, §21) — ra-verifier — I1–I14 checked; differential    │
+│ conformance against interpreter; fuzz corpus (liveness/alloc/resolver)  │
+└────────────────────────────────┬───────────────────────────────────────┘
+                                 │ Verified lowered IR
+┌────────────────────────────────▼───────────────────────────────────────┐
+│ Downstream backend (instruction scheduling, encoding) — out of scope   │
+└───────────────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>Input box.</strong> <code>ra-ir</code> owns <code>VirtReg</code>/<code>PhysReg</code>/<code>RegClass</code>/<code>RegisterFile</code>
+(<a class="cite" href="/system-design-blueprints/systems/register-allocator/design/#sec-11">§11</a>); the <code>RegisterFile</code> is a data table, not code — built once per target
+and shared (<code>Arc</code>) across every function allocated for that target.</p>
+<p><strong>Liveness box.</strong> A stand-alone analysis (<a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-3">P3</a>, <a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#sec-6">§6</a>) — the allocator never
+recomputes liveness inside its search loop; the cache-invalidation contract
+is explicit (mutate IR ⇒ caller must re-run Phase 2).</p>
+<p><strong>Interference-graph box.</strong> A pure function of <code>LiveRange</code>s (<a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-3">P3</a>); one-way
+data flow — any post-build IR mutation invalidates the graph and the caller
+must rebuild, never patch in place except through the coalescer&#39;s
+documented <code>remove</code>/<code>add_edge</code> API (<a class="cite" href="/system-design-blueprints/systems/register-allocator/design/#sec-11">§11</a>).</p>
+<p><strong>Coloring vs. linear-scan split.</strong> The router (<a class="cite" href="/system-design-blueprints/systems/register-allocator/reliability/#inv-12">I12</a>) engages the chordal
+fast path only when the verifier has certified strict SSA at entry; general
+Chaitin-Briggs is the universal fallback. Linear scan is selected
+explicitly by the caller&#39;s JIT/AOT profile flag, not inferred.</p>
+<p><strong>Resolver box.</strong> The single IR-mutation point (<a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-9">P9</a>, <a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#sec-6">§6</a>) — every other
+component only <em>decides</em>; the resolver is the only place decisions become
+IR edits, which makes miscompiles auditable to one file.</p>
+<p><strong>Verifier box.</strong> Runs after every allocation in debug/CI profiles (<a class="cite" href="/system-design-blueprints/systems/register-allocator/trade-offs/#adr-13">ADR-13</a>,
+<a class="cite" href="/system-design-blueprints/systems/register-allocator/trade-offs/#sec-9">§9</a>); the differential harness and fuzz corpus are the same box exercised at
+scale (Phase 9, <a class="cite" href="/system-design-blueprints/systems/register-allocator/build/#sec-21">§21</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Grammar — textual IR fixture format (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>module     ::= function+
+function   ::= &quot;fn&quot; ident &quot;(&quot; params &quot;)&quot; cconv &quot;{&quot; block+ &quot;}&quot;
+params     ::= (vreg &quot;:&quot; class (&quot;,&quot; vreg &quot;:&quot; class)*)?
+cconv      ::= &quot;sysv64&quot; | &quot;win64&quot; | &quot;aapcs64&quot;
+block      ::= label &quot;:&quot; phi* instr* terminator
+phi        ::= vreg &quot;=&quot; &quot;phi&quot; &quot;[&quot; (label &quot;:&quot; vreg (&quot;,&quot; label &quot;:&quot; vreg)*) &quot;]&quot;
+instr      ::= vreg &quot;=&quot; op operand (&quot;,&quot; operand)* constraint?
+             | op operand (&quot;,&quot; operand)*
+constraint ::= &quot;{&quot; (&quot;=r&quot; | &quot;=&amp;r&quot; | &quot;+r&quot; | &quot;=&quot; preg) &quot;}&quot;
+terminator ::= &quot;jmp&quot; label | &quot;br&quot; operand &quot;,&quot; label &quot;,&quot; label | &quot;ret&quot; operand?
+operand    ::= vreg | preg | imm</code></pre>
+<h3 id="sec-8-2">8.2 Live-range / interval schema</h3>
+<p><code>LiveRange { vreg, class, intervals: [Interval{start,end}], uses: [Use], def }</code> (types in <a class="cite" href="/system-design-blueprints/systems/register-allocator/design/#sec-11">§11</a>). Two <code>Interval</code>s in the same vreg&#39;s list never
+overlap (<a class="cite" href="/system-design-blueprints/systems/register-allocator/reliability/#inv-3">I3</a>); a <em>hole</em> is the gap between consecutive intervals — the vreg
+is dead there, so another vreg&#39;s interval may legally occupy that program-
+point range without interfering (<a class="cite" href="/system-design-blueprints/systems/register-allocator/blueprint/#sec-15-2">§15.2</a> precision requirement).</p>
+<h3 id="sec-8-3">8.3 Interference-graph construction rule</h3>
+<p>For each <code>ProgramPoint p</code>, the set <code>Live(p)</code> of vregs live at <code>p</code> forms a
+clique: every pair <code>(a, b) ∈ Live(p) × Live(p), a ≠ b</code> gets an edge. This is
+the single construction rule; sparse and dense representations (<a class="cite" href="/system-design-blueprints/systems/register-allocator/design/#sec-11">§11</a>) are
+storage choices over the same abstract graph, never different graphs.</p>
+<h3 id="sec-8-4">8.4 Coloring state machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entry Condition</th>
+<th>Action</th>
+<th>Exit</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Build</td>
+<td>graph absent</td>
+<td>construct interference graph (<a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#sec-8-3">§8.3</a>)</td>
+<td>→ Simplify</td>
+</tr>
+<tr>
+<td>Simplify</td>
+<td>∃ node degree &lt; K, not move-related</td>
+<td>push node, remove from graph</td>
+<td>→ Simplify or Coalesce</td>
+</tr>
+<tr>
+<td>Coalesce</td>
+<td>Simplify stuck, ∃ coalescable move pair</td>
+<td>merge iff George/Briggs test passes (<a class="cite" href="/system-design-blueprints/systems/register-allocator/reliability/#inv-7">I7</a>)</td>
+<td>→ Simplify</td>
+</tr>
+<tr>
+<td>Freeze</td>
+<td>Coalesce stuck, ∃ move-related node degree &lt; K</td>
+<td>drop its move-related flag</td>
+<td>→ Simplify</td>
+</tr>
+<tr>
+<td>Spill (optimistic)</td>
+<td>Freeze stuck, all remaining nodes degree ≥ K</td>
+<td>push highest-priority node anyway (optimistic)</td>
+<td>→ Simplify</td>
+</tr>
+<tr>
+<td>Select</td>
+<td>stack non-empty</td>
+<td>pop node, assign lowest-numbered free color</td>
+<td>→ Select or Done</td>
+</tr>
+<tr>
+<td>Actual Spill</td>
+<td>Select finds no free color for popped node</td>
+<td>mark for spill code (Phase 6, <a class="cite" href="/system-design-blueprints/systems/register-allocator/build/#sec-18">§18</a>), restart Build</td>
+<td>→ Build</td>
+</tr>
+<tr>
+<td>Done</td>
+<td>stack empty, no actual spills pending</td>
+<td>emit <code>Assignment</code></td>
+<td>terminal</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Worked example</h3>
+<p>Function with vregs <code>v1,v2,v3</code>, class <code>int</code>, 2 physical registers
+<code>{R0,R1}</code>. Liveness: <code>v1:[0,6)</code>, <code>v2:[2,8)</code>, <code>v3:[4,6)</code>. Interference at
+<code>p=4</code>: <code>Live(4)={v1,v2,v3}</code> ⇒ clique <code>{v1,v2},{v1,v3},{v2,v3}</code> — all three
+mutually interfere, degree 2 each, K=2. Simplify cannot remove any node
+(degree 2 ≥ K=2 for all). Spill (optimistic): pick <code>v3</code> (shortest range,
+lowest spill weight per <a class="cite" href="/system-design-blueprints/systems/register-allocator/trade-offs/#adr-7">ADR-07</a> lacking use-count data here, treated as
+lowest priority) — push anyway. Remaining <code>{v1,v2}</code> degree 1 &lt; K=2: both
+simplify. Select pops in reverse: <code>v2→R0</code>, <code>v1→R1</code> (no shared neighbor
+constraint since stack order), then <code>v3</code> — its neighbors <code>v1=R1, v2=R0</code>
+occupy both colors ⇒ actual spill. <code>v3</code> is spilled to a stack slot; the
+resolver inserts a store after <code>v3</code>&#39;s def and a load before its one use in
+<code>[4,6)</code>.</p>
+<h3 id="sec-8-6">8.6 Malformed-input example</h3>
+<p>Input: a phi node in block <code>B2</code> referencing predecessor <code>B9</code>, but the CFG
+has no edge <code>B9→B2</code>. Detection: the liveness pass&#39;s dominance-relative
+phi-operand walk (Phase 2, <a class="cite" href="/system-design-blueprints/systems/register-allocator/build/#sec-14">§14</a>) finds no matching predecessor and returns
+<code>LivenessError::DanglingPhiOperand{block: B2, phi: v7, missing_pred: B9}</code>;
+the allocator refuses to proceed (fail-closed, not a best-effort guess).
+Fixture: <code>conformance/buckets/liveness/malformed_dangling_phi.ron</code>.</p>
+<h3 id="sec-8-7">8.7 Failure-path example</h3>
+<p>A synthetic bug is injected (test-only): the interference-graph builder
+skips one clique edge for a specific program point, so two interfering
+vregs are not connected. Chaitin-Briggs then legally assigns them the same
+physical register (no edge ⇒ no constraint). <code>ra-verifier</code>&#39;s <a class="cite" href="/system-design-blueprints/systems/register-allocator/reliability/#inv-1">I1</a> check
+(adjacency-vs-assignment scan) recomputes interference independently from
+<code>LiveRange</code>s (not from the graph under test) and detects the clobber,
+emitting <code>verifier_violations_total{kind=&quot;clobber&quot;}=1</code> and rejecting the
+assignment before it reaches the resolver. Fixture:
+<code>conformance/buckets/verifier/injected_missing_edge.ron</code> — this is the
+canonical regression test proving the verifier does not merely re-check the
+same graph that produced the bug.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-1">P1</a> — SSA-aware allocation.</strong> Input IR is strict SSA; phi nodes are not lowered before allocation. Tradeoff: the resolver must handle phi-copy emission explicitly. Violating it: loses the chordality fast path (<a class="cite" href="/system-design-blueprints/systems/register-allocator/reliability/#inv-12">I12</a>) and forces general Chaitin-Briggs on every function.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-2">P2</a> — Two allocators, one trait.</strong> <code>GraphAllocator</code> (AOT) and <code>LinearScanAllocator</code> (JIT) both implement <code>Allocator</code> (<a class="cite" href="/system-design-blueprints/systems/register-allocator/design/#sec-11">§11</a>). Tradeoff: double the coloring-quality-vs-speed test surface. Violating it: JIT consumers pay graph-coloring latency they cannot afford (<a class="cite" href="/system-design-blueprints/systems/register-allocator/numbers/#sec-4">§4</a>).</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-3">P3</a> — Liveness is a stand-alone, cached analysis.</strong> Never recomputed inside the allocator&#39;s search loop; invalidated explicitly on IR mutation. Tradeoff: caller must track a cache-validity flag. Violating it: pays O(N) liveness cost O(N²) times inside coloring.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-4">P4</a> — Determinism via sorted collections.</strong> Every inner-loop collection is <code>BTreeMap</code>/<code>BinaryHeap</code> with a stable comparator; <code>HashMap</code> is forbidden there. Tradeoff: slightly higher constant factor than hashing. Violating it: breaks <a class="cite" href="/system-design-blueprints/systems/register-allocator/reliability/#inv-9">I9</a>, and reproducible builds become impossible.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-5">P5</a> — No global state.</strong> Every pass receives its inputs explicitly (<code>Module</code>, <code>Liveness</code>, <code>Config</code>); no thread-local or process-global allocator state. Tradeoff: more parameters threaded through call sites. Violating it: breaks <code>rayon</code> cross-function parallelism (<a class="cite" href="/system-design-blueprints/systems/register-allocator/trade-offs/#adr-23">ADR-23</a>) via hidden shared mutable state.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-6">P6</a> — The verifier is non-negotiable.</strong> Runs after every allocation in debug/CI; a verifier finding blocks the pipeline. Tradeoff: adds verifier latency to every build (amortized by sampling in release, <a class="cite" href="/system-design-blueprints/systems/register-allocator/trade-offs/#adr-13">ADR-13</a>). Violating it: a miscoloring reaches the emitted binary.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-7">P7</a> — Spill weight is global, not locally greedy.</strong> The cost model scores every candidate before picking one to spill; no first-fit lookahead. Tradeoff: one extra O(V) pass per spill round. Violating it: spills a vreg that a one-step-ahead heuristic would have kept, degrading code quality unpredictably.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-8">P8</a> — Coalescing is conservative by default.</strong> Chaitin-Briggs conservative merge is the baseline; George-Appel iterated coalescing is opt-in (<code>Config::coalescer</code>). Tradeoff: default configuration leaves some optimal coalescings on the table. Violating it (making iterated the default) risks compile-time regressions on pathological move-heavy functions without an escape hatch.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-9">P9</a> — The resolver is the sole IR-mutation point.</strong> Every other pass produces a decision (<code>Assignment</code>, <code>CoalesceReport</code>); only <code>ra-resolver::resolve</code> edits the IR. Tradeoff: decisions must be fully serializable before application. Violating it: miscompiles become un-auditable — no single file to check.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-10">P10</a> — Calling convention is a typed constraint, not a fixup pass.</strong> ABI data lives in <code>CallingConvention</code> tables consumed by the allocator as constraints (<a class="cite" href="/system-design-blueprints/systems/register-allocator/design/#sec-11">§11</a>), never patched in after the fact. Tradeoff: more upfront ABI plumbing per target. Violating it: optimization passes see an unconstrained allocation and later fixups can violate <a class="cite" href="/system-design-blueprints/systems/register-allocator/reliability/#inv-6">I6</a>.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-11">P11</a> — The fuzz canary runs continuously in CI, not ad hoc.</strong> Every PR runs all four fuzz targets for 5 minutes (<a class="cite" href="/system-design-blueprints/systems/register-allocator/numbers/#m-11">M11</a>, <a class="cite" href="/system-design-blueprints/systems/register-allocator/numbers/#sec-28">§28</a>). Tradeoff: CI wall-clock cost. Violating it: regressions surface in production instead of CI.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-12">P12</a> — Rematerialization is preferred to spill/reload when free.</strong> A side-effect-free, operand-invariant defining instruction is re-executed at the use site instead of round-tripping through memory. Tradeoff: extra static code size at each remat site. Violating it: pays a memory round trip for a value cheaper to recompute (e.g., a load-immediate).</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-13">P13</a> — The chordal fast path is opportunistic, never assumed.</strong> The verifier certifies strict SSA before the simplicial-elimination ordering is used (<a class="cite" href="/system-design-blueprints/systems/register-allocator/reliability/#inv-12">I12</a>); general Chaitin-Briggs is always available as fallback. Tradeoff: an extra certification pass per function. Violating it: silently mis-colors the moment an upstream pass breaks the SSA property.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/register-allocator/architecture/#p-14">P14</a> — Iteration is always bounded.</strong> Every loop that can in principle fail to converge (spill/freeze, George-Appel iteration) has a configurable cap (<a class="cite" href="/system-design-blueprints/systems/register-allocator/reliability/#inv-8">I8</a>, default 100) with an emitted diagnostic on exhaustion. Tradeoff: a pathological function may hit the cap and fall back to a worse (but terminating) allocation. Violating it risks an unbounded compile-time hang — the single worst JIT failure mode.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

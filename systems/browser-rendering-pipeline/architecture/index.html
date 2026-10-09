@@ -1,0 +1,284 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Browser Rendering Pipeline — Architecture · Engineering Blueprints</title><meta name="description" content="Browser Rendering Pipeline, hld: §3 overview + §8 domain model. Build, from scratch in Rust, a per-frame browser rendering pipeline: styled DOM + viewport → composited frames through a staged document lifecycle (Style → Box/Render tree → Layout/FragmentTree →…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/web-browsers-collaboration/">Web, Browsers &amp; Collaboration</a> </li><li> <a href="/system-design-blueprints/systems/browser-rendering-pipeline/">Browser Rendering Pipeline</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:255"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/web-browsers-collaboration/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Web, Browsers &amp; Collaboration</span></a> </p> <h1>Browser Rendering Pipeline</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~36 weeks</li> <li>3,031 lines</li> <li>blueprint #260</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/browser-rendering-pipeline/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/browser-rendering-pipeline/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Browser Rendering Pipeline — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Pipeline Topology</h3>
+<pre class="diagram"><code> FrameScheduler  (rAF callbacks + vsync, 16.6ms budget)  --update_lifecycle(doc, target)--&gt;
+ rp-pipeline: DocumentLifecycle (LifecycleStage) --- gates each stage by InvalidationFlags; skips Clean, runs forward only
+==== TRUST BOUNDARY: untrusted DOM/CSS sizes (host/124) =======================
+  viewport, lengths, z-index, child counts -&gt; all geometry/recursion clamped + saturating; no panic on adversarial input
+        |
++------------------------ MAIN THREAD --------------------------+
+|  rp-style    match(258)+Cascade ----&gt; ComputedStyle (Arc)     |  NEEDS_STYLE
+|  rp-boxtree  BoxTree+layout ---------&gt; FragmentTree            |  NEEDS_LAYOUT
+|  rp-paint    Prepaint:PropertyTrees -&gt;[retained]              |  NEEDS_PAINT
+|              Paint:walk paint order -&gt; DisplayList(+chunks)    |
++-------------------------------------------|--------------------+
+==== CONCURRENCY BOUNDARY: Commit (snapshot) = the ONLY main&lt;-&gt;compositor sync ; after Commit, compositor touches NO main state
++--------------------- COMPOSITOR THREAD ----v------------------+
+|  rp-composite                                                  |
+|    layerize: CompositingReason -&gt; LayerTree                    |  NEEDS_COMPOSITE
+|    raster:   RasterTask replays DisplayList chunks via 169     |
+|              -&gt; Tile bitmaps  [tile cache retained]            |
+|    assemble: apply TransformTree -&gt; CompositorFrame -&gt; display |
++----------------------------------------------------------------+
+==== PERSISTENCE BOUNDARY (retained across frames): PropertyTrees (prepaint) + Tile cache (raster)
+  -&gt; NEEDS_COMPOSITE-only frame re-applies nodes, re-rasters dirty tiles only
+
+ data flow:  ComputedStyle -&gt; FragmentTree -&gt; DisplayList -&gt; LayerTree -&gt; CompositorFrame</code></pre>
+<h3 id="sec-3-2">3.2 Component Responsibilities</h3>
+<ul>
+<li><strong>rp-style</strong> (P1/P2) — Style stage, main thread. In: styled <code>Element</code>s + stylesheets + 258 matcher. Out: one <code>Arc&lt;ComputedStyle&gt;</code>/element. Gathers <code>MatchedRules</code> (decls+<code>Origin</code>+<code>Specificity</code>+source order), runs <code>Cascade</code> (origin → !important → specificity → source order), applies inheritance + initial/computed-value resolution via <code>PropertyId</code>/property DB; <code>StyleResolver</code> consults the sharing cache. Invariant: each <code>PropertyId</code> → exactly one computed value; identical input subtrees share one <code>Arc&lt;ComputedStyle&gt;</code>.</li>
+<li><strong>rp-boxtree</strong> (P3/P4) — Box/Render tree + layout driver. In: <code>Arc&lt;ComputedStyle&gt;</code> tree + viewport. Out: immutable <code>FragmentTree</code>. P3 resolves <code>display</code>, generates <code>Anonymous</code> boxes, assigns <code>FormattingContext</code>, collects <code>Replaced</code>/<code>OutOfFlow</code>; P4 runs block (margins+collapsing, widths/heights, BFC) + inline (line boxes, text runs) layout (flex/grid minimal, prod=124) → <code>Fragment</code>s with <code>LayoutRect</code>. Invariant: <code>FragmentTree</code> immutable per frame; one <code>Box</code> → ≥1 <code>Fragment</code> (fragmentation).</li>
+<li><strong>rp-paint</strong> (P5/P6/P7) — Prepaint + Paint. In: <code>FragmentTree</code>. Out: <code>PropertyTrees</code> + <code>DisplayList</code>. P5 establishes <code>StackingContext</code>s + CSS 2.2 sec. 9.9 paint order; P6 builds Transform/Clip/Effect/Scroll trees, assigns <code>PaintPropertyNode</code> ids, stamps <code>PropertyTreeState</code>/chunk; P7 walks fragments in paint order emitting <code>DisplayItem</code>s grouped into <code>PaintChunk</code>s with <code>visual_rect</code> culling + <code>RasterInvalidation</code>. Invariant: <code>DisplayList</code> order = paint order (≠ DOM order); each item carries a <code>PropertyTreeState</code>.</li>
+<li><strong>property trees</strong> (P6, retained) — <code>TransformTree</code>/<code>ClipTree</code>/<code>EffectTree</code>/<code>ScrollTree</code> of <code>PaintPropertyNode</code>s decoupling paint from geometry. In: fragment geometry + style. Out: node ids referenced by <code>PaintChunk</code>/<code>CompositorLayer</code>. Core RenderingNG idea: scroll/composited transform mutates one node WITHOUT re-paint; compositor re-applies. Invariant: retained across frames; structural change dirties paint, value-only change stays <code>NEEDS_COMPOSITE</code>.</li>
+<li><strong>rp-composite</strong> (P8/P9/P10) — Compositor thread, post-Commit. In: <code>Commit</code> snapshot (<code>DisplayList</code>+<code>PropertyTrees</code>). Out: <code>CompositorFrame</code>. P8 layerizes via <code>CompositingReason</code> (Transform3D/WillChange/Animation/ScrollDependent/Overlap/…) + squashing → <code>LayerTree</code>; P9 tiles layers, schedules <code>RasterTask</code>s replaying chunks through 169 → <code>Tile</code> bitmaps (cache + invalidation); P10 applies <code>TransformTree</code> → <code>CompositorFrame</code>, runs off-main scroll + composited animation. Invariant: touches no main-thread state post-Commit; only invalidated tiles re-raster.</li>
+<li><strong>rp-pipeline</strong> (P0/P11/P12) — Orchestrator. Owns <code>DocumentLifecycle</code>/<code>LifecycleStage</code>, <code>InvalidationFlags</code>, <code>FrameScheduler</code>, <code>Commit</code>, <code>RenderObjectId</code>. <code>update_lifecycle(doc, target)</code> runs only dirty stages in order, skipping clean. Hierarchical invalidation <code>NEEDS_STYLE</code>⊇layout⊇paint⊇composite; <code>NEEDS_COMPOSITE</code> alone → compositor only (cheap/jank-free). <code>FrameScheduler</code> drives rAF + vsync (&quot;update the rendering&quot;), produces the <code>Commit</code>. Invariant: invalidation moves lifecycle backward; a frame walks forward; Commit is the single sync handoff.</li>
+<li><strong>rp-cli</strong> (P0) — The <code>rpipe</code> binary (std): <code>frame</code>, <code>dump-stage</code> (<code>ComputedStyle</code>/<code>FragmentTree</code>/<code>DisplayList</code>/<code>LayerTree</code>), <code>trace-lifecycle</code> (transitions + dirty bits), <code>raster</code> (PNG via 169), <code>bench</code> (stage timing + budget). In: scene+viewport; out: PNG/JSON/trace. Invariant: thin driver — orchestration lives in <code>rp-pipeline</code>.</li>
+</ul>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Stages, Trees &amp; the Lifecycle</h2>
+<p>A <strong>staged lifecycle</strong>: each stage consumes the prior stage&#39;s immutable output, gated by an <code>InvalidationFlags</code> dirty bit. <code>update_lifecycle(doc, target)</code> walks forward skipping clean stages; invalidation only ever moves lifecycle <em>backward</em>.</p>
+<h3 id="sec-8-1">8.1 Stage data model (the spine)</h3>
+<p>Each stage = pure function <code>prev_output → output</code>, gated by one dirty bit, pinned to one thread.</p>
+<pre class="diagram"><code>stage             | input                          | output            | dirty bit       | thread       | owning crate
+------------------|--------------------------------|-------------------|-----------------|--------------|-------------
+Style             | styled DOM + stylesheets (124) + matcher(258)-&gt;MatchedRules | ComputedStyle/elt | NEEDS_STYLE     | main       | rp-style
+Box/Render tree   | ComputedStyle tree             | BoxTree           | NEEDS_LAYOUT    | main         | rp-boxtree
+Layout            | BoxTree                        | FragmentTree      | NEEDS_LAYOUT    | main         | rp-boxtree
+CompositingInputs | FragmentTree                   | StackingContext + paint-order list | NEEDS_PAINT | main      | rp-paint
+Prepaint          | FragmentTree + stacking        | PropertyTrees + PaintPropertyNode ids | NEEDS_PAINT | main   | rp-paint
+Paint             | FragmentTree + PropertyTrees (paint order) | DisplayList (+ PaintChunks) | NEEDS_PAINT | main  | rp-paint
+Commit            | DisplayList + PropertyTrees    | Commit (snapshot) | NEEDS_COMPOSITE | main-&gt;comp   | rp-pipeline
+Layerize/Raster   | DisplayList + chunks           | LayerTree + Tiles (RasterTask via 169) | NEEDS_COMPOSITE | compositor | rp-composite
+Composite         | LayerTree + TransformTree      | CompositorFrame   | NEEDS_COMPOSITE | compositor   | rp-composite</code></pre>
+<p>Data ownership: <code>ComputedStyle</code> Arc-shared (sharing cache); <code>FragmentTree</code> immutable per frame (one box → N fragments); <code>DisplayList.items: Vec&lt;DisplayItem&gt;</code> flat, sliced into <code>PaintChunk</code> ranges; <code>Commit</code> = the <em>only</em> main→compositor handoff (compositor must not touch main state after).</p>
+<h3 id="sec-8-2">8.2 DocumentLifecycle state machine</h3>
+<p><code>LifecycleStage</code> totally ordered; forward edges advance one stage iff its gating bit is set (else skipped); backward edges = <em>invalidation</em> (DOM/style mutation), clearing <code>stage</code> to the dirtied point.</p>
+<pre class="diagram"><code>forward walk: Clean -&gt; Style -&gt; Layout -&gt; CompositingInputs -&gt; Prepaint -&gt; Paint -&gt; Commit -&gt; Composite -&gt; Clean
+  (each edge: run iff gate set, else skip)  gate: -&gt;Style/Layout/CIn/Prepaint/Paint by NEEDS_STYLE|LAYOUT|PAINT (hierarchical, 8.3); -&gt;Commit/Composite by NEEDS_COMPOSITE
+backward invalidation edges (mutation -&gt; set bit -&gt; reset stage):
+  trigger                                  | sets            | reset to
+  attr/class/inline-style/sheet mutation   | NEEDS_STYLE     | Style
+  geometry-affecting computed-value change | NEEDS_LAYOUT    | Layout
+  color/bg/shadow (no geometry) change     | NEEDS_PAINT     | CompositingInputs
+  scroll/composited transform/opacity tick | NEEDS_COMPOSITE | Commit (main stays Clean)</code></pre>
+<p>Invariant: <code>target</code> clamps the walk; e.g. hit-testing requests <code>update_lifecycle(doc, Paint)</code> (no compositor work), a vsync frame requests <code>Composite</code>.</p>
+<h3 id="sec-8-3">8.3 Hierarchical invalidation</h3>
+<p>Setting a bit implies all <em>downstream</em> bits — strictly nested supersets:</p>
+<pre class="diagram"><code>NEEDS_STYLE      =&gt; + NEEDS_LAYOUT + NEEDS_PAINT + NEEDS_COMPOSITE   (full main + comp)
+NEEDS_LAYOUT     =&gt;                + NEEDS_PAINT + NEEDS_COMPOSITE
+NEEDS_PAINT      =&gt;                              + NEEDS_COMPOSITE
+NEEDS_COMPOSITE  =&gt; compositor-only             (Style/Layout/Paint stay Clean -&gt; cheap, jank-free)</code></pre>
+<p>This is <em>why</em> scroll/composited-animation are cheap: they set only <code>NEEDS_COMPOSITE</code>, skipping all main-thread stages.</p>
+<h3 id="sec-8-4">8.4 CSS painting order &amp; stacking contexts</h3>
+<p>A <code>StackingContext { z_index, establishes }</code> is <strong>established</strong> by: root; positioned + <code>z_index != auto</code>; <code>opacity &lt; 1</code>; any <code>transform</code>/<code>filter</code>/<code>will-change</code>/<code>clip-path</code>; <code>isolation:isolate</code>. Paint order is per-context, recursive, NOT DOM order (CSS 2.2 sec. 9.9):</p>
+<pre class="diagram"><code>paint_stacking_context(ctx):                  // emit DisplayItems in this order
+  1. ctx background + borders
+  2. child stacking contexts with z-index &lt; 0   (ascending z, then source order)
+  3. in-flow, non-inline, non-positioned block-level descendants
+  4. non-positioned floats
+  5. in-flow inline-level descendants (line boxes)
+  6. child stacking contexts z-index == 0/auto + positioned non-context descendants (source order)
+  7. child stacking contexts with z-index &gt; 0    (ascending z, then source order)</code></pre>
+<p>Hit testing = the reverse traversal (front-to-back: 7-&gt;1), first opaque hit wins. Tie-break within a z-bucket = source order (stable). <code>z_index</code> clamped to <code>i32</code>; equal z falls to source order — no ambiguity.</p>
+<h3 id="sec-8-5">8.5 Property-tree model</h3>
+<p>Four trees decouple paint from geometry (the RenderingNG core idea). Each tree is a flat <code>Vec&lt;PaintPropertyNode&gt;</code>; a node = <code>parent_id + local state</code>; effective value = compose(parent..root).</p>
+<pre class="diagram"><code>tree           | PaintPropertyNode local state         | node id type   | mutated by (composite-only)
+---------------|---------------------------------------|----------------|-----------------------------
+TransformTree  | local affine (translate/scale/rotate) | TransformId    | composited transform anim, scroll
+ClipTree       | clip rect / rounded-rect              | ClipId         | overflow clip changes
+EffectTree     | opacity, blend, filter, isolation     | EffectId       | composited opacity anim
+ScrollTree     | scroll offset + bounds                | ScrollId       | scroll (off-main)</code></pre>
+<p><code>PaintChunk.property_state: PropertyTreeState</code> = 4-tuple <code>(TransformId, ClipId, EffectId, ScrollId)</code>, the &quot;current node&quot; in each tree at emit. A <code>DisplayItem</code> references geometry indirectly — no absolute coords beyond its chunk&#39;s <code>visual_rect</code>; the compositor resolves position by composing the chunk&#39;s <code>TransformId</code> chain; <code>BeginClip{node:ClipId}</code>/<code>BeginEffect{node:EffectId}</code> push/pop inline. <strong>Consequence</strong>: scroll/composited transform updates one <code>TransformTree</code>/<code>ScrollTree</code> node and re-composites — <em>no repaint</em>.</p>
+<h3 id="sec-8-6">8.6 Worked example — one frame</h3>
+<p>Input: <code>&lt;div style=&quot;transform:translateX(10px)&quot;&gt;&lt;p&gt;hi&lt;/p&gt;&lt;/div&gt;</code>, viewport 800x600.</p>
+<pre class="diagram"><code>Style:    div -&gt; ComputedStyle{display:block, transform:translateX(10px)}; p -&gt; {display:block}; &quot;hi&quot; inherits color
+Box tree: Box{Block, div} -&gt; Box{Block, p} -&gt; Box{Inline/Text &quot;hi&quot;}
+Layout:   FragmentTree: Fragment{div, 0,0,800,18} &gt; Fragment{p, 0,0,800,18} &gt; Fragment{Text &quot;hi&quot;, 0,0,14,18}
+          (transform does NOT affect layout rect — it is a paint/composite property)
+Stacking: div establishes a stacking context (has transform)
+Prepaint: TransformTree[T0=identity(root), T1=translate(10,0) parent=T0]; ClipTree[C0=viewport] EffectTree[E0=root] ScrollTree[S0=root]; div+descendants chunk.property_state=(T1,C0,E0,S0)
+Paint:    DisplayList.items=[Text{&quot;hi&quot;, visual_rect 0,0,14,18}]; chunks=[PaintChunk{items:0..1, state:(T1,C0,E0,S0), visual_rect:0,0,14,18}]
+Commit:   snapshot{DisplayList, PropertyTrees} -&gt; compositor
+Layerize: div has transform =&gt; CompositingReason::Transform3D; LayerTree.layers=[CompositorLayer{transform_node:T1, content:0..1, reasons:[Transform3D]}]
+Raster:   tile 256x256 covering visual_rect; RasterTask replays chunk via 169 -&gt; tile bitmap (Ready)
+Composite:CompositorFrame{layers, transforms}; apply T1 =&gt; &quot;hi&quot; drawn at x=10</code></pre>
+<h3 id="sec-8-7">8.7 Worked example — invalidation</h3>
+<p>Three mutations on a clean document; each sets the minimal bit:</p>
+<pre class="diagram"><code>mutation                          | bit set         | reset to | stages re-run                          | cost
+----------------------------------|-----------------|----------|----------------------------------------|--------
+toggle class -&gt; color:red (no geom)| NEEDS_PAINT    | CIn      | CIn,Prepaint,Paint,Commit,Layerize,Raster,Composite | ~paint
+toggle class -&gt; width:50%-&gt;80%     | NEEDS_LAYOUT    | Layout   | Layout..Composite (Style stays Clean)  | ~layout
+scroll composited overflow container| NEEDS_COMPOSITE| Commit   | update ScrollTree node only; re-composite, NO repaint | &lt;1ms, no jank</code></pre>
+<p>The scroll case is the payoff: <code>update_lifecycle(doc, Composite)</code> finds Style/Layout/Paint clean, skips them, bumps one <code>ScrollTree.PaintPropertyNode.offset</code>, and the compositor thread re-applies it — well under the 16.6ms budget with zero main-thread work.</p>
+<h3 id="sec-8-8">8.8 Malformed / edge cases</h3>
+<pre class="diagram"><code>case                        | handling
+----------------------------|-----------------------------------------------------------------
+deep nesting (&gt;10k boxes)   | layout/paint explicit-stack iterative (no recursion); depth cap returns Err, never panics
+huge z_index (e.g. i32::MAX)| clamped to i32; ordering by total Ord (well-defined), ties -&gt; source order, no overflow in sort
+0-area fragment (w=0/h=0)   | LayoutRect kept (hit-test/box-tree integrity), culled in Paint (empty visual_rect -&gt; no emit, no RasterTask)
+offscreen tile              | Tile outside viewport stays RasterState::Missing (raster-on-demand); scheduled on scroll-in -&gt; bounded raster memory
+cyclic-ish style ref / loop | trees acyclic by construction (parent_id &lt; self in flat Vec); builder asserts monotonic ids -&gt; cycle unrepresentable
+empty DisplayList           | LayerTree has 0 content layers; CompositorFrame = clear frame (valid)</code></pre>
+<h3 id="sec-8-9">8.9 Main -&gt; Commit -&gt; Compositor handoff</h3>
+<pre class="diagram"><code> MAIN THREAD                                 COMPOSITOR THREAD
+ -----------                                 -----------------
+ FrameScheduler: vsync tick / rAF
+ update_lifecycle(doc, Composite); run dirty Style..Paint
+ build Commit{DisplayList, PropertyTrees}
+      |====== Commit (snapshot, sync) ======&gt;  receive Commit
+   (main free: next rAF, input)                 Layerize -&gt; LayerTree
+                                                 schedule RasterTasks (tiles); replay chunks via 169
+                                                 CompositorFrame{layers, transforms}
+                                                 apply TransformTree -&gt; display (vsync)
+      &lt;............ ack / damage region ..........|
+ (scroll/anim while main busy: compositor mutates Scroll/Transform node, re-composites alone)</code></pre>
+<p><code>Commit</code> = the single sync point: a handoff of <code>DisplayList</code> + <code>PropertyTrees</code>. Post-Commit the compositor owns its snapshot, main begins the next frame; the two never share mutable state — the data-race class Rust eliminates at compile time.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

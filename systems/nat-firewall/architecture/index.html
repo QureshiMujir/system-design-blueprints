@@ -1,0 +1,346 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>NAT / Firewall — Architecture · Engineering Blueprints</title><meta name="description" content="NAT / Firewall, hld: §3 overview + §8 domain model. 158 — NAT / Firewall is a stateful packet-classification, connection-tracking, and network-address-translation dataplane: a five-hook packet path (PREROUTING, INPUT, FORWARD, OUTPUT, POSTROUTING, per…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/security-cryptography/">Security &amp; Cryptography</a> </li><li> <a href="/system-design-blueprints/systems/nat-firewall/">NAT / Firewall</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:118"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/security-cryptography/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Security &amp; Cryptography</span></a> </p> <h1>NAT / Firewall</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux</li> <li>14 phases</li> <li>~47 weeks</li> <li>2,306 lines</li> <li>blueprint #158</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/nat-firewall/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/nat-firewall/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/nat-firewall/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/nat-firewall/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/nat-firewall/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/nat-firewall/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/nat-firewall/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/nat-firewall/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/nat-firewall/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/nat-firewall/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:NAT / Firewall — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code> NIC RX
+   │
+   ▼
+ XDP hook (fastpath, §24 Phase 12) ──optional DDoS scrub / early drop──┐
+   │ pass-through (default path)                                       │
+   ▼                                                                    │
+ PREROUTING  ── DNAT (§17), conntrack lookup/create (§15,§16) ──────────┤
+   │                                                                    │
+   ▼                                                                    │
+ Routing decision (delegated to host OS/oracle, §1 boundaries)          │
+   │                              │                                     │
+   ▼ local                        ▼ forward                             │
+ INPUT (policy)              FORWARD (policy)                           │
+   │                              │                                     │
+   ▼                              ▼                                     │
+ Local delivery              OUTPUT (locally-originated, policy)        │
+                                   │                                     │
+                                   ▼                                    │
+                             POSTROUTING ── SNAT/masquerade (§17) ──────┘
+                                   │
+                                   ▼
+                                NIC TX
+
+        ┌───────────────────────────────────────────┐
+        │ nf-conntrack: single 5-tuple+zone table     │◄── consulted at every
+        │ (I1, I9); TCP/UDP/ICMP state (§8.3, §8.4)   │    hook above
+        └───────────────────────────────────────────┘</code></pre>
+<p>Four properties hold everywhere downstream. <strong>PREROUTING/POSTROUTING bracket the
+routing decision</strong> because DNAT must run before the destination decides the egress
+interface, and SNAT must run after the egress interface is known (P1, P3). <strong>One
+conntrack table, one lookup, both directions</strong> — a flow&#39;s original and reply 5-tuples
+both hash into the same table (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-1">I1</a>), so a single lookup resolves either direction (P2).
+<strong>NAT is orthogonal to policy</strong> — DNAT/SNAT rewrite tuples at PRE/POSTROUTING; accept/
+drop decisions are made at INPUT/FORWARD/OUTPUT; neither hook performs the other&#39;s job
+(P3, <a class="cite" href="/system-design-blueprints/systems/nat-firewall/trade-offs/#adr-2">ADR-02</a>). <strong>The control plane is decoupled from the data plane</strong> — <code>nf-rules</code> and
+<code>nf-control</code> mutate a <code>RuleSet</code> snapshot; the packet path only ever reads an immutable,
+atomically-swapped generation of it (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-10">I10</a>, P11).</p>
+<p><strong>Per box:</strong> NIC RX hands a frame to either the XDP hook (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/build/#sec-24">§24</a>, opt-in fastpath, verified-
+equivalent rule subset, <a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-13">I13</a>) or the default in-process path. <strong>PREROUTING</strong> applies DNAT
+and performs the first conntrack lookup/creation. <strong>Routing decision</strong> is delegated to
+the host OS per <a class="cite" href="/system-design-blueprints/systems/nat-firewall/blueprint/#sec-1">§1</a>; this box only consumes &quot;local&quot; vs &quot;forward.&quot; <strong>INPUT/FORWARD</strong> apply
+policy (<code>RuleSet</code> evaluation, <a class="cite" href="/system-design-blueprints/systems/nat-firewall/build/#sec-14">§14</a>). <strong>OUTPUT</strong> applies policy to locally-originated
+traffic. <strong>POSTROUTING</strong> applies SNAT/masquerade using the egress interface now known.
+<strong>nf-conntrack</strong> is drawn once, at the center, because every hook above consults it —
+it is not a per-hook cache, it is the single state authority (P2, <a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-1">I1</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Packet &amp; Flow Representation</h3>
+<p>Every packet entering the pipeline is parsed once into offsets (L2/L3/L4/L5) over a
+mutable buffer — no copy, no re-parse per hook. The 5-tuple <code>(src_ip, dst_ip, src_port, dst_port, proto)</code> plus a <code>zone</code> (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-9">I9</a>) is the flow identity used by every subsystem;
+<code>FiveTuple::reverse()</code> (signature, <a class="cite" href="/system-design-blueprints/systems/nat-firewall/design/#sec-11">§11</a>) produces the reply-direction key used by the
+single-table, both-directions lookup (P2). Fields and their semantics are formalized in
+<a class="cite" href="/system-design-blueprints/systems/nat-firewall/design/#sec-11">§11</a> (Core Schema &amp; Types) — this section only fixes vocabulary.</p>
+<h3 id="sec-8-2">8.2 Five-Hook Packet Path (Sequencing)</h3>
+<p>Sequencing is fixed (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/architecture/#sec-3">§3</a>): PREROUTING → routing decision → {INPUT|FORWARD} → OUTPUT →
+POSTROUTING. A <code>Verdict</code> returned by any hook is one of <code>Continue</code> (fall through to the
+next hook — the correct behavior for a rule with no terminal action), <code>Accept</code>, <code>Drop</code>,
+<code>Reject</code>, <code>Stolen</code> (handed to a queue/userspace consumer), or <code>Queue(id)</code>. Only
+<code>Continue</code> ever proceeds to the next hook; every other verdict terminates the pass.</p>
+<h3 id="sec-8-3">8.3 Connection-Tracking State Machine (TCP)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Next State</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>(none)</td>
+<td>SYN seen, admitted</td>
+<td><code>SynSent</code></td>
+<td>new <code>ConntrackEntry</code>, <code>ConntrackState::New</code></td>
+</tr>
+<tr>
+<td><code>SynSent</code></td>
+<td>SYN-ACK seen (reply dir)</td>
+<td><code>SynReceived</code></td>
+<td>per section 3.4 of RFC 793</td>
+</tr>
+<tr>
+<td><code>SynSent</code></td>
+<td>simultaneous SYN (both dirs)</td>
+<td><code>SynReceived</code></td>
+<td>simultaneous-open case, RFC 793</td>
+</tr>
+<tr>
+<td><code>SynReceived</code></td>
+<td>ACK seen</td>
+<td><code>Established</code></td>
+<td><code>ConntrackState::Established</code></td>
+</tr>
+<tr>
+<td><code>Established</code></td>
+<td>FIN seen (either dir)</td>
+<td><code>FinWait</code> (sender) / <code>CloseWait</code> (receiver)</td>
+<td>half-close begins</td>
+</tr>
+<tr>
+<td><code>FinWait</code></td>
+<td>FIN-ACK seen</td>
+<td><code>TimeWait</code></td>
+<td>30 s default timeout</td>
+</tr>
+<tr>
+<td><code>CloseWait</code></td>
+<td>LAST-ACK seen</td>
+<td><code>Close</code></td>
+<td>GC&#39;d promptly</td>
+</tr>
+<tr>
+<td>any</td>
+<td>RST seen</td>
+<td><code>Close</code></td>
+<td>regardless of sequence number, per <a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-4">I4</a></td>
+</tr>
+<tr>
+<td>any</td>
+<td>timeout exceeded, no traffic</td>
+<td>reclaimed</td>
+<td>GC path, <a class="cite" href="/system-design-blueprints/systems/nat-firewall/build/#sec-15">§15</a> (Phase 3)</td>
+</tr>
+</tbody></table></div>
+<p>Out-of-window tolerance: packets within 32 KB behind the expected sequence are accepted
+as retransmits, not rejected — a strict RFC-793 window check would drop legitimate
+retransmissions arriving after the window slid. SACK and timestamp (PAWS) options extend
+the tracked state per direction; ignoring them misclassifies legitimate reordered/
+retransmitted segments as invalid (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-4">I4</a>).</p>
+<h3 id="sec-8-4">8.4 NAT Mapping &amp; Filtering Model (RFC 4787)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Mapping \ Filtering</th>
+<th>Endpoint-Independent</th>
+<th>Address-Restricted</th>
+<th>Address+Port-Restricted</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Endpoint-Independent</strong></td>
+<td>Full-cone (P6 default)</td>
+<td>Restricted-cone</td>
+<td>Port-restricted-cone</td>
+</tr>
+<tr>
+<td><strong>Address-Dependent</strong></td>
+<td>(uncommon)</td>
+<td>Address-restricted, symmetric-ish</td>
+<td>—</td>
+</tr>
+<tr>
+<td><strong>Address+Port-Dependent</strong></td>
+<td>—</td>
+<td>—</td>
+<td>Symmetric NAT (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/trade-offs/#adr-15">ADR-15</a> opt-in)</td>
+</tr>
+</tbody></table></div>
+<p>Endpoint-independent mapping: <code>NAT(int_addr, int_port, dst1) == NAT(int_addr, int_port, dst2)</code> — the same internal 5-tuple always yields the same external mapping regardless
+of destination, which is what makes STUN-style P2P discovery work (Ford, Srisuresh,
+Kegel 2005). Endpoint-independent filtering (full-cone) then additionally admits reply
+traffic from <em>any</em> external source once the mapping exists, subject to policy.</p>
+<h3 id="sec-8-5">8.5 Rule/ACL Match Engine Grammar</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>ruleset   = { table } ;
+table     = &quot;table&quot; family ident &quot;{&quot; { chain } &quot;}&quot; ;
+chain     = &quot;chain&quot; ident &quot;{&quot; hookdecl { rule } &quot;}&quot; ;
+hookdecl  = &quot;type&quot; chaintype &quot;hook&quot; hookname &quot;priority&quot; int &quot;;&quot; ;
+rule      = { match } action &quot;;&quot; ;
+match     = field relop value | &quot;ip&quot; &quot;saddr&quot; cidr | &quot;ct&quot; &quot;state&quot; statelist ;
+action    = &quot;accept&quot; | &quot;drop&quot; | &quot;reject&quot; | &quot;snat&quot; natargs | &quot;dnat&quot; natargs
+          | &quot;masquerade&quot; | &quot;jump&quot; ident | &quot;goto&quot; ident | &quot;return&quot; ;</code></pre>
+<p>Evaluation is ordered, first-match-wins within a chain (P4, <a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-8">I8</a>); <code>Set { name, key }</code>
+matches are O(1) via an IPset hash accelerator instead of an O(N) CIDR scan (P9); CIDR
+matches use longest-prefix selection when multiple set entries could match the same
+address.</p>
+<h3 id="sec-8-6">8.6 Worked Example — Outbound TCP Round Trip Through SNAT/DNAT</h3>
+<p>Internal host <code>10.0.0.5:51000</code> opens TCP to <code>93.184.216.34:443</code>. At POSTROUTING, SNAT
+rewrites the source to <code>203.0.113.9:54321</code> (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-6">I6</a> allocates the port); <code>nf-conntrack</code>
+records the pair <code>(10.0.0.5:51000→93.184.216.34:443, 93.184.216.34:443→ 203.0.113.9:54321)</code> (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-1">I1</a>). The reply&#39;s destination <code>203.0.113.9:54321</code> is looked up in
+the reply direction, resolving to the same entry; POSTROUTING reverses the rewrite back
+to <code>10.0.0.5:51000</code>. State progresses <code>SynSent → SynReceived → Established</code> (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/architecture/#sec-8-3">§8.3</a>) on
+the SYN/SYN-ACK/ACK sequence, entirely on this one entry.</p>
+<h3 id="sec-8-7">8.7 Malformed-Input Example</h3>
+<p>A crafted TCP segment sets SYN, FIN, and RST simultaneously — a combination no
+legitimate stack produces. Per P5 (fail closed) and <a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-4">I4</a> (no transition-table edge exists
+for this event), the packet is classified <code>ConntrackState::Invalid</code> and dropped;
+default policy never evaluates it as a new-flow candidate. An ICMP error whose embedded
+inner IP+L4 header is truncated below 8 bytes fails inner-tuple extraction (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/build/#sec-16">§16</a>, Phase
+4) and is dropped rather than guessed at.</p>
+<h3 id="sec-8-8">8.8 Failure-Path Example — Conntrack Exhaustion Mid-Handshake</h3>
+<p>The table is at its <a class="cite" href="/system-design-blueprints/systems/nat-firewall/numbers/#sec-4">§4</a> ceiling (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-5">I5</a>) when a new SYN arrives. Admission is refused for a
+plain new-flow entry; if SYN-proxy (<a class="cite" href="/system-design-blueprints/systems/nat-firewall/build/#sec-21">§21</a>, Phase 9, <a class="cite" href="/system-design-blueprints/systems/nat-firewall/reliability/#inv-11">I11</a>) is enabled, the SYN is answered
+with a cookie SYN-ACK without allocating conntrack state yet, deferring the table
+insert until the client&#39;s ACK proves cookie validity — converting a would-be table-full
+drop into a cost-shifted, forgery-resistant admission decision.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

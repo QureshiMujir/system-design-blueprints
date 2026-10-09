@@ -1,0 +1,545 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Inference Router — Study · Engineering Blueprints</title><meta name="description" content="Distributed Inference Router, hard questions, reading, glossary. Build a from-scratch, production-grade control+data-plane inference router in Rust (edition 2021, MSRV 1.78) that sits in front of a fleet of LLM inference backends (vLLM, SGLang, TGI-style replicas)…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/distributed-inference-router/">Distributed Inference Router</a> </li><li> <span aria-current="page">Study</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>Distributed Inference Router</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~24 weeks</li> <li>4,742 lines</li> <li>blueprint #326</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-inference-router/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-inference-router/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-inference-router/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-inference-router/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-inference-router/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-inference-router/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-inference-router/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-inference-router/study/" aria-current="page" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-inference-router/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Inference Router — Study"> <section class="prose"><h2 id="sec-hard-questions">Hard Questions (Self-Examination)</h2>
+<p><strong>HQ1 — When does increasing <code>max_queue_depth</code> make P99 latency worse, not better?</strong>
+When queue depth exceeds the product of backend throughput and SLO deadline, admitted requests at the back of the queue will always miss their SLO. A deeper queue does not add capacity — it adds latency for requests that will be shed at dispatch anyway (I8 violation). The correct lever is admission control at queue entry (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-3">§3.3</a> infr-queue, Phase 6), not queue depth. Synthesis: <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/numbers/#sec-4">§4</a> System Constraints (SLO bounds) × Failure Modes &amp; Recovery (queue saturation failure class) × Phase 6.</p>
+<p><em><em>HQ2 — A backend&#39;s kv_util probe reads 0.20 (20%) occupied, but P99 TTFT is spiking to 5s. What are the three most likely causes and which infr-</em> crate owns each?</em>*
+(1) Probe staleness: health probe interval is 5s, backend loaded up between probes; infr-health (Phase 3). (2) KV-cache fragmentation: 20% utilization is global but contiguous blocks for the request&#39;s sequence length are unavailable; not detectable by the scalar probe — requires per-sequence block-map exposure from the backend (future work, §Deferred Features Register). (3) Adapter mismatch: request is routed to a backend that is loading the adapter on-demand (cold LoRA load), blocking prefill; infr-registry adapter inventory (Phase 9). Synthesis: <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-5">§3.5</a> infr-health × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-3">§3.3</a> infr-registry × Failure Modes &amp; Recovery TTFT spike.</p>
+<p><strong>HQ3 — Explain why the PrefixTree must be rebuilt from health probes rather than maintained as durable state.</strong>
+The PrefixTree maps prefix_hash → BackendId set, representing which backends have that prefix hot in their KV cache. KV caches are volatile (evicted on memory pressure, lost on backend restart). A durable PrefixTree would route to a backend whose KV cache no longer holds the prefix, causing a cold-start penalty indistinguishable from a cache miss. The PrefixTree is soft state: if it disagrees with backend reality, the router makes a suboptimal routing decision (not a correctness failure, I6). Rebuilding from health probes (which report kv_util and active prefixes) keeps the tree consistent with actual cache state. Synthesis: I6 (PrefixTree consistency) × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-5">§8.5</a> PrefixTree model × §Scalability Analysis horizontal scaling.</p>
+<p><strong>HQ4 — The circuit breaker for BackendId B is in Open state. A new request arrives for a model only served by B. What happens at each layer of the stack?</strong>
+(1) infr-route policy chain: B is filtered from candidates (circuit breaker Open); no candidates remain. (2) infr-queue: request is held if queue not full, awaiting candidate availability. (3) infr-sched: if no HalfOpen probe has been sent in <code>base_ejection_time</code>, schedules a probe for the next eligible request. (4) infr-dispatch: if probe succeeds → Closed; if fails → extends Open with <code>base_ejection_time × ejection_count</code>. (5) If no candidates available and queue deadline exceeded: 503 returned + autoscale signal emitted. Synthesis: Phase 8 circuit-breaker FSM × Phase 6 admission × Phase 11 autoscale signal × Failure Modes (all-backends-ejected failure class).</p>
+<p><strong>HQ5 — How does the consistent hashing ring for session affinity interact with the PrefixTree, and which wins when they conflict?</strong>
+Consistent hashing maps <code>prefix_hash</code> → BackendId for session affinity (same prefix → same backend → KV cache hit). The PrefixTree does a longest-match lookup to find which backend has the deepest cached prefix. When they agree, routing is optimal. When they conflict (consistent hash says B1, PrefixTree says B2 has deeper prefix match), the policy is: PrefixTree wins if match_depth &gt; affinity_threshold (configurable). Rationale: a deeper KV-cache hit reduces GPU compute more than affinity preserves — the marginal cost of breaking affinity is a cold miss on a shorter prefix. Synthesis: Phase 4 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-16-2">§16.2</a> AffinityTable × Phase 5 PrefixTree design × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-8">ADR-08</a> (ULID) × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-16">ADR-16</a> (PrefixHash).</p>
+<p><strong>HQ6 — Under what conditions does hedging increase total backend load rather than decrease user-visible P99?</strong>
+Hedging sends a second request speculatively; if both complete, one is wasted. At high backend utilization (kv_util &gt; 0.80), the second dispatch occupies a KV-cache block that could serve a new request, causing higher queue wait for subsequent requests. The HedgePolicy must gate on: <code>idempotent: true</code> AND <code>backend_utilization &lt; hedge_util_threshold</code> (default 0.60). Above the threshold, hedging trades global throughput for individual P99 — a losing trade under overload. Synthesis: Phase 8 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-20-2">§20.2</a> HedgePolicy × P8 (Tail at Scale) × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/numbers/#sec-4">§4</a> System Constraints (kv_util targets) × Failure Modes &amp; Recovery.</p>
+<p><strong>HQ7 — Why must the Lease watchdog fire on <code>deadline + grace</code>, not just <code>deadline</code>?</strong>
+The lease deadline is the SLO deadline for the request. If the backend is still generating tokens at the deadline, the response is degraded but may still be useful (partial streaming). The grace period allows in-flight streaming to complete delivery before the lease is force-released. Force-releasing at exactly <code>deadline</code> would cancel an in-flight response at the exact moment the first token might arrive. The grace period must be bounded (e.g., 2× estimated TBT) to prevent lease leaks when backends hang silently. Synthesis: I5 (Lease invariant) × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-7">§3.7</a> infr-dispatch × Phase 7 streaming relay × MM1.</p>
+<p><strong>HQ8 — A tenant&#39;s quota is exhausted mid-stream. What happens to their active streams?</strong>
+The quota gate (infr-sched quota.rs) applies at admission (queue entry). Active streams that have already passed admission are not cancelled mid-stream — doing so would violate I10 (stream order invariant) and produce a corrupted partial response. The correct behavior: active streams complete; quota enforcement prevents new requests from being admitted. This means a tenant can temporarily exceed quota if many requests entered before quota exhaustion. Mitigation: quota accounting should track admitted-but-incomplete requests as consumed quota, not just completed ones. Synthesis: Phase 11 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-23-2">§23.2</a> quota.rs × I10 (stream order) × Phase 6 admission × MM3.</p>
+<p><strong>HQ9 — If the infr-sched fairness loop runs at 100ms epochs and a high-priority request arrives 99ms into an epoch, what is the maximum admission delay?</strong>
+Up to 100ms (one full epoch) in the worst case, plus queue service time. For latency-sensitive requests (e.g., interactive chat with 200ms TTFT SLO), a 100ms scheduling epoch is 50% of the SLO budget. Mitigation: priority-bypass path — requests with <code>Priority::Critical</code> skip the fairness epoch and are admitted directly to the per-model priority queue without waiting for the next epoch. Synthesis: Phase 11 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-23-2">§23.2</a> fairness.rs × I8 (SLO deadline admission) × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/numbers/#sec-4">§4</a> System Constraints (TTFT ≤200ms) × §Scalability Analysis scheduler saturation.</p>
+<p><strong>HQ10 — How does the registry single-writer invariant (I1) prevent a torn read, and what is the consequence of violating it?</strong>
+I1 mandates that only <code>infr-registry</code>&#39;s writer task may mutate the registry state. The reader sees a complete Arc snapshot via ArcSwap — either the old state or the new state, never a partially-updated state. If two writers race (violating I1), they could produce an intermediate state where a replica is present in the BackendId list but its AdapterInventory has not yet been updated. A router reading this intermediate state routes an adapter request to a backend that doesn&#39;t serve the adapter, causing a 4xx or silent wrong-model response. Synthesis: I1 × MM8 × Phase 2, <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-5">§3.5</a> infr-registry × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-14">ADR-14</a> (RwLock choice).</p>
+<p><em><em>HQ11 — Describe the sequence of events that leads from a KV-cache eviction storm on backend B to a 503 cascade, naming each infr-</em> crate involved.</em>*
+(1) B&#39;s KV cache is under memory pressure; evicts cached prefixes to free blocks. (2) infr-health (Phase 3) probes B; kv_util returns &gt;0.95 → Health::Degraded. (3) infr-registry updates B&#39;s LoadState; PrefixTree removes B&#39;s entries (Phase 5). (4) infr-route redirects all prefix-matched requests to other backends. (5) Those backends now receive elevated load; their KV caches also begin evicting. (6) A cascading health degradation across the fleet; infr-health marks all as Degraded. (7) infr-route finds no Healthy candidates; returns 503. (8) infr-sched emits autoscale signal (scale out). (9) New backends take 5–10 minutes to warm up; cascade persists until warm. Synthesis: Failure Modes &amp; Recovery (KV eviction storm) × Phase 3 × Phase 5 × Phase 8 × Phase 11 × MM2.</p>
+<p><strong>HQ12 — What is the correct behavior when the disaggregated prefill backend completes but the decode backend is unavailable for KV handoff?</strong>
+The prefill result (KV blocks) are generated but cannot be transferred to a decode backend. Options: (1) Hold the KV blocks on the prefill backend and retry decode assignment (bounded by SLO deadline); (2) Fall back to unified prefill+decode on the prefill backend if it supports it; (3) Fail the request with 503 and release KV blocks. The correct choice per <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-22-4">§22.4</a>: retry decode assignment for up to <code>kv_handoff_timeout</code> (10ms); if no decode backend available, fall back to unified mode on the prefill backend. Synthesis: Phase 10 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-22-2">§22.2</a> KV handoff × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-22-4">§22.4</a> acceptance criteria × P5 (Splitwise) × Failure Modes &amp; Recovery disaggregated coordination failure.</p>
+<p><strong>HQ13 — Why does telemetry cardinality at (model_id, adapter_id, backend_id, route_reason) explode and what is the principled mitigation?</strong>
+At 1k models × 10 adapters × 500 backends × 6 route_reason variants = 30M label combinations. Prometheus TSDB stores one time series per label set; 30M active series would consume ~30 GB of RAM in the scraper. Principled mitigation: aggregate at the router level. Expose per-model and per-adapter metrics (not per-backend) on the /metrics endpoint. Expose per-backend metrics only on a debug /metrics/debug endpoint not scraped by production Prometheus. Retain <code>route_reason</code> as a label on the router-level series (1k × 10 × 6 = 60k series — manageable). Synthesis: §Scalability Analysis (telemetry cardinality) × Phase 13 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-25-4">§25.4</a> telemetry × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/numbers/#sec-4">§4</a> System Constraints × P9 (FIFO Queues cardinality note).</p>
+<p><strong>HQ14 — Under a network partition where the router cannot reach any health probes for 30 seconds, what routing decisions does the system make and why?</strong>
+infr-health stops receiving probe responses; it does not immediately mark backends Unhealthy — it applies a health-probe timeout threshold (e.g., 3 consecutive missed probes = Degraded, 5 = Unknown). During the partition, the router continues routing based on stale health state (last known LoadState). Backends in Closed circuit breaker state receive traffic; if they are genuinely down, dispatch will fail (timeout → circuit breaker transition to Open). After partition heals, health probes recover and state is updated. The key invariant: stale health state causes suboptimal routing, not correctness failure (I6 analogy for health). Synthesis: Phase 3 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-5">§3.5</a> infr-health × Phase 8 circuit-breaker FSM × Failure Modes &amp; Recovery health probe partition × MM4.</p>
+<p><strong>HQ15 — How does the EWMA smoothing factor for load state affect routing stability versus responsiveness?</strong>
+EWMA: <code>load_ema = α × current_load + (1-α) × load_ema</code>. High α (→1.0): responsive to spikes but noisy — a single bursty second causes routing changes that may reverse immediately, producing oscillation. Low α (→0.0): smooth but slow — a backend that becomes overloaded is still sent traffic for many seconds while EMA catches up. The correct α depends on the probe interval: for 1 Hz probes, α=0.3 gives a ~3-probe settling time (3s responsiveness). For 10 Hz probes, α=0.1 gives the same settling time. The wrong α causes either thundering-herd (high α, many routers simultaneously route away from a backend) or delayed-overload (low α). Synthesis: Phase 2, <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-5">§3.5</a> infr-registry LoadState × <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-5">§8.5</a> PrefixTree model × §Scalability Analysis replication pressure.</p>
+<p><strong>HQ16 — What prevents the admit-from-queue fairness loop from starving low-priority requests indefinitely?</strong>
+The fairness loop (infr-sched fairness.rs) uses weighted fair queuing: each priority tier receives a quota of admits per epoch proportional to its weight, not a strict priority ordering. A Critical request does not prevent a Normal request from being admitted if the Critical quota for this epoch is already filled. Additionally, requests carry a maximum queue age (derived from SLO deadline): if a Normal request has been queued beyond its age limit, it is shed (429) rather than starved indefinitely, which prevents unbounded queue age growth. Synthesis: Phase 11 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-23-2">§23.2</a> fairness.rs × Phase 6 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-3">§3.3</a> infr-queue shed policy × I4 (bounded-queue) × I8 (SLO deadline admission).</p>
+<p><strong>HQ17 — Name three observable signals that distinguish &quot;router is overloaded&quot; from &quot;backend fleet is overloaded.&quot;</strong>
+(1) <code>router_queue_depth_p99 &gt; 0</code> and <code>backend_kv_util_p50 &lt; 0.50</code>: router is queuing requests while backends are underutilized — router admission or routing logic is the bottleneck, not backend capacity. (2) <code>lease_acquire_latency_us_p99 &gt; 1000</code> with low backend latency: Lease contention inside infr-dispatch is the bottleneck (router-side). (3) <code>dispatch_retry_rate &gt; 5%</code> with all backends Healthy: router is dispatching and backends are rejecting (429/503) — backend admission is the bottleneck, not router. Synthesis: Phase 13 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-25-4">§25.4</a> telemetry × §Performance Engineering (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/numbers/#m-1">M1</a>–<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/numbers/#m-10">M10</a>) × Failure Modes &amp; Recovery × MM1.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-mental">Mental Models &amp; First Principles</h2>
+<p><strong>MM1 — The Router Is a Lease Manager, Not a Proxy</strong>
+Compressed insight: Every in-flight request is a lease on one backend slot. The router&#39;s core invariant is not &quot;forward packets&quot; but &quot;every lease is eventually released exactly once.&quot; Prediction: any latency spike that cannot be explained by network or GPU time is a lease acquisition bottleneck — measure <code>lease_acquire_latency_us</code>, not just end-to-end P99. Bug class: Lease leak (I5 violation) manifests as monotonically growing <code>inflight_gauge</code> diverging from actual backend load; backend appears overloaded while queue is empty. Resolving §: <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-7">§3.7</a> infr-dispatch (Lease), <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/reliability/#sec-7">§7</a> Invariants (I5), Phase 3.</p>
+<p><strong>MM2 — KV-Cache Hit Is a Routing Constraint, Not an Optimization</strong>
+Compressed insight: When prefix-cache hit rate drops below 50%, the router degrades to a load-balancer — this is a qualitative regime change, not a gradual degradation. The PrefixTree is the tightest feedback loop between prompt structure and infrastructure cost. Prediction: a workload with high prefix diversity (random prompts, no system-prompt sharing) will show near-zero KV hit rate and make all PrefixTree logic irrelevant; detect by measuring <code>prefix_match_depth_p50 == 0</code>. Bug class: Eviction storm — when backends are ejected, their PrefixTree entries become stale, causing cold cache routing until the tree is rebuilt; the 5xx storm from ejection can trigger more evictions. Resolving §: Phase 5, <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-5">§8.5</a> PrefixTree model, I6, §Scalability Analysis.</p>
+<p><strong>MM3 — Admission Control Is the System&#39;s Pressure Regulator</strong>
+Compressed insight: A queue with no admission ceiling is an amplifier, not a buffer. Under overload, every request that enters the queue adds latency to all subsequent requests; the correct response is to shed at the boundary (429) and let callers retry with backoff. Prediction: removing the <code>queue_max</code> limit will cause mean latency to grow faster than throughput — the queue depth grows unboundedly while P99 collapses. Bug class: SLO-unaware queuing — admitting a request whose remaining SLO deadline is shorter than the current queue wait (I8 violation) wastes a backend slot that could serve a newer request. Resolving §: Phase 6, <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-3">§3.3</a> infr-queue, I4, I8, P1, P6.</p>
+<p><strong>MM4 — Circuit Breakers Are State Machines, Not Thresholds</strong>
+Compressed insight: A circuit breaker that only checks &quot;error rate &gt; X&quot; in the last N requests is a reactive threshold. The FSM (Closed → Open → HalfOpen → Closed/Open) provides memory: it prevents a flapping backend from generating repeated error storms during HalfOpen probing. Prediction: a backend that intermittently recovers will cause threshold-only breakers to oscillate; the HalfOpen probe-single-request gate prevents this. Bug class: HalfOpen deadlock — if the probe request itself times out (no response), the breaker must transition back to Open, not stay HalfOpen indefinitely; timer-driven HalfOpen expiry required. Resolving §: Phase 8, <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-7-10">§7.10</a> circuit-breaker FSM, <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-4">ADR-04</a> (Envoy outlier detection reference), R4.</p>
+<p><strong>MM5 — Hedging Is an At-Most-Once Constraint, Not a Retry</strong>
+Compressed insight: Hedging dispatches a second request speculatively before the first times out; this is fundamentally different from retry (which fires after failure). The at-most-once invariant (I3) means hedging is only legal for <code>idempotent: true</code> requests. The hedge budget (P2) constrains how many requests can have a simultaneous second dispatch. Prediction: mis-applying hedging to non-idempotent requests (e.g., stateful generation with tool calls) causes double-execution; guarded by <code>idempotent: bool</code> check at HedgePolicy gate. Bug class: Double-billing — a hedged request that both replicas complete causes two inference costs but one API charge; cancel the slow replica&#39;s connection immediately on first response. Resolving §: Phase 8 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-20-2">§20.2</a> HedgePolicy, P2 (at-most-once), I3, <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-15">ADR-15</a>.</p>
+<p><strong>MM6 — The Router Must Never Directly Scale</strong>
+Compressed insight: The router emits autoscaling signals (queue depth, TTFT P99, KV utilization) but must never call Kubernetes APIs directly. This preserves separation of concerns: the router observes, the autoscaler decides, the scheduler executes. Prediction: a router that directly patches HPA replicas will race with the Kubernetes control plane under topology changes, causing oscillation. Bug class: Signal amplification — emitting autoscale signals at per-request granularity (rather than per-model debounced) floods the autoscaler with redundant events; debounce to 1 Hz per model. Resolving §: Phase 11 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-23-2">§23.2</a> batch_hint.rs, P13 (autoscaling signal design), <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-23">ADR-23</a>, §Operational Readiness.</p>
+<p><strong>MM7 — Streaming Relay Correctness Is Flow-Control, Not Forwarding</strong>
+Compressed insight: Token streaming relay is not memcpy — it must respect H2 flow-control windows (I10), release capacity after each DATA frame, and handle mid-stream backend failure by either closing the stream or inserting an error frame. Prediction: a relay that buffers entire responses before forwarding converts streaming latency into batch latency; TTFT collapses to total-generation-time. Bug class: H2 flow-control deadlock — if the router does not release the H2 receive window after forwarding each DATA frame, the backend stalls waiting for window credit while the client is waiting for tokens. Resolving §: Phase 7, <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-7">§3.7</a> infr-dispatch streaming relay, I10, B7 (Computer Networking flow-control).</p>
+<p><strong>MM8 — Wait-Free Reads Require Epoch-Based Snapshot Discipline</strong>
+Compressed insight: ArcSwap enables wait-free reads on the routing table (registry snapshot) by having writers publish a new Arc without blocking readers holding the old one. But epoch discipline is required: a writer must not free old state until all readers that could be holding it have advanced their epoch. Prediction: using ArcSwap correctly means routing decisions never block on registry updates — measure <code>registry_lock_contention_us</code> should be zero in steady state. Bug class: Torn read — if the registry is updated in two steps (replica added, then adapter map updated) without atomic snapshot replacement, a reader can see a replica without its adapter inventory, causing dispatch to a backend that doesn&#39;t serve the requested adapter. Resolving §: Phase 2, <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-5">§3.5</a> infr-registry, I1 (single-writer registry), <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-14">ADR-14</a>.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-5">5. Required Reading</h2>
+<h3 id="sec-5-1">5.1 Books</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Title / Author / Edition</th>
+<th>Chapters to Extract</th>
+<th>Concepts for This System</th>
+<th>Applied In</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>B1</td>
+<td><strong>Systems Performance</strong>, Gregg (2021, 2nd ed.)</td>
+<td>Ch 6 (CPUs), Ch 9 (Disk), Ch 10 (Network)</td>
+<td>Latency percentile methodology; USE method applied to queue-depth + KV-util metrics; tail latency vs mean trap</td>
+<td>§Performance Engineering; Phase 13 bench methodology; <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/numbers/#m-1">M1</a>–<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/numbers/#m-10">M10</a> targets</td>
+</tr>
+<tr>
+<td>B2</td>
+<td><strong>Designing Data-Intensive Applications</strong>, Kleppmann (2017)</td>
+<td>Ch 8 (Distributed Systems), Ch 11 (Stream Processing), Ch 12 (Future)</td>
+<td>Partial failure taxonomy; exactly-once semantics; backpressure in streaming; why at-most-once is the safe default</td>
+<td>P2 (at-most-once); I3 (at-most-once invariant); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-7">§3.7</a> infr-dispatch; Phase 7</td>
+</tr>
+<tr>
+<td>B3</td>
+<td><strong>The Art of Multiprocessor Programming</strong>, Herlihy &amp; Shavit (2012)</td>
+<td>Ch 4 (Foundations), Ch 10 (Concurrent Queues)</td>
+<td>Bounded MPMC queue implementation rationale; ABA problem; lock-free vs. mutex tradeoffs for <code>infr-queue</code></td>
+<td>P1 (backpressure); I4 (bounded-queue invariant); Phase 6 infr-queue design</td>
+</tr>
+<tr>
+<td>B4</td>
+<td><strong>Programming Rust</strong>, Blandy &amp; Orendorff (2021, 2nd ed.)</td>
+<td>Ch 20 (Async Programming), Ch 19 (Concurrency)</td>
+<td>Tokio runtime model; Futures + Waker; select!/join! interaction patterns; avoidance of blocking calls in async tasks</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-2">ADR-02</a> (tokio runtime); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-11-16">§11.16</a> concurrency table; Phase 0 scaffold</td>
+</tr>
+<tr>
+<td>B5</td>
+<td><strong>Kubernetes in Action</strong>, Luksa (2022, 2nd ed.)</td>
+<td>Ch 5 (Services), Ch 16 (Advanced Scheduling), Ch 17 (Best Practices)</td>
+<td>HPA signal design; readiness-probe latency; how K8s MTTF assumptions break under GPU workloads</td>
+<td>P13 (autoscaling emitted not acted); §Operational Readiness deployment topology; Phase 11 autoscale signals</td>
+</tr>
+<tr>
+<td>B6</td>
+<td><strong>Envoy Proxy Deep Dive</strong>, Hochstein &amp; Sherwood (2023)</td>
+<td>Ch 3 (Listeners/Filters), Ch 5 (Load Balancing), Ch 7 (Observability)</td>
+<td>Connection-pool lifecycle; retry budget; outlier detection parameters; x-envoy headers to avoid re-implementing; health check semantics</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-15">ADR-15</a> (connection pool); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-6">§3.6</a> infr-route policy chain; Phase 8 circuit-breaker design</td>
+</tr>
+<tr>
+<td>B7</td>
+<td><strong>Computer Networking: A Top-Down Approach</strong>, Kurose &amp; Ross (8th ed.)</td>
+<td>Ch 3 (Transport Layer), Ch 6 (Link)</td>
+<td>TCP backpressure propagation; flow/congestion control; how upstream congestion surfaces as blocked writes in <code>infr-dispatch</code></td>
+<td>P1 (backpressure propagated); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-7">§3.7</a> infr-dispatch; Phase 7 H2 flow-control release-capacity pitfall</td>
+</tr>
+<tr>
+<td>B8</td>
+<td><strong>Site Reliability Engineering</strong>, Beyer et al. (Google, 2016)</td>
+<td>Ch 19 (Load Balancing), Ch 21 (Handling Overload), Ch 22 (Cascading Failures)</td>
+<td>Load-shedding policies; request priority tiers; retry storms; why LIFO shedding beats FIFO under overload</td>
+<td>P6 (bounded resource); P8 (SLO deadlines govern); Phase 6 shed policy; Failure Modes &amp; Recovery queue saturation</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-5-2">5.2 Papers</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Citation</th>
+<th>Venue/Year</th>
+<th>Core Contribution</th>
+<th>Router Relevance</th>
+<th>Applied In</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>P1</td>
+<td><strong>Orca: A Distributed Serving System for Transformer-Based Generative Models</strong>, Yu et al.</td>
+<td>OSDI 2022</td>
+<td>Iteration-level continuous batching; selective batching (non-uniform seq length); latency vs. throughput curve</td>
+<td><code>infr-sched</code> batch-hint emission; why batch size ≠ request count; GPU memory pressure model</td>
+<td>Phase 11 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-23-2">§23.2</a> batch_hint.rs); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-2-1">§2.1</a> historical timeline; <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-10">§8.10</a> autoscale model</td>
+</tr>
+<tr>
+<td>P2</td>
+<td><strong>Efficient Memory Management for Large Language Model Serving with PagedAttention</strong>, Kwon et al.</td>
+<td>SOSP 2023</td>
+<td>Paged KV cache; copy-on-write for beam search; fragmentation bounds</td>
+<td><code>infr-health</code> KV-util scraping; kv_util=1.0 → full → route elsewhere; prefix cache enabled by paged KV</td>
+<td>Phase 3 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-15-3">§15.3</a> kv_util scraping); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-7-6">§7.6</a> I6 (PrefixTree consistency); §Glossary (PagedAttention)</td>
+</tr>
+<tr>
+<td>P3</td>
+<td><strong>Efficiently Programming Large Language Models using SGLang</strong>, Zheng et al.</td>
+<td>2024 (arXiv)</td>
+<td>RadixAttention prefix/radix cache; automatic cache reuse; tree structure over KV cache</td>
+<td><code>infr-route</code> PrefixTree longest-match routing; cache-hit rate metric; how to compute prefix_hash from token IDs</td>
+<td>Phase 5 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-17-1">§17.1</a> PrefixTree objectives); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-5">§8.5</a> PrefixTree model; <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-16">ADR-16</a> (PrefixHash)</td>
+</tr>
+<tr>
+<td>P4</td>
+<td><strong>DistServe: Disaggregating Prefill and Decoding for Goodput-optimized LLM Serving</strong>, Zhong et al.</td>
+<td>2024</td>
+<td>Separate prefill/decode pools; P/D scheduling; goodput optimization; migration bandwidth overhead</td>
+<td><code>infr-sched</code> disaggregated path; P-node selection under TTFT SLO; D-node selection under TPOT SLO</td>
+<td>Phase 10 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-22-1">§22.1</a> disaggregation objectives); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-4">§3.4</a> infr-sched; I12 disaggregated coordination invariant</td>
+</tr>
+<tr>
+<td>P5</td>
+<td><strong>Splitwise: Efficient Generative LLM Inference Using Phase Splitting</strong>, Patel et al.</td>
+<td>ISCA 2024</td>
+<td>P/D phase splitting in production; KV-transfer cost modeling; chip heterogeneity routing</td>
+<td>Complements P4; informs KV-transfer timeout in <code>infr-dispatch</code>; heterogeneous replica handling in <code>infr-registry</code></td>
+<td>Phase 10 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-22-2">§22.2</a> KV handoff); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-22-4">§22.4</a> acceptance criteria KV handoff latency ≤10ms</td>
+</tr>
+<tr>
+<td>P6</td>
+<td><strong>Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving</strong>, Qin et al.</td>
+<td>2024</td>
+<td>KV-cache as first-class distributed object; prefix-cache reuse across prefill nodes; DRAM/SSD KV tiering</td>
+<td>PrefixTree must account for remote KV cost; <code>infr-route</code> can score remote-prefix-hit vs. local-miss</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-2-1">§2.1</a> historical table; <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-5">§8.5</a> PrefixTree routing with remote KV cost; the Comparative Architecture Table</td>
+</tr>
+<tr>
+<td>P7</td>
+<td><strong>Consistent Hashing and Random Trees</strong>, Karger et al.</td>
+<td>STOC 1997</td>
+<td>Jump-consistent hash; minimal disruption on node add/remove</td>
+<td>Session affinity in <code>infr-route</code>; backend removal reshuffles ≤ 1/N sessions</td>
+<td>Phase 4 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-16-2">§16.2</a> AffinityTable, consistent hash); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-8">ADR-08</a> (session affinity implementation)</td>
+</tr>
+<tr>
+<td>P8</td>
+<td><strong>The Tail at Scale</strong>, Dean &amp; Barroso</td>
+<td>CACM 2013</td>
+<td>Hedged requests; tied requests; micro-partition; tail latency amplification in fan-out</td>
+<td><code>infr-dispatch</code> hedge policy; at-most-once enforcement; why hedging gated on idempotent=true</td>
+<td>Phase 8 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-20-2">§20.2</a> HedgePolicy); P2 (at-most-once); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-20-8">§20.8</a> edge case hedge on streaming</td>
+</tr>
+<tr>
+<td>P9</td>
+<td><strong>FIFO Queues are All You Need for Cache Eviction</strong>, Yang et al.</td>
+<td>SOSP 2023</td>
+<td>S3-FIFO eviction outperforms LRU at high hit rate / low overhead</td>
+<td>PrefixTree LRU vs FIFO eviction choice in <code>infr-route</code>; bounded memory for prefix cache entries</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-5">§8.5</a> PrefixTree eviction policy; Phase 5 pitfall <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-17-6">§17.6</a> eviction discussion; <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-16">ADR-16</a></td>
+</tr>
+<tr>
+<td>P10</td>
+<td><strong>LLM in a Flash</strong>, Alizadeh et al.</td>
+<td>2024</td>
+<td>Offloading KV to flash; access pattern for sliding window</td>
+<td>Informs kv_util interpretation when backends use flash offload; util metric may saturate differently</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-5">§3.5</a> infr-health scraping note; the Back-of-Envelope Capacity Model (kv_util interpretation)</td>
+</tr>
+<tr>
+<td>P11</td>
+<td><strong>An Analysis of Network-Load Imbalance in Datacenter Networks</strong>, Alizadeh et al.</td>
+<td>CoNEXT 2010</td>
+<td>ECMP hash collisions; flow-level vs. packet-level load balancing</td>
+<td>Routing decisions must account for NIC/ECMP layout when backends share physical switches; backend grouping in <code>infr-registry</code></td>
+<td>§Scalability Analysis (network fanout); the Back-of-Envelope Capacity Model (bandwidth derivation)</td>
+</tr>
+<tr>
+<td>P12</td>
+<td><strong>Maglev: A Fast and Reliable Software Network Load Balancer</strong>, Eisenbud et al.</td>
+<td>NSDI 2016</td>
+<td>Consistent hashing table; connection tracking; health-probe integration</td>
+<td>Consistent hash table construction for <code>infr-route</code>; probe-driven ejection triggers match Maglev&#39;s health state machine</td>
+<td>Phase 4 consistent_hash.rs; <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-4">§8.4</a> ejection state machine; the Comparative Architecture Table</td>
+</tr>
+<tr>
+<td>P13</td>
+<td><strong>Aperture: Fair, Latency-Sensitive Load Balancing for Microservices</strong>, Bhattacharyya et al.</td>
+<td>2024</td>
+<td>Gradient-based adaptive load balancing; token-bucket fairness</td>
+<td><code>infr-sched</code> gradient signal design; per-model quota tokens and refill rate</td>
+<td>Phase 11 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-23-2">§23.2</a> fairness.rs, quota.rs); <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-10">§8.10</a> autoscale signal design</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-5-3">5.3 Reference Implementations</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Repo / Project</th>
+<th>Directories / Files to Study</th>
+<th>Lessons to Take</th>
+<th>Pitfalls NOT to Copy</th>
+<th>Applied In</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>R1</td>
+<td><strong>vLLM production-stack / AIBrix router</strong> (<code>github.com/vllm-project/production-stack</code>)</td>
+<td><code>router/</code>, <code>proxy/</code>, <code>load_balancer.py</code>, <code>prefix_cache_routing.py</code></td>
+<td>PrefixTree token-hash computation; KV-util scraping endpoint <code>/metrics</code>; per-model queue design</td>
+<td>Python GIL limits concurrency under high RPS; no circuit breaker in base router</td>
+<td>Phase 5 PrefixTree design; <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-3-5">§3.5</a> infr-health KV-util scrape; the Comparative Architecture Table</td>
+</tr>
+<tr>
+<td>R2</td>
+<td><strong>SGLang</strong> (<code>github.com/sgl-project/sglang</code>)</td>
+<td><code>sglang/srt/managers/router/</code>, <code>radix_cache.py</code>, <code>scheduler.py</code></td>
+<td>RadixAttention tree eviction; prefix match depth; scheduler-side token budget</td>
+<td>Eviction during active prefix match can corrupt routing; must snapshot tree atomically</td>
+<td>Phase 5 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-17-2">§17.2</a> RadixNode design; I6 PrefixTree consistency invariant; <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/architecture/#sec-8-5">§8.5</a> PrefixTree eviction</td>
+</tr>
+<tr>
+<td>R3</td>
+<td><strong>linkerd2-proxy</strong> (<code>github.com/linkerd/linkerd2-proxy</code>)</td>
+<td><code>linkerd-proxy/src/</code>, <code>linkerd-buffer/</code>, <code>linkerd-retry/</code>, <code>linkerd-timeout/</code></td>
+<td>Tokio service tower abstractions; bounded buffer with backpressure propagation; retry budget (not count); timeout layering</td>
+<td>Its HTTP/2 mux is tightly coupled to control plane; extract patterns, not crates</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-2">ADR-02</a> tokio runtime; Phase 7 dispatch timeout layering; P1 backpressure principle</td>
+</tr>
+<tr>
+<td>R4</td>
+<td><strong>Envoy</strong> (<code>github.com/envoyproxy/envoy</code>)</td>
+<td><code>source/common/upstream/</code>, <code>load_balancer_impl.cc</code>, <code>circuit_breaker_impl.cc</code>, <code>outlier_detection_impl.cc</code></td>
+<td>Outlier detection state machine (5xx thresholds, ejection fraction, base_ejection_time); connection pool lifecycle; retry budget parameters</td>
+<td>C++ memory model; config surface too large for LLM router; proto API unsuitable as-is</td>
+<td>Phase 8 circuit-breaker FSM; Phase 3 ejection state machine; the Comparative Architecture Table</td>
+</tr>
+<tr>
+<td>R5</td>
+<td><strong>NVIDIA Triton Inference Server</strong> (<code>github.com/triton-inference-server/server</code>)</td>
+<td><code>src/core/scheduler.cc</code>, <code>src/core/dynamic_batch_scheduler.cc</code>, <code>model_repository_manager.cc</code></td>
+<td>Sequence batcher design; batch window timeout; max queue delay; model ensemble routing</td>
+<td>Not latency-transparent; batching inside server conflicts with our external batch-hints</td>
+<td>Phase 11 <a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-23-2">§23.2</a> batch_hint.rs; the Comparative Architecture Table (Triton paragraph)</td>
+</tr>
+<tr>
+<td>R6</td>
+<td><strong>Ray Serve</strong> (<code>github.com/ray-project/ray</code>, <code>python/ray/serve/</code>)</td>
+<td><code>router.py</code>, <code>replica_scheduler.py</code>, <code>long_poll.py</code></td>
+<td>Push-based replica state propagation; long-poll for load state; queue-aware routing</td>
+<td>Actor-per-request overhead; Python asyncio event loop at scheduling critical path</td>
+<td>the Comparative Architecture Table (Ray Serve paragraph); Phase 11 autoscale signal design</td>
+</tr>
+<tr>
+<td>R7</td>
+<td><strong>KServe</strong> (<code>github.com/kserve/kserve</code>)</td>
+<td><code>pkg/controller/v1beta1/inferenceservice/</code>, <code>pkg/agent/</code>, <code>storage/</code></td>
+<td>Inference service CRD; autoscaling webhook; model-ready probe pattern</td>
+<td>Storage initializer blocks serving; HPA integration assumes stateless replicas (KV-cache breaks this)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/trade-offs/#adr-23">ADR-23</a> K8s compatibility; §Operational Readiness deployment topology; the Comparative Architecture Table</td>
+</tr>
+</tbody></table></div>
+<hr>
+<h3 id="sec-5-4">5.4 RFCs and Specifications</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Document</th>
+<th>Relevance</th>
+<th>Applied In</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>RFC2</td>
+<td><strong>RFC 9113 — HTTP/2</strong></td>
+<td>H2 framing, flow control, SETTINGS_INITIAL_WINDOW_SIZE; governs <code>infr-ingress</code> + <code>infr-dispatch</code> mux</td>
+<td>Phase 1 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-13-2">§13.2</a> HTTP/2 parse), Phase 7 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-19-2">§19.2</a> H2 mux + flow control)</td>
+</tr>
+<tr>
+<td>RFC3</td>
+<td><strong>RFC 9000 — QUIC</strong></td>
+<td>Future transport upgrade path; QUIC stream multiplexing vs H2; connection migration</td>
+<td>Phase 1 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-13-2">§13.2</a> listener.rs transport trait); no dedicated QUIC phase — informs the transport-trait abstraction only</td>
+</tr>
+<tr>
+<td>RFC4</td>
+<td><strong>RFC 7540 sec. 8.1</strong> — HTTP/2 request/response</td>
+<td>Header field ordering, pseudo-headers, END_STREAM semantics for streaming responses</td>
+<td>Phase 1 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-13-2">§13.2</a> http2.rs), Phase 7 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-19-2">§19.2</a> streaming relay)</td>
+</tr>
+<tr>
+<td>RFC5</td>
+<td><strong>RFC 9114 — HTTP/3</strong></td>
+<td>H3 over QUIC; QPACK header compression; streaming semantics same as H2 but transport differs</td>
+<td>Phase 1 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-13-2">§13.2</a> listener.rs transport trait), informs the RFC3 upgrade path</td>
+</tr>
+<tr>
+<td>RFC6</td>
+<td><strong>gRPC Protocol Specification</strong> (<code>grpc.io/docs/guides/wire-format</code>)</td>
+<td>Length-prefixed message framing over H2; trailers-only response for errors; keepalive PING semantics</td>
+<td>Phase 9 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-21-2">§21.2</a> grpc.rs ingress)</td>
+</tr>
+<tr>
+<td>RFC7</td>
+<td><strong>OpenAI Chat Completions streaming spec</strong> (de facto)</td>
+<td>SSE <code>data: [DONE]</code> sentinel; <code>text/event-stream</code> framing; relay must not buffer full response</td>
+<td>Phase 1 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-13-2">§13.2</a> SSE relay), Phase 7 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-19-2">§19.2</a> streaming relay, I2 order invariant)</td>
+</tr>
+<tr>
+<td>RFC8</td>
+<td><strong>OpenMetrics / Prometheus exposition format</strong> (<code>openmetrics.io</code>)</td>
+<td>Label cardinality rules; histogram bucket conventions; governs <code>infr-telemetry</code> metric naming</td>
+<td>Phase 12 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-24-2">§24.2</a> metrics.rs, cardinality cap)</td>
+</tr>
+<tr>
+<td>RFC9</td>
+<td><strong>W3C Trace Context (traceparent/tracestate)</strong> — Rec 2023</td>
+<td>Distributed trace propagation across ingress → backend; must forward unmodified, not regenerate</td>
+<td>Phase 12 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-24-2">§24.2</a> tracing.rs)</td>
+</tr>
+<tr>
+<td>RFC10</td>
+<td><strong>RFC 8305 — Happy Eyeballs v2</strong></td>
+<td>Dual-stack connection racing; relevant when backends have IPv4+IPv6 addrs in <code>infr-dispatch</code></td>
+<td>Phase 7 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-19-2">§19.2</a> pool.rs connection establishment)</td>
+</tr>
+<tr>
+<td>RFC11</td>
+<td><strong>ULID spec</strong> (<code>github.com/ulid/spec</code>)</td>
+<td>Monotonic, sortable, URL-safe 128-bit ID; governs <code>RequestId(Ulid)</code> encoding and sort semantics</td>
+<td>Phase 0 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-12-2">§12.2</a> ids.rs, <code>RequestId</code>)</td>
+</tr>
+<tr>
+<td>RFC12</td>
+<td><strong>RFC 7807 — Problem Details for HTTP APIs</strong></td>
+<td>Standard error body format; <code>InferError</code> variants map to problem+type URIs at ingress boundary</td>
+<td>Phase 1 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-13-2">§13.2</a> error-body mapping at ingress)</td>
+</tr>
+<tr>
+<td>RFC13</td>
+<td><strong>IETF draft — Retry-After / Rate Limiting Headers</strong></td>
+<td>429 + Retry-After for admission-shed responses; <code>X-RateLimit-*</code> semantics at ingress</td>
+<td>Phase 6 (<a class="cite" href="/system-design-blueprints/systems/distributed-inference-router/blueprint/#sec-18-2">§18.2</a> shedding.rs, 429 responses)</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section aria-labelledby="sec-glossary"> <h2 id="sec-glossary">Glossary <small class="muted">· 51 terms · <a href="/system-design-blueprints/glossary/">site-wide glossary</a></small></h2> <dl class="gloss">  <dt id="g-admission-control">Admission control</dt> <dd>Gate before queue entry; rejects or backpressures requests when queue is full or SLO deadline already expired at arrival. Implemented in <code>infr-queue</code>.</dd>  <dt id="g-adapterid">AdapterId</dt> <dd>Opaque newtype <code>(String)</code> identifying a LoRA/PEFT fine-tune adapter loaded onto one or more replicas. Distinct from <code>ModelId</code> (base weights).</dd>  <dt id="g-at-most-once">At-most-once</dt> <dd>Dispatch invariant: non-idempotent <code>Request</code> reaches exactly one backend; hedging forbidden unless <code>idempotent: true</code>. Prevents double-charging or duplicate state mutation.</dd>  <dt id="g-autoscaling-signal">Autoscaling signal</dt> <dd>Scalar or event emitted by <code>infr-sched</code> to an external HPA/cluster-autoscaler; carries queue depth, TTFT p99, and KV utilization. Does not directly scale; only advises.</dd>  <dt id="g-backendid">BackendId</dt> <dd>Newtype <code>(u32)</code>; stable identifier for a <code>Replica</code> within the registry. Reused on restart if address is same; new id on re-registration after eviction.</dd>  <dt id="g-backpressure">Backpressure</dt> <dd>Flow-control mechanism: when <code>infr-queue</code> is saturated, <code>infr-ingress</code> pauses token reading on the TCP/HTTP/2 stream rather than allocating more memory.</dd>  <dt id="g-batching-hint">Batching hint</dt> <dd>Advisory from <code>infr-sched</code> to a backend suggesting it combine N queued requests in one forward pass (continuous batching); backend may ignore.</dd>  <dt id="g-bounded-queue-invariant">Bounded-queue invariant</dt> <dd>All queues in <code>infr-queue</code> have a fixed max capacity; saturation triggers shedding or backpressure, never heap growth. Prevents OOM under spike load.</dd>  <dt id="g-circuit-breaker">Circuit breaker</dt> <dd>State machine in <code>infr-dispatch</code> with states Closed/Open/Half-Open; trips on consecutive errors or latency breach; prevents request storms to a failing backend.</dd>  <dt id="g-consistent-hashing">Consistent hashing</dt> <dd>Hash ring mapping <code>ModelId + session_key -&gt; BackendId</code>; minimizes remapping when replicas are added/removed; one policy in <code>infr-route</code>.</dd>  <dt id="g-continuous-batching">Continuous batching</dt> <dd>LLM serving technique (Orca, 2022) where the forward pass is executed continuously and new requests join mid-batch at iteration boundaries, maximizing GPU utilization without fixed batch windows.</dd>  <dt id="g-decision-auditability">Decision auditability</dt> <dd>Every <code>RoutingDecision</code> carries a <code>RouteReason</code> variant; logged to <code>infr-telemetry</code> enabling post-hoc analysis of routing choices per request.</dd>  <dt id="g-decode-phase">Decode phase</dt> <dd>Second phase of LLM inference; autoregressive per-token generation using KV cache built in prefill; typically memory-bandwidth-bound, lower compute intensity.</dd>  <dt id="g-disaggregation">Disaggregation</dt> <dd>Architecture (DistServe/Splitwise) separating prefill and decode onto different GPU pools; router must coordinate handoff of KV-cache state between prefill-replica and decode-replica.</dd>  <dt id="g-ewma-load">EWMA load</dt> <dd>Exponentially-weighted moving average of a metric (e.g., TTFT, queue depth); <code>infr-health</code> computes with configurable half-life; dampens transient spikes in routing decisions.</dd>  <dt id="g-ejection">Ejection</dt> <dd>Outlier-ejection: replica transitions <code>Health::Ejected</code> after consecutive errors or latency outlier detection; no requests routed to it until recovery timer expires.</dd>  <dt id="g-fairness">Fairness</dt> <dd>Policy in <code>infr-sched</code> ensuring no tenant/model starves; implemented via weighted fair queuing or token-bucket per tenant.</dd>  <dt id="g-graceful-drain">Graceful drain</dt> <dd><code>infr-ingress</code> shutdown mode: stop accepting new connections, wait for inflight requests to complete up to drain timeout, then close; preserves streaming clients.</dd>  <dt id="g-hedging">Hedging</dt> <dd>Speculative retry: send duplicate request to second backend after hedge delay; only legal when <code>Request.idempotent == true</code>; cancel slower response on first completion.</dd>  <dt id="g-health">Health</dt> <dd>Enum <code>{ Healthy, Degraded, Ejected }</code> per <code>Replica</code>; drives routing eligibility. <code>Degraded</code> still routes but with penalty weight; <code>Ejected</code> is fully excluded.</dd>  <dt id="g-health-invariant">Health invariant</dt> <dd>Requests are never dispatched to <code>Health::Ejected</code> replicas; enforced in <code>infr-route</code> before issuing <code>RoutingDecision</code>.</dd>  <dt id="g-idempotency">Idempotency</dt> <dd><code>Request.idempotent: bool</code>; when true, hedging and safe retry allowed; when false, at-most-once enforced. Caller asserts; router does not verify semantics.</dd>  <dt id="g-infererror">InferError</dt> <dd>Enum of error variants: <code>Timeout</code>, <code>BackendUnavailable</code>, <code>ModelNotLoaded</code>, <code>AdapterNotLoaded</code>, <code>StreamBroken</code>, <code>RateLimited</code>, <code>InternalError</code>, <code>QueueFull</code>.</dd>  <dt id="g-infr-core">infr-core</dt> <dd>Root crate exporting all shared types; no I/O, no async; all other crates depend on it. Zero transitive deps outside <code>std + serde + ulid</code>.</dd>  <dt id="g-kv-cache">KV cache</dt> <dd>Key-value attention cache (PagedAttention, vLLM); backends store KV tensors per request; <code>kv_util: f32</code> in <code>LoadState</code> tracks utilization 0.0–1.0.</dd>  <dt id="g-lease">Lease</dt> <dd><code>{ request: RequestId, backend: BackendId, deadline: Instant }</code>; held from routing decision until response complete or timeout; freeing updates backend accounting atomically.</dd>  <dt id="g-lease-invariant">Lease invariant</dt> <dd>Each admitted request holds exactly one Lease at a time; issuing a second Lease for the same request is a bug; enforced in <code>infr-dispatch</code>.</dd>  <dt id="g-loadstate">LoadState</dt> <dd>Snapshot of backend load: <code>{ queue_depth, kv_util, running_batch, ewma_ttft_ms, inflight }</code>; scraped by <code>infr-health</code> and stored in registry.</dd>  <dt id="g-lora-adapter">LoRA adapter</dt> <dd>Low-Rank Adaptation fine-tune weights layered on top of base model; must be loaded on target replica; <code>AdapterId</code> routes to adapter-resident replicas.</dd>  <dt id="g-modelid">ModelId</dt> <dd>Newtype <code>(String)</code> identifying base model weights (e.g., <code>&quot;llama3-70b&quot;</code>); foreign key into registry&#39;s model-&gt;replica map.</dd>  <dt id="g-order-invariant">Order invariant</dt> <dd>Byte order of token stream from backend is preserved to client exactly; <code>infr-dispatch</code> relay must not reorder, merge, or buffer chunks out of order.</dd>  <dt id="g-outlier-ejection">Outlier ejection</dt> <dd>Detection algorithm comparing a replica&#39;s p99 TTFT to fleet mean; if deviation exceeds threshold, transitions replica to <code>Health::Ejected</code> for a penalty interval.</dd>  <dt id="g-pagedattention">PagedAttention</dt> <dd>vLLM memory management (Kwon 2023) dividing KV cache into fixed-size pages; enables fine-grained sharing and eviction; <code>kv_util</code> reflects page pool saturation.</dd>  <dt id="g-prefill-phase">Prefill phase</dt> <dd>First LLM inference phase: processes all prompt tokens in one (often parallel) forward pass; compute-bound; produces KV cache; TTFT directly depends on it.</dd>  <dt id="g-prefix-cache-radixattention">Prefix cache / RadixAttention</dt> <dd>SGLang (Zheng 2024) radix-tree structure reusing KV cache segments for shared prompt prefixes across requests; <code>PrefixTree</code> in <code>infr-route</code> maps prefix hashes to backends holding the cache.</dd>  <dt id="g-prefixhash">PrefixHash</dt> <dd><code>u64</code> rolling hash of prompt token prefix; computed in <code>infr-ingress</code>; used by <code>infr-route</code> for longest-prefix match against <code>PrefixTree</code>.</dd>  <dt id="g-prefixtree">PrefixTree</dt> <dd>Radix tree <code>token-prefix -&gt; Set&lt;BackendId&gt;</code> with recency metadata; maintained by <code>infr-registry</code> updated on dispatch outcomes; drives prefix-cache-aware routing.</dd>  <dt id="g-priority">Priority</dt> <dd>Enum <code>{ RealTime, High, Normal, Batch }</code>; determines queue ordering and SLO enforcement strictness in <code>infr-queue</code>.</dd>  <dt id="g-requestid">RequestId</dt> <dd>Newtype <code>(Ulid)</code>; monotonic, sortable, globally unique; used as correlation key in logs, traces, and lease tracking.</dd>  <dt id="g-replica">Replica</dt> <dd>Active backend instance: <code>{ id: BackendId, model: ModelId, adapters: HashSet&lt;AdapterId&gt;, load: LoadState, health: Health, addr: SocketAddr }</code>.</dd>  <dt id="g-routereason">RouteReason</dt> <dd>Enum <code>{ LeastLoad, PrefixHit, AdapterResident, SessionAffinity, ConsistentHash, Fallback, Hedged }</code>; attached to every <code>RoutingDecision</code> for auditability.</dd>  <dt id="g-routingdecision">RoutingDecision</dt> <dd><code>{ backend: BackendId, reason: RouteReason }</code>; output of <code>infr-route</code> policy engine; input to <code>infr-dispatch</code>.</dd>  <dt id="g-session-affinity">Session affinity</dt> <dd>Routing policy binding a client session key (e.g., <code>X-Session-Id</code>) to a consistent backend for KV cache reuse; degrades gracefully to least-load on backend failure.</dd>  <dt id="g-shedding">Shedding</dt> <dd>Active request rejection (HTTP 429 / gRPC RESOURCE_EXHAUSTED) when queue is full or deadline already expired; preferred over silent OOM or unbounded latency.</dd>  <dt id="g-slo">SLO</dt> <dd><code>{ ttft_ms: u32, tpot_ms: u32, deadline: Instant }</code>; per-request service-level objective; <code>infr-queue</code> ages requests and sheds if deadline expires in queue.</dd>  <dt id="g-sse">SSE</dt> <dd>Server-Sent Events; HTTP/1.1 streaming token delivery format; <code>infr-ingress</code> emits <code>data: {token}\n\n</code> chunks from the backend relay.</dd>  <dt id="g-ttft">TTFT</dt> <dd>Time-To-First-Token: latency from request receipt to first token byte delivered to client; primary LLM latency SLO metric; tracked as EWMA per backend.</dd>  <dt id="g-tpot">TPOT</dt> <dd>Time-Per-Output-Token: inter-token latency during decode phase; secondary SLO metric; computed per request in <code>infr-telemetry</code>.</dd>  <dt id="g-tenant">Tenant</dt> <dd>Logical isolation unit for fairness/quota enforcement in <code>infr-sched</code>; identified by header or API key prefix; quota tracked as token-bucket.</dd>  <dt id="g-vllm">vLLM</dt> <dd>Open-source LLM inference engine (PagedAttention); primary reference backend implementation; exposes <code>/v1/completions</code> HTTP API compatible with OpenAI spec.</dd>  <dt id="g-weighted-fair-queuing">Weighted fair queuing</dt> <dd>Scheduling algorithm in <code>infr-sched</code> allocating dispatch slots proportionally to tenant weights; prevents single tenant monopolizing capacity.</dd>  </dl> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

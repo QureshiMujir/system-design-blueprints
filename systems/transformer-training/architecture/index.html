@@ -1,0 +1,320 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Transformer Training Loop — Architecture · Engineering Blueprints</title><meta name="description" content="Transformer Training Loop, hld: §3 overview + §8 domain model. Build a from-scratch, production-grade training loop for decoder-only Transformer language models in the nanoGPT → GPT-NeoX → Megatron-LM lineage: a system that consumes pre-tokenized token shards…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/transformer-training/">Transformer Training Loop</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>Transformer Training Loop</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Python</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>10 phases</li> <li>~20 weeks</li> <li>2,462 lines</li> <li>blueprint #114</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/transformer-training/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/transformer-training/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/transformer-training/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/transformer-training/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/transformer-training/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/transformer-training/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/transformer-training/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/transformer-training/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/transformer-training/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/transformer-training/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Transformer Training Loop — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                 TrainConfig + ModelConfig (frozen, single source of truth)
+                                    |
+                +-------------------+-------------------+
+                v                                        v
+       +----------------+                       +-----------------+
+       | data pipeline  |                       |  model build    |
+       | shard catalog  |                       |  init + tie     |
+       | det. shuffle   |                       |  -&gt;cuda / bf16  |
+       | pack (B,T)     |                       +--------+--------+
+       +--------+-------+                                |
+                |  Batch(B,T)                             |
+                +---------------------+-------------------+
+                                      v
+                      +---------------------------------+
+                      | forward (autocast) -&gt; CE loss    |
+                      | attn + MLP + norm, shifted target|
+                      +----------------+------------------+
+                                       v
+                      +---------------------------------+
+                      | backward; grad accumulate         |
+                      | (1/N scale, I3); activation ckpt  |
+                      +----------------+------------------+
+                                       v
+                      +---------------------------------+
+                      | clip global norm -&gt; AdamW step    |
+                      | (fp32 state) -&gt; scheduler.step()  |
+                      +----------------+------------------+
+                                       v
+                                +---------------+
+                                | logger.tick() |
+                                +-------+-------+
+                                        |  every N steps
+          +-----------------------------+----------------------------+
+          v                             v                            v
+ +----------------+          +------------------+          +----------------+
+ | eval harness   |          | checkpointer     |          | fault loop     |
+ | held-out PPL   |          | atomic sharded   |          | OOM/NaN/SIGTERM|
+ +----------------+          +------------------+          +----------------+</code></pre>
+<p><strong>Data pipeline box.</strong> Reads <code>.npy</code> int32 shards produced offline by the upstream
+tokenizer; the loop never tokenizes at train time (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-2">I2</a>). Deterministic
+<code>(seed, epoch)</code> shuffle, sequence packing, <code>Batch</code> collation. Trust boundary: a
+shard&#39;s SHA-256 is checked once at catalog load (<a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#sec-9">§9</a> <a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-15">ADR-15</a>).</p>
+<p><strong>Model-build box.</strong> Constructs the module graph from <code>ModelConfig</code>, applies
+GPT-2-style or Xavier init, ties token-embedding and output-projection weights
+(<a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-14">ADR-14</a>), moves to the target device/dtype.</p>
+<p><strong>Forward/loss/backward boxes.</strong> Pure function of <code>(params, Batch)</code>; autocast to
+bf16/fp16 wraps forward only (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-4">I4</a>); loss is causal cross-entropy on shifted
+targets (<a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-14">§14</a>).</p>
+<p><strong>Gradient-accumulation/checkpoint box.</strong> Concurrency boundary: micro-batches
+execute sequentially on one device; accumulation is a correctness primitive (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-3">I3</a>),
+not a throughput one; activation checkpointing trades one extra forward pass per
+checkpointed block for O(√L) instead of O(L) activation memory (<a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-17">§17</a>).</p>
+<p><strong>Optimizer/schedule boxes.</strong> AdamW with fp32 master state regardless of model
+dtype (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-4">I4</a>); global-norm clip before the step; cosine-with-warmup LR (<a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-15">§15</a>).</p>
+<p><strong>Control-plane boxes (right-hand fan-out).</strong> Persistence boundary: the
+checkpointer is the only writer to durable storage; protocol boundary: the eval
+harness and logger are read-only with respect to training state; the fault loop
+is the external-interface boundary (OS signals, CUDA OOM exceptions). All three
+fire on the same step counter and are individually toggleable via <code>TrainConfig</code>.</p>
+<p>Every later section stays consistent with this diagram; a component not shown
+here does not exist in Phase 0–9.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Tokenization &amp; Batching Contract</h3>
+<p>The upstream tokenizer (a separate blueprint) is the sole producer of <code>.npy</code>
+int32 token-id shards; this project is the sole consumer. Contract: a
+<code>ShardCatalog</code> (<a class="cite" href="/system-design-blueprints/systems/transformer-training/blueprint/#sec-11-2">§11.2</a>) lists every shard, its token count, and its SHA-256,
+checked once at startup (<a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-15">ADR-15</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-2">I2</a>). The training loop never invokes a
+tokenizer. Sequences are packed (<a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-17">ADR-17</a>): multiple documents are concatenated
+into one <code>(B, T)</code> row separated by <code>eos_token_id</code>, with an <code>attn_mask</code> (<a class="cite" href="/system-design-blueprints/systems/transformer-training/blueprint/#sec-11-3">§11.3</a>)
+preventing cross-document attention — this trades a small mask-construction
+cost for eliminating padding waste entirely.</p>
+<h3 id="sec-8-2">8.2 Embedding &amp; Positional Encoding</h3>
+<p>Token embedding: a lookup table <code>E ∈ R^(vocab × d_model)</code>, tied to the output
+projection (<a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-14">ADR-14</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-10">I10</a>) so the same matrix produces logits: <code>logits = h · Eᵀ</code>.
+Two positional schemes (<a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-5">ADR-05</a>): <strong>learned</strong> absolute positions, added to the
+token embedding before layer 0; <strong>rotary (RoPE)</strong>, which instead rotates each
+query/key vector&#39;s dimension-pairs by an angle proportional to position,
+preserving relative-position information in the dot product without adding to
+the residual stream (Su et al. 2021). RoPE angle for pair <code>i</code> at position <code>p</code>:
+<code>θ_i(p) = p / base^(2i/d_head)</code>, <code>base = 10000</code> (default, <a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-5">ADR-05</a>).</p>
+<h3 id="sec-8-3">8.3 Multi-Head Causal Attention</h3>
+<p>For <code>H</code> heads of dimension <code>d_head = d_model / H</code>: <code>Q, K, V = x·W_Q, x·W_K, x·W_V</code>
+(or, under GQA, <code>K, V</code> project to <code>n_kv_head &lt; H</code> groups shared across query
+heads). Attention weights: <code>A = softmax((Q·Kᵀ)/√d_head + M)</code> where <code>M</code> is the
+causal mask (<code>M[i,j] = -∞</code> for <code>j &gt; i</code>, <code>0</code> otherwise) combined with the
+packing <code>attn_mask</code> from <a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#sec-8-1">§8.1</a>. Output: <code>A·V</code>, reshaped back to <code>(B, T, d_model)</code>
+and projected by <code>W_O</code>. Causal masking is what makes the model autoregressive:
+position <code>i</code>&#39;s output depends only on positions <code>≤ i</code> (Vaswani et al. 2017 <a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#sec-3">§3</a>).</p>
+<h3 id="sec-8-4">8.4 MLP &amp; Residual/Pre-Norm Stack</h3>
+<p>Pre-norm residual block (<a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-3">ADR-03</a>): <code>x&#39; = x + Attn(Norm(x))</code>, then
+<code>x&#39;&#39; = x&#39; + MLP(Norm(x&#39;))</code>. Norm is RMSNorm (default, <a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-4">ADR-04</a>) —
+<code>RMSNorm(x) = x / rms(x) · γ</code>, <code>rms(x) = √(mean(x²) + ε)</code> — or LayerNorm
+(mean-subtracting variant), selectable per <code>ModelConfig.norm</code>. MLP is SwiGLU
+(default, <a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-6">ADR-06</a>) — <code>MLP(x) = (SiLU(x·W1) ⊙ (x·W2))·W3</code>, with <code>d_ff</code> scaled to
+2/3 of the GELU-equivalent width to hold parameter count constant — or a plain
+GELU MLP (<code>GELU(x·W1)·W2</code>).</p>
+<h3 id="sec-8-5">8.5 Forward Pass &amp; Cross-Entropy Loss</h3>
+<p>The full forward is <code>L</code> stacked blocks (<a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#sec-8-4">§8.4</a>) over the embedded, positioned
+input, a final norm, then the tied output projection to <code>(B, T, vocab)</code> logits.
+Loss is causal-LM cross-entropy against targets shifted by one position:
+<code>loss = mean_t[ -log softmax(logits_t)[target_t] ]</code> for <code>t</code> where <code>target_t</code>
+is not a padding/cross-document sentinel. Under autocast (<a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#sec-8-8">§8.8</a>), this forward
+runs in bf16/fp16; the loss reduction itself runs in fp32 to avoid
+catastrophic cancellation in the log-sum-exp.</p>
+<h3 id="sec-8-6">8.6 Backward Pass &amp; Gradient Flow</h3>
+<p>PyTorch&#39;s reverse-mode autograd (<code>loss.backward()</code>) walks the tape built during
+<a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#sec-8-5">§8.5</a>&#39;s forward. Gradient checkpointing (<a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#sec-8-9">§8.9</a>, Chen et al. 2016) discards
+intermediate activations per block and recomputes them during this backward
+pass — trading one extra forward per checkpointed block for O(√L) resident
+activation memory instead of O(L). The pre-clip global gradient norm is
+recorded (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-9">I9</a>) before any clipping is applied.</p>
+<h3 id="sec-8-7">8.7 AdamW Optimizer &amp; LR Schedule</h3>
+<p>Per-parameter update (Loshchilov &amp; Hutter 2019, decoupling weight decay from
+the adaptive step):</p>
+<pre class="diagram"><code>m_t = β1·m_{t-1} + (1-β1)·g_t
+v_t = β2·v_{t-1} + (1-β2)·g_t²
+m̂_t = m_t / (1-β1^t);  v̂_t = v_t / (1-β2^t)
+θ_t = θ_{t-1} - lr_t · ( m̂_t/(√v̂_t + ε) + wd·θ_{t-1} )</code></pre>
+<p><code>β = (0.9, 0.95)</code>, <code>ε = 1e-8</code> (Brown et al. 2020, <a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-7">ADR-07</a>). <code>lr_t</code> follows a
+linear warmup over <code>warmup_steps</code> then a cosine decay to <code>min_lr_ratio · peak_lr</code>
+over the remaining <code>max_steps</code> (<a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-8">ADR-08</a>). Parameters are split into decay/no-decay
+groups (<a class="cite" href="/system-design-blueprints/systems/transformer-training/blueprint/#sec-11-1">§11.1</a> <code>groups.py</code>): weight decay applies to matmul weights only, never
+to biases, norm gains, or embeddings.</p>
+<h3 id="sec-8-8">8.8 Mixed-Precision Numerics</h3>
+<p>Forward/backward run under autocast to bf16 (default, <a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-9">ADR-09</a>) or fp16
+(fallback for pre-Ampere GPUs). bf16 shares fp32&#39;s 8-bit exponent (dynamic
+range) but has only 7 mantissa bits, so no loss-scaling is required
+(Micikevicius et al. 2018); fp16 has a 10-bit mantissa but a 5-bit exponent,
+so small gradients underflow to zero without a <code>GradScaler</code>-equivalent
+dynamic loss-scale. The optimizer&#39;s moments and the master copy of every
+parameter are always fp32 (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-4">I4</a>) — mixed precision is a forward/backward
+property only, never an optimizer property (<a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-10">P10</a>).</p>
+<h3 id="sec-8-9">8.9 Gradient Accumulation &amp; Activation Checkpointing</h3>
+<p>Accumulation splits an effective batch of <code>micro_batch × accum</code> into <code>accum</code>
+sequential micro-batches whose losses are each scaled by <code>1/accum</code> before
+<code>backward()</code>, so the summed gradient equals the true full-batch gradient (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-3">I3</a>,
+<a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-5">P5</a>) — never accumulate un-scaled gradients in a buffer, which double-counts
+under mixed precision. Activation checkpointing (Chen et al. 2016) is
+orthogonal: it wraps a subset of blocks so their activations are freed after
+forward and recomputed during backward, at the cost of one extra forward pass
+per checkpointed block (<a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#sec-8-6">§8.6</a>).</p>
+<h3 id="sec-8-10">8.10 Data / Tensor / Pipeline Parallelism &amp; ZeRO Sharding</h3>
+<p>Data parallelism (DDP): every rank holds a full model replica; gradients
+all-reduce after each accumulation cycle. ZeRO (Rajbhandari et al. 2020) shards,
+progressively, optimizer state (stage 1), gradients (stage 2), and parameters
+(stage 3, ≈ PyTorch FSDP) across data-parallel ranks, trading all-gather/
+reduce-scatter communication for per-GPU memory. Tensor parallelism (Shoeybi et
+al. 2019) splits individual matmuls (e.g. attention head groups, MLP columns)
+across GPUs within a layer; pipeline parallelism splits layers across GPUs and
+pipelines micro-batches through them. This blueprint ships DDP and FSDP/ZeRO-2
+(Phase 8); tensor/pipeline (3D) parallelism is <code>PhaseDeferred(&quot;§35&quot;)</code>.</p>
+<h3 id="sec-8-11">8.11 Worked Example — One Training Step, End to End</h3>
+<p><code>micro_batch=8, seq_len=1024, accum=4, 8×A100 DDP</code> ⇒ effective batch =
+<code>8 × 4 × 8 = 256</code> sequences = <code>262,144</code> tokens/step. Step: (1) 4 micro-batches
+run forward+backward with loss scaled by <code>1/4</code>; (2) gradients accumulate
+locally then all-reduce once across the 8 ranks; (3) global-norm clip at 1.0;
+(4) AdamW step with <code>lr_t</code> from the warmup-cosine schedule at the current
+<code>step</code>; (5) <code>LossPoint</code> logged with <code>tokens_seen += 262,144</code>. At step 0,
+<code>lr_0 = peak_lr · 0/warmup_steps = 0</code>; at <code>step = warmup_steps</code>, <code>lr = peak_lr</code>.</p>
+<h3 id="sec-8-12">8.12 Malformed-Input &amp; Failure-Path Examples</h3>
+<p><strong>Malformed input:</strong> a shard whose recorded <code>n_tokens</code> in <code>ShardCatalog</code>
+disagrees with the actual <code>.npy</code> length — caught by the startup integrity
+check (<a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#sec-8-1">§8.1</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-15">ADR-15</a>); the loop refuses to start rather than silently
+truncating. <strong>Failure path:</strong> a CUDA OOM raised mid-<code>backward()</code> — caught by
+<code>tt.fault.oom</code> (<a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-4">P4</a>), which discards the current step&#39;s gradients, halves
+<code>micro_batch_size</code> while doubling <code>accum</code> to preserve the effective batch size
+(<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-11">I11</a>), checkpoints, and restarts the step; if OOM recurs at the halved size
+twice consecutively, the run halts and pages an operator (<a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-19">§19</a> <a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#fm-3">FM-3</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/blueprint/#sec-24">§24</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-1">P1</a> — Overfit one batch first.</strong> The loop must drive one fixed batch to near- zero loss before anything else is trusted (Phase 0, <a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-12">§12</a>). Tradeoff: delays &quot;real&quot; training by a day; operational implication: it is the fastest bisect target for a new bug; violating it means every subsequent bug is indistinguishable from a scale problem.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-2">P2</a> — Bit-exact resume is the contract.</strong> A crash-and-resume at step N must match an uninterrupted run at step N+1000 to fp64 tolerance (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-18">§18</a>). Tradeoff: forces deterministic shuffling and full RNG capture, which cost engineering time up front; violating it silently corrupts every long run&#39;s reproducibility.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-3">P3</a> — Deterministic shuffle.</strong> The shuffle is a pure function of <code>(seed, epoch)</code> (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#sec-8-1">§8.1</a>). Tradeoff: precludes torch <code>DataLoader</code>&#39;s built-in worker-random shuffling; violating it makes <a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-2">P2</a> unreachable.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-4">P4</a> — No silent OOM.</strong> An OOM must trigger checkpoint-and-shrink, never a bare process crash (<a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-19">§19</a> <a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#fm-3">FM-3</a>). Tradeoff: requires an exception handler around every optimizer step; violating it loses up to a full checkpoint interval of work.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-5">P5</a> — Gradient-accumulation correctness.</strong> Accumulation must be bit-exact (fp64) with an equivalent full batch (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#sec-8-9">§8.9</a>). Tradeoff: requires 1/N loss scaling, not naive summation; violating it silently changes the effective LR.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-6">P6</a> — Eval is observational.</strong> Held-out eval never steers training hyperparameters (no early stopping on eval loss, <a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-19">§19</a>). Tradeoff: forgoes a cheap regularization signal; violating it couples two subsystems that must stay independently debuggable.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-7">P7</a> — Checkpoint frequency is a budget decision.</strong> Default: every 1,000 steps, atomic write, retain last 3 + best-eval + every-10k milestone (<a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-18">§18</a>). Tradeoff: storage cost vs. lost-compute cost; violating it either wastes storage or risks losing hours of GPU time.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-8">P8</a> — Every loss spike is explained.</strong> A step &gt;3× the rolling-median loss emits a diagnostic bundle (offending micro-batch, per-sample loss, pre-clip grad norm, max activation) — never a silent skip (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-9">I9</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-19">§19</a>). Tradeoff: extra bookkeeping on every step; violating it makes spikes undiagnosable after the fact.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-9">P9</a> — No leaky globals.</strong> No component reads <code>os.environ</code> or process-wide state outside <code>TrainConfig</code> (<a class="cite" href="/system-design-blueprints/systems/transformer-training/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/design/#sec-11">§11</a>). Tradeoff: some ergonomics lost (no ambient device selection); violating it breaks <a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-2">P2</a>&#39;s determinism.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-10">P10</a> — Mixed precision defaults to bf16.</strong> bf16&#39;s fp32-equivalent dynamic range removes the need for <code>GradScaler</code>; fp16 is an ADR-gated fallback for pre-Ampere hardware (<a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-9">ADR-09</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-16">§16</a>). Tradeoff: bf16 has fewer mantissa bits (less precision) than fp16; violating the default on Ampere+ hardware adds unneeded loss-scaling complexity.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-11">P11</a> — Operations are the product.</strong> The diagnostics CLI, checkpoint inspector, and run-comparison tool are first-class deliverables, not afterthoughts (<a class="cite" href="/system-design-blueprints/systems/transformer-training/build/#sec-21">§21</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/blueprint/#sec-24">§24</a>). Tradeoff: roughly a third of engineering time goes to tooling that never touches the forward pass; violating it means every incident becomes an ad hoc script.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/transformer-training/architecture/#p-12">P12</a> — PyTorch is the substrate, not the framework.</strong> <code>torch.nn</code>/<code>autograd</code>/ <code>cuda</code> are used directly; <code>torch.optim</code>, <code>DataLoader</code>, and <code>GradScaler</code> are not, so every arithmetic step stays inspectable (<a class="cite" href="/system-design-blueprints/systems/transformer-training/trade-offs/#adr-7">ADR-07</a>, <a class="cite" href="/system-design-blueprints/systems/transformer-training/design/#sec-11">§11</a>). Tradeoff: more code to own and test; violating it re-introduces the opaque-framework problem this project exists to avoid (<a class="cite" href="/system-design-blueprints/systems/transformer-training/blueprint/#sec-2">§2</a>).</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

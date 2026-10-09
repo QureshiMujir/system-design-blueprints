@@ -1,0 +1,350 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Garbage Collector — Architecture · Engineering Blueprints</title><meta name="description" content="Garbage Collector, hld: §3 overview + §8 domain model. Build a portable, embeddable tracing garbage collector, hostable by a virtual machine or compiled-language runtime, that walks the full historical lineage of GC technique — reference counting…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/garbage-collector/">Garbage Collector</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Garbage Collector</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">C/C++</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~16 weeks</li> <li>2,459 lines</li> <li>blueprint #32</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/garbage-collector/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/garbage-collector/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/garbage-collector/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/garbage-collector/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/garbage-collector/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/garbage-collector/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/garbage-collector/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/garbage-collector/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/garbage-collector/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/garbage-collector/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Garbage Collector — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>+----------------------------------------------------------------+
+| Mutator (host: VM interpreter/JIT, compiler runtime, harness)  |
+|  application threads &lt;--- safepoints / handshakes ---+          |
+|  allocates, reads, writes heap slots                 |          |
++---------------------------+----------------------------+--------+
+                            |
+                            v
++----------------------------------------------------------------+
+| Public ABI  include/gc.h  (trust boundary: host &lt;-&gt; collector) |
+|  gc_new / gc_destroy / gc_alloc / gc_write_barrier /            |
+|  gc_read_barrier / gc_safepoint / gc_add_root / gc_collect       |
++---------------------------+----------------------------+--------+
+                            |
+                            v
++----------------------------------------------------------------+
+| Collector core                                                  |
+| +----------+  +-----------+  +-------------+  +---------------+ |
+| |Allocator |  | Roots     |  | Barriers    |  | Tracer        | |
+| |bump/free-|  | precise / |  | Dijkstra/   |  | color states, | |
+| |list/     |  | conserva- |  | SATB/card/  |  | work-stealing | |
+| |region/LOS|  | tive scan |  | remembered  |  | mark queues   | |
+| +----+-----+  +-----+-----+  +------+------+  +-------+-------+ |
+|      |              |               |                 |         |
+|      +--------------+---------------+-----------------+         |
+|                            |  (concurrency boundary: mark        |
+|                            v   workers vs mutator threads)       |
+| +------------+  +-------------+  +-------------------+          |
+| | Sweep      |  | Compact     |  | Copy               |          |
+| | free-list  |  | slide/      |  | Cheney forwarding, |          |
+| | rebuild    |  | break-table |  | semispace flip     |          |
+| +------------+  +-------------+  +-------------------+          |
++---------------------------+----------------------------+--------+
+                            |  (persistence boundary: none —       |
+                            v   heap is process-lifetime only)     |
++----------------------------------------------------------------+
+| Heap layout                                                      |
+|  nursery (semispace) | old-gen regions | LOS | card table |      |
+|  mark bitmap | remembered sets | forwarding side-table            |
++---------------------------+----------------------------+--------+
+                            |
+                            v
++----------------------------------------------------------------+
+| OS substrate (trust boundary: collector &lt;-&gt; kernel)              |
+|  mmap/mprotect (read-barrier trap page) / madvise(DONTNEED) /    |
+|  sigaltstack+ucontext (conservative stack walk) / futex-class    |
+|  suspension for safepoint handshakes                             |
++----------------------------------------------------------------+</code></pre>
+<p><strong>Mutator</strong> — application threads; the only actor that allocates and mutates heap slots;
+cooperates via safepoint polls and inline barriers, never suspended except at a safepoint.
+<strong>Public ABI</strong> — the sole trust and stability boundary; frozen shape across every
+collector-kind swap (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#sec-6">§6</a>). <strong>Allocator</strong> — per-kind strategy (bump for the semispace
+nursery, size-classed free-list for old gen, region-grain for Phase 9, LOS for
+oversized objects). <strong>Roots</strong> — precise (compiler-supplied stack maps) or conservative
+(Boehm-style word scan); both feed the same root set contract. <strong>Barriers</strong> — the
+concurrency boundary&#39;s write side: Dijkstra incremental-update (Phase 6), Yuasa SATB
+(Phase 7), card-table (Phase 5), and the read barrier (Phase 8) that makes concurrent
+compaction sound. <strong>Tracer</strong> — tri-color state machine and the work-stealing mark
+queues; identical across mark-sweep/compact/copy, only the post-mark action differs.
+<strong>Sweep/Compact/Copy</strong> — the three reclamation back ends selected per collector kind;
+never combined incoherently (Phase boundaries in <a class="cite" href="/system-design-blueprints/systems/garbage-collector/trade-offs/#sec-9">§9</a> <a class="cite" href="/system-design-blueprints/systems/garbage-collector/trade-offs/#adr-4">ADR-0004</a> lock which pairs exist).
+<strong>Heap layout</strong> — the persistence-boundary-free, process-lifetime-only address space;
+card table and remembered sets scale with heap size (quantified <a class="cite" href="/system-design-blueprints/systems/garbage-collector/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/garbage-collector/numbers/#sec-33">§33</a>). <strong>OS
+substrate</strong> — the only external interface; no network, no filesystem beyond optional
+trace-log output (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/blueprint/#sec-25">§25</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<p><strong>Object model.</strong> Every heap object is a payload preceded by a <code>gc_header_t</code> (one
+machine word, <a class="cite" href="/system-design-blueprints/systems/garbage-collector/design/#sec-11">§11</a>). The header encodes color (2 bits), age (4 bits), a forwarding flag,
+and (when not forwarding) a compressed pointer to the object&#39;s <code>gc_typeinfo_t</code>. The host
+supplies <code>gc_typeinfo_t</code> once per type at startup; the collector never infers layout.</p>
+<p><strong>Heap model.</strong> The heap is partitioned into: a nursery (two semispaces, Phase 4+), an
+old generation (free-list or region-grain, Phase 2/5/9), a Large Object Space (LOS, for
+objects ≥ 1/8 region size), and metadata (card table, mark bitmap, remembered sets). A
+region (Phase 9) generalizes &quot;old generation&quot; into fixed-size (1 MiB) chunks independently
+classified as free/eden/survivor/old/humongous.</p>
+<p><strong>Root model.</strong> Roots are globals (registered once via <code>gc_add_root</code>) and per-thread stack
+roots (registered via <code>gc_thread_attach</code>, scanned per collection). Precise roots come from
+host-supplied stack maps; conservative roots come from a word-by-word scan of the C stack
+between two guard addresses, testing each word for &quot;points into a valid object header.&quot;</p>
+<p><strong>Write-barrier model.</strong> A write barrier is code inserted at every pointer-store site.
+Which barrier fires depends on collector kind: none (Phase 0–4), card-marking
+(Phase 5, old→young), Dijkstra incremental-update (Phase 6), or SATB (Phase 7). Exactly
+one barrier style is compiled in per collector kind (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-8">P8</a>) — never a superset.</p>
+<p><strong>State tables.</strong></p>
+<p><em>Tri-color state transitions (Phase 6+):</em></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Barrier action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>White</td>
+<td>root-scanned or greyed by barrier</td>
+<td>Grey</td>
+<td>pushed to mark queue</td>
+</tr>
+<tr>
+<td>Grey</td>
+<td>slots scanned by mark worker</td>
+<td>Black</td>
+<td>children greyed if white</td>
+</tr>
+<tr>
+<td>White</td>
+<td>survives to sweep without being greyed</td>
+<td>reclaimed (garbage)</td>
+<td>freed at sweep</td>
+</tr>
+<tr>
+<td>Black</td>
+<td>mutator writes a white pointer into it (Dijkstra)</td>
+<td>Black (child greyed)</td>
+<td><code>gc_write_barrier</code> greys child</td>
+</tr>
+<tr>
+<td>any</td>
+<td>mutator overwrites a pointer during SATB epoch (Yuasa)</td>
+<td>unchanged</td>
+<td>old value logged grey before overwrite</td>
+</tr>
+</tbody></table></div>
+<p><em>Object lifecycle across collector kinds:</em></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Allocate</th>
+<th>Trace</th>
+<th>Reclaim</th>
+<th>Move?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Mark-sweep (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-14">§14</a>)</td>
+<td>free-list</td>
+<td>mark (DFS/iterative)</td>
+<td>sweep (free-list rebuild)</td>
+<td>no</td>
+</tr>
+<tr>
+<td>Mark-compact (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-15">§15</a>)</td>
+<td>free-list</td>
+<td>mark</td>
+<td>slide (Lisp-2/break-table)</td>
+<td>yes (in place, 3-pass)</td>
+</tr>
+<tr>
+<td>Copy/Cheney (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-16">§16</a>)</td>
+<td>bump (to-space)</td>
+<td>Cheney scan</td>
+<td>discard from-space</td>
+<td>yes (semispace flip)</td>
+</tr>
+<tr>
+<td>Generational (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-17">§17</a>)</td>
+<td>bump (nursery) + free-list (old)</td>
+<td>minor: Cheney; major: mark-sweep/compact</td>
+<td>both</td>
+<td>nursery: yes; old: kind-dependent</td>
+</tr>
+<tr>
+<td>Concurrent (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-19">§19</a>)</td>
+<td>bump/free-list</td>
+<td>tri-color, concurrent workers</td>
+<td>sweep after final remark</td>
+<td>no (marking only)</td>
+</tr>
+<tr>
+<td>Concurrent-compact (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-20">§20</a>)</td>
+<td>region bump</td>
+<td>tri-color, concurrent</td>
+<td>concurrent evacuation</td>
+<td>yes (read-barrier protected)</td>
+</tr>
+</tbody></table></div>
+<p><strong>Worked example — minor collection with a card table (Phase 5).</strong> Heap has old object
+<code>A</code> at region 3, young object <code>B</code> in the nursery. Mutator executes <code>A.slot = B</code>
+(<code>gc_write_barrier(gc, A, &amp;A.slot, B)</code>): the barrier stores <code>B</code> into the slot, tests
+<code>gc_is_old(A) &amp;&amp; gc_is_young(B)</code>, and — true — marks the card containing <code>&amp;A.slot</code> dirty
+(<a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#inv-5">I5</a>). At the next minor collection, the collector scans dirty cards instead of the whole
+old generation, finds <code>A.slot</code> pointing at <code>B</code>, treats <code>A</code> as an implicit root, and copies
+<code>B</code> (if live) into the surviving nursery semispace, updating <code>A.slot</code> to the forwarding
+address. The card is cleared at minor-GC epilogue (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#inv-6">I6</a>), never at entry.</p>
+<p><strong>Malformed-input example.</strong> Host calls <code>gc_alloc(gc, 32, typeinfo)</code> where
+<code>typeinfo-&gt;n_ptr_slots == 3</code> but <code>typeinfo-&gt;ptr_offsets == {0, 8, 40}</code> — offset 40 exceeds
+<code>size == 32</code> (violates <a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#inv-14">I14</a>). The debug-mode typeinfo validator (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-7">P7</a>) rejects the
+allocation at the call site with <code>gc_panic(&quot;bad typeinfo: offset 40 &gt;= size 32&quot;)</code> rather
+than allowing the tracer to later read garbage as a pointer during mark.</p>
+<p><strong>Failure-path example.</strong> During concurrent compaction (Phase 8), a mutator thread reads
+a stale (non-forwarded) pointer to an object mid-relocation because its read barrier was
+miscompiled (inlining failure, N.6 pitfall <a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-20">§20</a>). Detection: the conformance negative
+fixture <code>04_torn_relocation.gc</code> (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/blueprint/#sec-20-5">§20.5</a>) replays this under TSan and the debug canary in
+the header&#39;s unused bits reports a torn read (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#inv-4">I4</a>&#39;s CAS-retry counter spikes). Recovery:
+none at runtime — this is a fatal build-correctness bug caught in CI before release, not
+a production-recoverable condition (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#fm-3">FM-3</a>, <a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#sec-24">§24</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-1">P1</a> — One ABI, many collectors.</strong> <code>include/gc.h</code> does not change as the implementation walks RC → concurrent-compacting. Tradeoff: the ABI must be conservative enough on day one to support the <em>eventual</em> read barrier. Violating it (leaking a collector-kind-specific type into the ABI) breaks every host integration built against an earlier phase.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-2">P2</a> — Switchable at build or runtime.</strong> <code>gc_config_t.collector_kind</code> selects the algorithm; the harness exercises every kind against the same workloads. Operational implication: a regression in one kind must not silently fall through to another kind&#39;s code path (tested by <a class="cite" href="/system-design-blueprints/systems/garbage-collector/blueprint/#sec-27">§27</a>&#39;s per-kind conformance buckets).</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-3">P3</a> — Precise where it counts, conservative where it must.</strong> The reference root scanner is precise for hosts emitting stack maps; a Boehm-style conservative scanner exists for hosts that cannot. Tradeoff: conservative retains more garbage (quantified <a class="cite" href="/system-design-blueprints/systems/garbage-collector/numbers/#sec-33">§33</a>); violating this by defaulting to conservative even when precise is available wastes reclaimable memory silently.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-4">P4</a> — Hosted, not hosted-on.</strong> The collector does not own threads, scheduling, or syscall dispatch; it cooperates through safepoints and barriers. Breaking this (e.g. collector spawning its own mutator-visible threads without host consent) makes embedding impossible in a host with its own thread-pool policy.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-5">P5</a> — Observable by default.</strong> Every collection emits a <code>gc_event_t</code> (timestamps, byte counts, live/dead ratios, worklist stats). Operational implication: no &quot;quiet&quot; collector kind — silence is treated as a monitoring gap, not a feature.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-6">P6</a> — Reproducible.</strong> Seeded allocation (<code>rng_seed</code>), deterministic worklist order under a debug flag, snapshot/replay of GC events. Violating it (nondeterministic worklist order in debug builds) breaks differential testing against the oracle (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/blueprint/#sec-27">§27</a>).</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-7">P7</a> — Safety-first defaults.</strong> Allocation that may trigger a collection is explicit; pointer interiorness is documented per call; default build is conservative-scanning. Tradeoff: safer defaults cost some throughput versus an all-precise, no-safety-net build.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-8">P8</a> — No silent leaks of complexity.</strong> Read barriers exist only in the concurrent- compacting kind (Phase 8); simpler kinds never pay their cost. Violating it (compiling the read barrier into every kind) regresses <a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-2">P2</a>&#39;s throughput for mark-sweep users.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-9">P9</a> — Portability as a constraint, not a wish.</strong> Compiles on Linux x86-64/ARM64, macOS arm64, FreeBSD x86-64. Windows is <code>PhaseDeferred(&quot;§12.1&quot;)</code>. Violating it by depending on a Linux-only syscall (e.g. <code>userfaultfd</code>) without a portable fallback breaks three of four reference targets.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-10">P10</a> — Documented contracts.</strong> Every barrier, safepoint, and root enrolment is documented in <code>docs/abi.md</code> with exact host obligations. Violating it produces &quot;works on my host&quot; integrations that break on the next one.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-11">P11</a> — The tri-color invariant is load-bearing, not advisory.</strong> Every concurrent or incremental kind must maintain it (weak or strong form, <a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#inv-1">I1</a>); violating it silently drops live objects — the single worst class of GC bug (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#fm-1">FM-1</a>, <a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#sec-24">§24</a>).</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-12">P12</a> — Moving collectors need an indirection story.</strong> Any kind that relocates objects (compact, copy, concurrent-compact) requires either a host-side handle table (Phase 3) or a read barrier (Phase 8); there is no third option that stays correct under concurrent mutation.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-13">P13</a> — Pacing over panic.</strong> When the mutator outpaces the collector (allocation rate exceeds mark/sweep throughput), the collector throttles the mutator (mutator assist, <a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-19">§19</a>) before it OOMs; an unthrottled allocator racing an under-resourced collector is a design defect, not a workload problem.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-14">P14</a> — Telemetry precedes tuning.</strong> No tuning knob (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/blueprint/#sec-25">§25</a>) ships without the <code>gc_event_t</code> field that lets an operator observe its effect; a knob without a metric is unmaintainable (violates <a class="cite" href="/system-design-blueprints/systems/garbage-collector/architecture/#p-5">P5</a> by omission).</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

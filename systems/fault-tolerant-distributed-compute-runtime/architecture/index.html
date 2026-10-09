@@ -1,0 +1,695 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Fault-Tolerant Distributed Compute Runtime from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Fault-Tolerant Distributed Compute Runtime from Scratch, hld: §3 overview + §8 domain model. Build a multi-node, fault-tolerant distributed compute runtime: a single driver process constructs a lazy DAG of typed, partitioned datasets; cuts it into stages at shuffle (wide-dependency)…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/">Fault-Tolerant Distributed Compute Runtime from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Fault-Tolerant Distributed Compute Runtime from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~38 weeks</li> <li>4,445 lines</li> <li>blueprint #354</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Fault-Tolerant Distributed Compute Runtime from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Diagram</h3>
+<pre class="diagram"><code>          user program: build dataset DAG (map / filter / reduceByKey / join)
+                                   |
+                                   v   (lazy logical graph; ftdcr-graph)
+  +-------------------------------------------------------------------------+
+  |                          Driver (ftdcr-driver)                          |
+  |  +-----------------+   +------------------+   +----------------------+   |
+  |  | DAGScheduler    |   | TaskScheduler    |   | MapOutputTracker +   |   |
+  |  | stages @ shuffle|--&gt;| locality-aware   |   | BlockManagerMaster   |   |
+  |  | boundaries      |   | task dispatch    |   | (ftdcr-shuffle/block)|   |
+  |  +-----------------+   +------------------+   +----------------------+   |
+  |  | Lineage graph   |   | FT: detect / retry / stage-resubmit /        |  |
+  |  | (ftdcr-lineage) |   |     speculative / checkpoint (ftdcr-ft/ckpt) |  |
+  |  +-----------------+   +----------------------------------------------+  |
+  +-------------------------------------------------------------------------+
+        |  launch task (ftdcr-rpc)            ^  heartbeat + status + block report
+        v                                     |
+  +----------------+   +----------------+   +----------------+   ... executors
+  | Executor E0    |   | Executor E1    |   | Executor E2    |
+  | run task;      |   |                |   |                |
+  | BlockManager   |   |                |   |                |
+  | (mem + disk    |   |                |   |                |
+  |  spill);       |&lt;--+ shuffle fetch  +--&gt;|                |
+  | shuffle write  |   | (reduce pulls  |   |                |
+  | + read         |   |  map outputs)  |   |                |
+  +----------------+   +----------------+   +----------------+
+                                   |
+                                   v
+                       durable store (checkpoints + shuffle spill)</code></pre>
+<h3 id="sec-3-2">3.2 Subsystem Descriptions</h3>
+<p><strong>User program / ftdcr-graph.</strong> The user calls transformation methods (<code>map</code>, <code>filter</code>, <code>flatMap</code>, <code>reduceByKey</code>, <code>join</code>) on <code>Dataset</code> values; each call extends the DAG by adding a node and recording its <code>Dependency</code> (narrow or wide). No data moves. An action (<code>collect</code>, <code>count</code>, <code>saveAsFile</code>) triggers job submission to the driver. Data flow in: user closures + parent dataset references. Data flow out: a logical <code>Dataset</code> DAG handed to <code>DAGScheduler</code>. Trust boundary: user-provided closures are serialized and shipped to executors; they are untrusted from a crash-safety standpoint (a panic in a closure kills one executor, not the driver).</p>
+<p><strong>DAGScheduler (ftdcr-driver).</strong> Receives a job request (a <code>Dataset</code> + action). Walks the DAG in reverse topological order; inserts a stage boundary at every <code>Dependency::Shuffle</code>. Builds a <code>Stage</code> DAG (parent stages → child stages). Submits stages in topological order, gating each stage on its parents&#39; <code>MapStatus</code> being fully registered. Maintains stage state: Pending | Running | Finished | Failed. Data flow in: job request, <code>TaskResult</code> events from <code>TaskScheduler</code>, <code>FetchFailed</code> events from executors. Data flow out: <code>TaskSet</code> submissions to <code>TaskScheduler</code>, stage-resubmit commands on failure.</p>
+<p><strong>TaskScheduler (ftdcr-driver).</strong> Receives a <code>TaskSet</code>; assigns one task per partition. Tracks executor capacity (free slots, last-known locality). Implements delay scheduling: holds a task for up to a configurable window to wait for a preferred executor; falls back to rack-local then any. Launches tasks via <code>ftdcr-rpc</code>. Receives status updates; reports <code>TaskResult</code> or <code>FetchFailed</code> back to <code>DAGScheduler</code>. Concurrency boundary: the scheduler loop runs in a single <code>tokio</code> task, serializing all dispatch decisions; executor state is protected by an <code>Arc&lt;Mutex&lt;ExecutorPool&gt;&gt;</code>.</p>
+<p><strong>MapOutputTracker + BlockManagerMaster (ftdcr-shuffle / ftdcr-block, driver-side).</strong> <code>MapOutputTracker</code> is the authoritative registry for shuffle map outputs: maps <code>ShuffleId → [Option&lt;MapStatus&gt;]</code> (one entry per map-task partition). <code>BlockManagerMaster</code> is the location index for all <code>BlockId</code>s across executors: maps <code>BlockId → Vec&lt;ExecutorId&gt;</code>. Both are in-memory data structures on the driver, updated by executor block-report and status-update messages. Persistence boundary: <code>MapOutputTracker</code> state is lost if the driver crashes (driver HA is deferred; <a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-6">I6</a> is maintained within a session).</p>
+<p><strong>Lineage graph (ftdcr-lineage).</strong> Records the <code>Dependency</code> edges of every <code>Dataset</code> node. On a <code>PartitionLost</code> event, <code>RecomputePlan::build()</code> walks ancestors until it reaches a cached, checkpointed, or input partition. Returns an ordered list of stages and partitions to recompute. No network I/O; pure in-memory graph traversal. After a checkpoint is confirmed, <code>Lineage::truncate(dataset_id)</code> removes all ancestor edges up to the checkpointed dataset (<a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-8">I8</a>).</p>
+<p><strong>Fault-tolerance orchestrator (ftdcr-ft).</strong> Runs a heartbeat monitor: each executor sends a <code>Heartbeat</code> every T_hb seconds; the monitor marks an executor <code>Lost</code> after T_timeout = 3 × T_hb with no message. On <code>ExecutorLost</code>: informs <code>BlockManagerMaster</code> (remove all blocks on that executor), informs <code>MapOutputTracker</code> (invalidate map outputs produced by that executor), resubmits running tasks, triggers lineage recomputation for lost cached partitions. Tracks per-task attempt counts; after <code>max_task_failures</code> the job fails. Tracks per-executor failure counts; after <code>max_executor_failures</code> the executor is blacklisted (Phase 12).</p>
+<p><strong>Speculative execution (ftdcr-ft, Phase 10).</strong> Monitors task runtime within a running <code>TaskSet</code>. Computes the median and 75th-percentile completion time. Tasks running beyond <code>speculative_threshold × p75</code> are duplicates-launched on a different executor. First attempt to report <code>Finished</code> wins via <code>commit_coordinator</code>; the other is killed. Invariant <a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-7">I7</a>: only one attempt&#39;s result is accepted per output partition.</p>
+<p><strong>Executor / BlockManager (ftdcr-executor, ftdcr-block).</strong> Each executor is an OS process. It registers with the driver on startup, then receives <code>LaunchTask</code> RPC messages. The task-runner deserializes the closure, invokes <code>task.compute(partition_id, block_manager)</code>, and writes output to <code>BlockManager</code>. <code>BlockManager</code> manages a memory budget (configurable bytes); on pressure, evicts LRU blocks to disk (spill). Reports block locations to <code>BlockManagerMaster</code> on write. On <code>ShuffleMapTask</code> completion, registers <code>MapStatus</code> with <code>MapOutputTracker</code>. Persistence boundary: in-memory blocks are lost on executor crash; disk-spilled blocks are lost if the disk is co-located (single-machine) or retained if on shared storage.</p>
+<p><strong>Shuffle service (ftdcr-shuffle).</strong> Map side: after a <code>ShuffleMapTask</code> completes, output is partitioned by <code>Partitioner</code>, written to per-reduce shuffle blocks on the executor&#39;s <code>BlockManager</code>, and reported as <code>MapStatus</code>. Reduce side: a <code>ResultTask</code> or downstream <code>ShuffleMapTask</code> queries <code>MapOutputTracker</code> for all map-output locations for its <code>ShuffleId</code> + reduce-partition index, then opens parallel HTTP/TCP fetch connections to each map executor&#39;s <code>BlockManager</code>, assembles the blocks, and merges/sorts as needed. Fetch retries on transient failure (<a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-9">I9</a>). <code>FetchFailed</code> on non-transient failure triggers stage resubmission via <code>DAGScheduler</code>.</p>
+<p><strong>Checkpoint service (ftdcr-ckpt).</strong> On user or driver instruction, serializes all partitions of a selected <code>Dataset</code> to the durable store. On completion, sends a <code>CheckpointComplete</code> event to the driver, which calls <code>Lineage::truncate</code>. During recomputation, <code>RecomputePlan</code> checks the checkpoint store before walking further ancestors (<a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-8">I8</a>). Persistence boundary: checkpoint data outlives the driver and executor processes; correctness depends on the durable store&#39;s write-durability guarantee.</p>
+<p><strong>RPC layer (ftdcr-rpc).</strong> Length-prefixed binary framing over TCP. Message enum covers: <code>Register</code>, <code>Heartbeat</code>, <code>LaunchTask</code>, <code>KillTask</code>, <code>TaskStatus</code>, <code>BlockReport</code>, <code>FetchBlock</code>, <code>MapOutputUpdate</code>. Driver listens on a fixed port; executors connect on startup. Codec is versioned; unrecognized message types are skipped (forward compatibility). Concurrency model: one <code>tokio</code> TCP listener per side; messages dispatched to internal channels consumed by the scheduler loop or task runner.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Core Entity State Machines</h3>
+<h4 id="sec-8-1-1">8.1.1 Task Attempt Lifecycle</h4>
+<pre class="diagram"><code>             submit
+Created ─────────────► Launched
+                           │
+              ┌────────────┼────────────┬─────────────┐
+              ▼            ▼            ▼             ▼
+          Finished      Failed        Lost         Killed
+         (result ok)  (exception)  (executor   (speculative
+                                     gone)       loser)</code></pre>
+<p>State transitions table:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Side Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Created</td>
+<td>TaskScheduler assigns slot</td>
+<td>Launched</td>
+<td>RPC LaunchTask to executor</td>
+</tr>
+<tr>
+<td>Launched</td>
+<td>executor StatusUpdate=Finished</td>
+<td>Finished</td>
+<td>commit result; <a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-7">I7</a> check; mark stage done</td>
+</tr>
+<tr>
+<td>Launched</td>
+<td>executor StatusUpdate=Failed</td>
+<td>Failed</td>
+<td>increment attempt counter; retry if &lt; max</td>
+</tr>
+<tr>
+<td>Launched</td>
+<td>executor heartbeat timeout</td>
+<td>Lost</td>
+<td>resubmit; recompute lost blocks via <a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-5">I5</a></td>
+</tr>
+<tr>
+<td>Launched</td>
+<td>speculative winner commits</td>
+<td>Killed</td>
+<td>send KillTask RPC; discard result</td>
+</tr>
+<tr>
+<td>Failed</td>
+<td>attempt &lt; max_attempts</td>
+<td>Created</td>
+<td>re-enqueue in TaskSet</td>
+</tr>
+<tr>
+<td>Failed</td>
+<td>attempt ≥ max_attempts</td>
+<td>—</td>
+<td>abort job</td>
+</tr>
+</tbody></table></div>
+<h4 id="sec-8-1-2">8.1.2 Stage Lifecycle</h4>
+<pre class="diagram"><code>Waiting ──(parents done)──► Pending ──(tasks dispatched)──► Running
+                                                                │
+                        ┌───────────────────────────────────────┤
+                        ▼                                       ▼
+                   Finished                              FetchFailed
+              (all tasks done)                        (resubmit producing stage)
+                        │
+                        ▼ (if ShuffleMapStage)
+                MapOutputTracker updated (I3 satisfied)</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Waiting</td>
+<td>all parent stages Finished</td>
+<td>Pending</td>
+<td>create TaskSet; enqueue in scheduler</td>
+</tr>
+<tr>
+<td>Pending</td>
+<td>executor slots available</td>
+<td>Running</td>
+<td>dispatch tasks via offer cycle</td>
+</tr>
+<tr>
+<td>Running</td>
+<td>last task commits</td>
+<td>Finished</td>
+<td>notify dependent stages; satisfy <a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-3">I3</a></td>
+</tr>
+<tr>
+<td>Running</td>
+<td>any task: FetchFailed</td>
+<td>—(resubmit)</td>
+<td>mark parent ShuffleMapStage incomplete; retry</td>
+</tr>
+<tr>
+<td>Running</td>
+<td>task fails beyond max_attempts</td>
+<td>Failed</td>
+<td>abort dependent stages; fail job</td>
+</tr>
+<tr>
+<td>Finished</td>
+<td>partition lost (executor evict)</td>
+<td>Waiting</td>
+<td>re-enter queue; recompute lost partitions</td>
+</tr>
+</tbody></table></div>
+<h4 id="sec-8-1-3">8.1.3 Executor Lifecycle</h4>
+<pre class="diagram"><code>Unregistered ──register RPC──► Active ──heartbeat timeout──► Lost
+                                  │
+                  ┌───────────────┤
+                  ▼               ▼
+              Blacklisted     Decommissioned
+           (repeated fail)    (graceful exit)</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Heartbeat miss count</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Active</td>
+<td>0</td>
+<td>normal operation</td>
+</tr>
+<tr>
+<td>Active → Lost</td>
+<td>≥ threshold (3)</td>
+<td>mark Lost; evict blocks; resubmit tasks (<a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-5">I5</a>)</td>
+</tr>
+<tr>
+<td>Lost repeated</td>
+<td>failure_count ≥ N</td>
+<td>Blacklisted; excluded from future offers</td>
+</tr>
+</tbody></table></div>
+<h4 id="sec-8-1-4">8.1.4 Job Lifecycle</h4>
+<pre class="diagram"><code>Submitted ──DAGScheduler.submit()──► Scheduling ──all ResultTasks done──► Succeeded
+                                          │
+                              stage fail (exhausted retries)
+                                          │
+                                          ▼
+                                       Failed</code></pre>
+<h3 id="sec-8-2">8.2 Event and Record Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Record Type</th>
+<th>Producer</th>
+<th>Consumer(s)</th>
+<th>Fields (key)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>TaskLaunch</td>
+<td>TaskScheduler</td>
+<td>Executor</td>
+<td>task_id, attempt, stage_id, partition_id, locality_hint, bytes</td>
+</tr>
+<tr>
+<td>TaskStatusUpdate</td>
+<td>Executor</td>
+<td>TaskScheduler</td>
+<td>task_id, attempt, state, result_ref, metrics</td>
+</tr>
+<tr>
+<td>Heartbeat</td>
+<td>Executor</td>
+<td>DriverHeartbeatReceiver</td>
+<td>executor_id, timestamp, mem_used, tasks_running</td>
+</tr>
+<tr>
+<td>BlockReport</td>
+<td>Executor</td>
+<td>BlockManagerMaster</td>
+<td>executor_id, block_ids[], storage_levels[], sizes[]</td>
+</tr>
+<tr>
+<td>MapStatusUpdate</td>
+<td>ShuffleService</td>
+<td>MapOutputTracker</td>
+<td>shuffle_id, map_id, partition_sizes[], executor_id</td>
+</tr>
+<tr>
+<td>FetchFailed</td>
+<td>Executor (read)</td>
+<td>DAGScheduler</td>
+<td>shuffle_id, map_id, reduce_id, message</td>
+</tr>
+<tr>
+<td>StageSubmitted</td>
+<td>DAGScheduler</td>
+<td>TaskScheduler</td>
+<td>stage_id, task_set, num_tasks</td>
+</tr>
+<tr>
+<td>StageCompleted</td>
+<td>DAGScheduler</td>
+<td>JobWaiter</td>
+<td>stage_id, stats</td>
+</tr>
+<tr>
+<td>CheckpointWrite</td>
+<td>CheckpointSvc</td>
+<td>LineageManager</td>
+<td>dataset_id, partition_id, path, checksum</td>
+</tr>
+<tr>
+<td>SpillEvent</td>
+<td>BlockManager</td>
+<td>MemoryManager</td>
+<td>block_id, bytes_spilled, storage_level_after</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Wire / Serialization Format</h3>
+<p>Framing (ftdcr-rpc):</p>
+<pre class="diagram"><code>┌───────────────┬────────┬────────────────────────────────┐
+│ magic: u32    │ len:u32│ payload: bincode/capnproto bytes│
+└───────────────┴────────┴────────────────────────────────┘</code></pre>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>Format</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>RPC frame</td>
+<td>4-byte magic + 4-byte len + body</td>
+<td>framing for TCP; partial read detection</td>
+</tr>
+<tr>
+<td>Message</td>
+<td>bincode (default) or Cap&#39;n Proto option</td>
+<td>zero-copy on read path</td>
+</tr>
+<tr>
+<td>Task payload</td>
+<td>bincode-serialized Task enum</td>
+<td>task closure byte slice</td>
+</tr>
+<tr>
+<td>Shuffle block transfer</td>
+<td>raw bytes (pre-serialized at map)</td>
+<td>no re-encoding on fetch</td>
+</tr>
+<tr>
+<td>Checkpoint</td>
+<td>bincode partition bytes + SHA-256 checksum</td>
+<td>durable store integrity</td>
+</tr>
+<tr>
+<td>Metrics / events</td>
+<td>JSON newline-delimited (event log)</td>
+<td>human-readable UI feed</td>
+</tr>
+</tbody></table></div>
+<p>BlockId wire encoding:</p>
+<pre class="diagram"><code>BlockId := RddBlock(rdd_id: u64, part_id: u32)
+         | ShuffleBlock(shuffle_id: u32, map_id: u32, reduce_id: u32)
+         | BroadcastBlock(broadcast_id: u64, chunk: u32)</code></pre>
+<p>MapStatus encoding per shuffle_id:</p>
+<pre class="diagram"><code>MapStatus {
+  executor_id: u32,
+  partition_sizes: Vec&lt;u32&gt;,   // index = reduce partition
+}</code></pre>
+<p>Shuffle file layout on executor disk:</p>
+<pre class="diagram"><code>data file:   [block_0_bytes][block_1_bytes]...[block_n_bytes]
+index file:  [offset_0: u64][offset_1: u64]...[offset_n+1: u64]</code></pre>
+<p>Reduce partition <code>r</code> → seek index[r], read index[r+1]-index[r] bytes from data file.</p>
+<h3 id="sec-8-4">8.4 Storage / Block Memory Model</h3>
+<p>StorageLevel decision matrix:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>use_memory</th>
+<th>use_disk</th>
+<th>replicas</th>
+<th>Name</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>true</td>
+<td>false</td>
+<td>1</td>
+<td>MemoryOnly</td>
+<td>hot working set, recompute cheap</td>
+</tr>
+<tr>
+<td>true</td>
+<td>true</td>
+<td>1</td>
+<td>MemAndDisk</td>
+<td>large datasets; spill on pressure</td>
+</tr>
+<tr>
+<td>false</td>
+<td>true</td>
+<td>1</td>
+<td>DiskOnly</td>
+<td>shuffle intermediates; bulk data</td>
+</tr>
+<tr>
+<td>true</td>
+<td>false</td>
+<td>2</td>
+<td>MemoryOnly_2</td>
+<td>narrow lineage; expensive recomp</td>
+</tr>
+<tr>
+<td>true</td>
+<td>true</td>
+<td>2</td>
+<td>MemAndDisk_2</td>
+<td>critical broadcast/join datasets</td>
+</tr>
+</tbody></table></div>
+<p>BlockManager memory regions (unified memory manager, Phase 13):</p>
+<pre class="diagram"><code>Total JVM / process heap
+├── Execution region  (shuffle buffers, sort, aggregation)  — dynamic fraction
+└── Storage region    (cached RDD blocks, broadcast)        — dynamic fraction
+     shared: either side borrows from the other; eviction reclaims storage→execution</code></pre>
+<p>Eviction policy: LRU over storage region; blocks with replication = 1 and no checkpoint → trigger lineage recompute (<a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-5">I5</a>) rather than retaining in degraded state.</p>
+<p>Spill path: if execution region full during sort/aggregate → spill sorted runs to temp disk files → merge on read.</p>
+<h3 id="sec-8-5">8.5 Scheduling Semantics</h3>
+<p>Locality preference hierarchy (Phase 4):</p>
+<pre class="diagram"><code>PROCESS_LOCAL &gt; NODE_LOCAL &gt; RACK_LOCAL &gt; ANY</code></pre>
+<p>Delay scheduling: hold a task for up to <code>locality_wait_ms</code> (configurable) waiting for preferred executor; if no offer arrives, relax to next level. Never starves: ANY is always accepted.</p>
+<p>Offer cycle (TaskScheduler, per heartbeat or slot-free event):</p>
+<pre class="diagram"><code>for each executor (sorted by locality match):
+  for each pending TaskSet (FIFO or fair):
+    assign tasks up to free_slots
+    dequeue from TaskSet</code></pre>
+<p>Stage submission order (DAGScheduler): topological sort of the stage DAG; stage enqueued only when all parents in state Finished (<a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-3">I3</a> enforced here).</p>
+<p>FetchFailed handling sequence:</p>
+<pre class="diagram"><code>Executor → StatusUpdate(FetchFailed, shuffle_id, map_id)
+Driver → DAGScheduler.handleFetchFailed()
+       → look up producing ShuffleMapStage
+       → mark stage Waiting (re-run missing map tasks only)
+       → abort downstream stages that read this shuffle
+       → re-enqueue stage; dependent stages re-submit after new map outputs registered</code></pre>
+<h3 id="sec-8-6">8.6 Lineage and Recomputation Semantics</h3>
+<p>Lineage graph structure:</p>
+<div class="filetree" role="tree"><ul><li class="ft-dir"><details open><summary><span class="ft-name">Dataset_D</span></summary><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">├── dep: Narrow → Dataset_C (parent[0])</span></span></li><li class="ft-dir"><details open><summary><span class="ft-name">└── dep: Shuffle(shuffle_id=3) → Dataset_B (parent[1])</span></summary><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">└── dep: Narrow → Dataset_A</span></span></li></ul></details></li></ul></details></li></ul></div>
+<p>RecomputePlan construction (Phase 8):</p>
+<pre class="diagram"><code>lost := {PartitionId(D, p5)}
+walk lineage of D backward:
+  D.p5 depends on C.p5 (narrow, 1:1)
+  C.p5 depends on A.p5 (narrow, pipelined)
+  A.p5 → cached in BlockManager → stop here
+plan := [recompute C.p5 from A.p5, recompute D.p5 from C.p5]</code></pre>
+<p>Invariant <a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-1">I1</a> enforced: every fn in <code>compute</code> closure must be pure (no mutable captured state, deterministic on same input iterator).</p>
+<p>Checkpoint truncation (Phase 11):</p>
+<pre class="diagram"><code>before truncation:   A → B → C → D → E   (lineage chain)
+checkpoint D.all_partitions to durable store
+after truncation:    [checkpoint(D)] → E
+recovery of E.p:     read checkpoint(D).p → compute E.p (no A/B/C needed) (I8)</code></pre>
+<h3 id="sec-8-7">8.7 Exactly-Once Commit Semantics (<a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-7">I7</a>, P4, P5)</h3>
+<p>Commit coordinator flow (ShuffleMapTask):</p>
+<pre class="diagram"><code>map task completes → write shuffle blocks to local BlockManager (temp files)
+                   → send CommitRequest(task_id, attempt_id, shuffle_id, map_id)
+                   → coordinator: if (shuffle_id, map_id) not yet committed:
+                       accept; rename temp → final; register MapStatus (I6)
+                   → coordinator: if already committed (retry/speculative):
+                       reject; executor discards temp files</code></pre>
+<p>ResultTask output:</p>
+<pre class="diagram"><code>result task completes → send ResultCommit(task_id, attempt_id, partition_result)
+                      → driver: if partition not yet accepted → accept (I7)
+                      → driver: if already accepted → discard (idempotent)</code></pre>
+<p>Speculative execution coordination (Phase 10):</p>
+<pre class="diagram"><code>stage runtime distribution computed: p75, p95 per task
+straggler := task_runtime &gt; max(1.5 × median, p75) AND stage_fraction_done &gt; 0.75
+launch duplicate attempt on different executor
+first CommitRequest accepted → winner
+other attempt(s) → KillTask; CommitRequest rejected (I7)</code></pre>
+<h3 id="sec-8-8">8.8 Shuffle Protocol (Phase 7)</h3>
+<p>Map side:</p>
+<pre class="diagram"><code>ShuffleMapTask.run(partition_id):
+  open records: Iterator&lt;(K, V)&gt;
+  for each (k, v):
+    r = partitioner.partition(k)          // hash or range
+    write (k, v) to partition_buffer[r]
+  sort each partition_buffer by key       // sort-based shuffle
+  write data + index files to BlockManager disk
+  register MapStatus(executor_id, partition_sizes[])</code></pre>
+<p>Reduce side fetch (ftdcr-shuffle):</p>
+<pre class="diagram"><code>ResultTask / ShuffleMapTask (with shuffle parent):
+  query MapOutputTracker: for shuffle_id → [MapStatus(executor, sizes)]
+  for each map_id m:
+    fetch ShuffleBlock(shuffle_id, m, reduce_id) from executor_m
+    retry up to fetch_max_retries on IOException
+    on FetchFailed: report to driver → stage resubmit path
+  merge/aggregate fetched blocks</code></pre>
+<p>MapOutputTracker protocol:</p>
+<pre class="diagram"><code>map task done → driver-side MapOutputTracker.registerMapOutput(shuffle_id, map_id, MapStatus)
+reduce task start → MapOutputTrackerWorker.getServerStatuses(shuffle_id) → fetch from master
+  cache result locally until shuffle_id invalidated (on resubmit)</code></pre>
+<h3 id="sec-8-9">8.9 Failure Paths — Worked Examples</h3>
+<h4 id="sec-8-9-1">8.9.1 Normal Path: 3-Stage Job Succeeds</h4>
+<pre class="diagram"><code>Job: wordcount(lines) = flatMap → map → reduceByKey
+
+Stage 0 (ShuffleMapStage): flatMap + map  [narrow pipeline, Phase 6]
+  tasks T0.0..T0.P-1 launched → finish → MapStatus registered (I3)
+Stage 1 (ResultStage): reduceByKey per reducer partition
+  tasks T1.0..T1.R-1 launched → fetch shuffle blocks → aggregate → ResultCommit
+Job result = union of R partition results (I10)</code></pre>
+<h4 id="sec-8-9-2">8.9.2 Failure Path: Executor Lost Mid-Shuffle</h4>
+<pre class="diagram"><code>Stage 0 running: T0.0..T0.4 done, T0.5..T0.9 on E2
+E2 heartbeat times out → E2 marked Lost
+  → blocks on E2 evicted from BlockManagerMaster
+  → T0.5..T0.9 (running on E2) → state Lost → resubmit on E0/E1/E3
+  → Stage 0 re-runs T0.5..T0.9 → new MapStatus registered
+Stage 1 tasks that fetched from E2 → FetchFailed → resubmit (some already committed: no-op via I7)
+Stage 1 re-fetches T0.5..T0.9 outputs from new executors
+Job completes; result identical (I1, I4) — user sees no error (P6)</code></pre>
+<h4 id="sec-8-9-3">8.9.3 Malformed Path: Non-Deterministic Task (violates <a class="cite" href="/system-design-blueprints/systems/fault-tolerant-distributed-compute-runtime/reliability/#inv-1">I1</a>)</h4>
+<pre class="diagram"><code>compute fn captures mutable random seed → first run produces partition P
+executor lost → recompute → different partition Q
+reduce tasks fetching P already committed → job produces mixed P+Q output
+INVARIANT I1 VIOLATED: result is incorrect
+Detection: conformance fixture (Phase 14) checks wordcount result matches
+  reference run; divergence flags non-determinism bug
+Prevention: lint + doc requirement; no `thread_local` mutable state in closures</code></pre>
+<h4 id="sec-8-9-4">8.9.4 Edge Case: Cascade Lineage Recomputation</h4>
+<pre class="diagram"><code>Dataset chain: A(checkpoint) → B → C → D → E (result)
+E.p3 lost → recompute D.p3 from C.p3
+C.p3 also lost → recompute C.p3 from B.p3
+B.p3 also lost → recompute B.p3 from A.p3 (checkpoint; I8 stops here)
+Total cost: 3 sequential tasks; bounded because A is checkpointed
+Without checkpoint A: full re-read of input data
+Phase 11 trigger: if lineage_depth &gt; ckpt_threshold, force checkpoint</code></pre>
+<h4 id="sec-8-9-5">8.9.5 Edge Case: Speculative Duplicate Commits</h4>
+<pre class="diagram"><code>T1.p7 running on E1 (slow); speculative copy T1.p7-attempt-2 on E3
+E3 finishes first → CommitRequest(p7, attempt-2) accepted (I7 counter set)
+E1 finishes later → CommitRequest(p7, attempt-1) rejected by coordinator
+Driver: KillTask(E1, T1.p7-attempt-1)
+BlockManager on E1: discards temp blocks for attempt-1
+MapOutputTracker: only attempt-2 MapStatus retained (I6)</code></pre>
+<h3 id="sec-8-10">8.10 Memory Ownership Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Owner</th>
+<th>Lifetime</th>
+<th>Eviction Policy</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>RDD block (cached)</td>
+<td>BlockManager</td>
+<td>until evicted or executor lost</td>
+<td>LRU; spill to disk if MemAndDisk</td>
+</tr>
+<tr>
+<td>Shuffle map output</td>
+<td>BlockManager</td>
+<td>until shuffle unregistered</td>
+<td>disk-backed; no mem eviction</td>
+</tr>
+<tr>
+<td>Task execution buffer</td>
+<td>Executor task</td>
+<td>task duration</td>
+<td>spill sorted runs on overflow</td>
+</tr>
+<tr>
+<td>Broadcast block</td>
+<td>BlockManager</td>
+<td>until unpersist called</td>
+<td>replicated; pulled on first use</td>
+</tr>
+<tr>
+<td>Checkpoint data</td>
+<td>Durable store</td>
+<td>until lineage truncation window</td>
+<td>never evicted by runtime</td>
+</tr>
+<tr>
+<td>Temp shuffle files</td>
+<td>Executor FS</td>
+<td>until CommitRequest accepted/rejected</td>
+<td>deleted on discard or commit</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

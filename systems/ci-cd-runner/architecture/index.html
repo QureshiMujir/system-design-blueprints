@@ -1,0 +1,287 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>CI/CD Runner — Architecture · Engineering Blueprints</title><meta name="description" content="CI/CD Runner, hld: §3 overview + §8 domain model. Build a hermetic, ephemeral, multi-tenant CI/CD runner/orchestrator in the GitHub-Actions-runner / GitLab-Runner / Buildkite-agent tradition: a control plane that parses a YAML pipeline DSL into a…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/ci-cd-runner/">CI/CD Runner</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>CI/CD Runner</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux</li> <li>12 phases</li> <li>~22 weeks</li> <li>2,552 lines</li> <li>blueprint #142</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/ci-cd-runner/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/ci-cd-runner/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/ci-cd-runner/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/ci-cd-runner/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/ci-cd-runner/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/ci-cd-runner/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/ci-cd-runner/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/ci-cd-runner/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/ci-cd-runner/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/ci-cd-runner/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:CI/CD Runner — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌───────────────────────────────────────────────────────────────────────┐
+│ Ingress: webhook + public API (stateless controller replicas)         │
+│  POST /v1/workflows · GET /v1/runs/:id (SSE) · POST /v1/runs/:id/cancel│
+│  POST /v1/runners/register · POST /v1/runners/:id/lease (long-poll)   │
+└──────────────────────────────┬─────────────────────────────────────────┘
+                                │ gRPC + REST + SSE  [protocol boundary]
+┌──────────────────────────────▼─────────────────────────────────────────┐
+│ Controller core (Rust, stateless above PG/S3/KMS)  [trust boundary: A] │
+│  parser → dag::build → matrix::expand → scheduler::enqueue             │
+│  → approvals::gate → provenance::record                                │
+└──┬───────────┬────────────┬─────────────────┬──────────────┬───────────┘
+   │           │            │                 │              │
+┌──▼──────┐ ┌──▼───────┐ ┌──▼───────────┐ ┌───▼──────────┐ ┌─▼───────────┐
+│Scheduler│ │  Secret  │ │  Artifact CAS│ │ Log pipeline │ │ Provenance  │
+│ WFQ+    │ │  broker  │ │  BLAKE3      │ │ WAL + SSE    │ │ SLSA/in-toto│
+│ capacity│ │  KMS-JIT │ │  dedup       │ │ fanout       │ │ Sigstore    │
+└──┬──────┘ └──────────┘ └──────────────┘ └──────────────┘ └─────────────┘
+   │ work-queue (in-proc Phase 0 → NATS JetStream Phase 3+)
+┌──▼─────────────────────────────────────────────────────────────────────┐
+│ Runner plane (ephemeral agent)  [trust boundary: B, semi-trusted]      │
+│  register → lease loop → executor dispatch → log/artifact/cache client │
+│  Executors: runc (default trusted) · Firecracker microVM (default     │
+│  untrusted) · Kubernetes Job · Docker (deprecated) · host-shell (esc.) │
+└──┬───────────────────────────────────────────────────────────────────────┘
+   │
+┌──▼─────────────────────────────────────────────────────────────────────┐
+│ Fleet autoscaler (cluster-API + warm-pool; scale-to-zero)              │
+└─────────────────────────────────────────────────────────────────────────┘</code></pre>
+<p>The data path is one-way: webhook → parser → DAG → matrix expansion →
+scheduler → lease channel → runner → executor → log pipeline → durable
+store, with the only back-edges being the tightly-scoped heartbeat, log,
+artifact-upload, and provenance-attestation channels (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-3">I3</a>). Executor backends
+are interchangeable behind the <code>ExecutorBackend</code> trait (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-11-6">§11.6</a>); a workflow
+names <code>runs-on:</code> labels, never an executor directly — the scheduler picks
+based on workflow trust level and tenant policy (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-6">P6</a>). Every cross-cutting
+service (secret broker, artifact CAS, log pipeline, provenance recorder) is
+owned by exactly one service behind exactly one gRPC contract (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-5">P5</a>); no
+runner reaches across layers. The controller plane is stateless above the
+PostgreSQL/object-store/KMS trifecta (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-1">I1</a>) — any replica answers any
+request, and a replica dying mid-job loses no more than one in-flight
+heartbeat. Trust boundary A (controller) is fully trusted; boundary B
+(runner) is semi-trusted and every runner output (digests, logs, heartbeats)
+is independently verified (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#sec-24">§24</a> Threat Model, <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#t-2">T2</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Pipeline / Stage / Job DAG</h3>
+<p>A <code>PipelineSpec</code> (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-11-1">§11.1</a>) contains <code>jobs: Map&lt;JobId, JobSpec&gt;</code>; each
+<code>JobSpec.needs: Vec&lt;JobId&gt;</code> is a DAG edge. The DAG builder (Phase 2)
+topologically sorts via Kahn&#39;s algorithm into layered <code>order: Vec&lt;Vec &lt;JobId&gt;&gt;</code>; a cycle fails <code>CyclicGraph{cycle_path}</code> at build time (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-8">I8</a>).
+A <code>JobSpec.strategy.matrix</code> expands one logical job into N <code>MatrixCoord</code>
+leaves sharing the <code>JobId</code> but distinguished by coordinate (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-11-7">§11.7</a>); an
+<code>if:</code> gate is classified <code>Static</code> (prunable at build time) or <code>Runtime</code>
+(deferred to step start) per <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#sec-8-4">§8.4</a> below.</p>
+<p><strong>State table — <code>RunStatus</code>:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entered from</th>
+<th>Exits to</th>
+<th>Trigger</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Queued</code></td>
+<td>(initial)</td>
+<td><code>Running</code>, <code>Cancelled</code></td>
+<td>scheduler grants first lease</td>
+</tr>
+<tr>
+<td><code>Running</code></td>
+<td><code>Queued</code></td>
+<td><code>AwaitingApproval</code>, <code>Succeeded</code>, <code>Failed</code>, <code>Cancelled</code></td>
+<td>job progression</td>
+</tr>
+<tr>
+<td><code>AwaitingApproval</code></td>
+<td><code>Running</code></td>
+<td><code>Running</code>, <code>Failed</code> (expiry)</td>
+<td>environment gate (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-13">I13</a>)</td>
+</tr>
+<tr>
+<td><code>Succeeded</code></td>
+<td><code>Running</code></td>
+<td>(terminal)</td>
+<td>all jobs succeed</td>
+</tr>
+<tr>
+<td><code>Failed</code></td>
+<td><code>Running</code>, <code>AwaitingApproval</code></td>
+<td>(terminal)</td>
+<td>a job fails without <code>continue-on-error</code></td>
+</tr>
+<tr>
+<td><code>Cancelled</code></td>
+<td>any non-terminal</td>
+<td>(terminal)</td>
+<td><code>POST /runs/:id/cancel</code></td>
+</tr>
+<tr>
+<td><code>Stale</code></td>
+<td><code>Queued</code></td>
+<td><code>Queued</code>, <code>Cancelled</code></td>
+<td><code>max_queue_age</code> exceeded, surfaced to operator</td>
+</tr>
+</tbody></table></div>
+<p><strong>Worked example.</strong> A pipeline with <code>jobs: {build, test: {needs:[build]}, deploy: {needs:[test], environment: production}}</code> and
+<code>test.strategy.matrix.node: [18, 20]</code> builds a 4-node DAG (<code>build</code>,
+<code>test@18</code>, <code>test@20</code>, <code>deploy</code>) in two layers (<code>[build]</code>, <code>[test@18, test@20]</code>, <code>[deploy]</code>); <code>deploy</code> enters <code>AwaitingApproval</code> per <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-13">I13</a> before
+its lease is offered.</p>
+<p><strong>Malformed-input example.</strong> <code>jobs: {a: {needs:[a]}}</code> — self-edge; DAG
+validator rejects at parse time with <code>CyclicGraph{cycle_path:[&quot;a&quot;]}</code>
+before it reaches the scheduler (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-14-8">§14.8</a>).</p>
+<p><strong>Failure-path example.</strong> <code>test@18</code> fails with <code>continue-on-error: false</code>;
+<code>test@20</code> (independent leaf) completes; <code>deploy</code> never leases (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-13">I13</a>&#39;s
+predecessor-status guard) and the run transitions <code>Running → Failed</code>; the
+event log (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-3">I3</a>) records <code>JobFailed{test@18}</code> then <code>RunTransition{Failed}</code>.</p>
+<h3 id="sec-8-2">8.2 Executor / Runner Model</h3>
+<p><code>RunnerHandle</code> (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-11-5">§11.5</a>) tracks <code>RunnerStatus ∈ {Registered, Idle, Leased, Running, Draining, Offline, Quarantined}</code>. A runner implements
+<code>ExecutorBackend</code> (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-11-6">§11.6</a>) for whichever backends its <code>RunnerCapabilities</code>
+advertise (runc, Firecracker, Kubernetes, Docker, host-shell). The
+scheduler&#39;s lease-grant path picks a backend per <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-6">I6</a>; a runner lacking
+<code>/dev/kvm</code> never receives a Firecracker-tagged lease.</p>
+<h3 id="sec-8-3">8.3 Artifact + Cache Model</h3>
+<p><code>ArtifactRef</code> (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-11-8">§11.8</a>) and <code>CacheEntry</code> (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-11-9">§11.9</a>) are both indexed by
+<code>Blake3Digest</code> (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-14">I14</a>); the artifact&#39;s bytes live at <code>cas/&lt;2-byte-prefix&gt;/ &lt;32-byte-digest&gt;</code> regardless of which <code>ArtifactRef</code> rows point at them
+(dedup). A <code>CacheKey</code> lookup tries <code>primary</code> exactly, then walks
+<code>restore_keys</code> in order for a longest-prefix partial match (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#sec-8-1">§8.1</a> worked
+example continues in <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-19-2">§19.2</a>).</p>
+<h3 id="sec-8-4">8.4 Secrets Model</h3>
+<p>A <code>SecretRef{name, scope}</code> resolves to a <code>ScopedToken</code> (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-11-10">§11.10</a>) only at
+step-start (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-8">P8</a>); <code>SecretScope ∈ {Repository, Environment(ref), Organisation, Tenant}</code> and a step&#39;s runtime context must match the
+declared scope or the broker refuses issuance (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-5">I5</a>). Every issuance,
+read, and rotation appends to a hash-chained <code>AuditEvent</code> (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/blueprint/#sec-11-11">§11.11</a>); the
+chain&#39;s <code>hash_chain_prev</code>/<code>hash_chain_self</code> pair makes tampering
+detectable on replay.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-1">P1</a> — Ephemeral by default.</strong> A runner host accepts exactly one job lease and is destroyed after. Violate it → workspace contamination across unrelated tenants; the default executor carries no persisted rootfs. Tradeoff: cold-start cost, mitigated by warm pools (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/build/#sec-22">§22</a>).</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-2">P2</a> — Hermetic execution is the goal, best-effort is the floor.</strong> Every step declares its inputs (workspace digest, cache keys, env, image digest); the executor refuses reads outside declared inputs unless the workflow opts into non-hermetic mode with a logged justification. Violate it → non-reproducible builds, silent supply-chain drift.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-3">P3</a> — Deterministic, replayable runs.</strong> A <code>WorkflowRun</code> reconstructs fully from its append-only event log (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-3">I3</a>). Violate it → the replay conformance bucket fails and post-incident forensics becomes guesswork.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-4">P4</a> — Signed by construction.</strong> Every published artifact is hashed, registered in an in-toto link, and the run&#39;s SLSA provenance is countersigned by the controller&#39;s KMS key; unsigned = deployment failure, not a warning (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/trade-offs/#adr-25">ADR-25</a>). Tradeoff: signing latency on the critical path (bounded, <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/numbers/#sec-4">§4</a>).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-5">P5</a> — One owner per cross-cut.</strong> The secret broker, artifact CAS, log pipeline, and provenance recorder are each owned by exactly one service behind one gRPC contract; no runner reaches across layers. Violate it → the layering that makes the threat model tractable collapses.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-6">P6</a> — The executor you run is not the executor you wrote against.</strong> A workflow names <code>runs-on:</code> labels; the scheduler picks the executor from trust level + tenant policy (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-6">I6</a>). Violate it → a workflow author can bypass sandboxing policy by fiat.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-7">P7</a> — The scheduler is multi-tenant and fair.</strong> Per-tenant weighted-fair-queueing (WF²Q+); no tenant starves another; none exceeds its capacity quota (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-10">I10</a>). Violate it → the platform&#39;s core economic promise (fair shared infrastructure) breaks.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-8">P8</a> — Secrets are JIT-issued, scoped, and audit-logged.</strong> Every secret reference resolves at step start as a short-lived scoped token (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-5">I5</a>); issuance is recorded in a hash-chained audit log. A secret leaking into a log is a P0 incident (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#sec-24">§24</a> <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#t-3">T3</a>).</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-9">P9</a> — Logs are append-only and durable.</strong> Runner-side WAL flushes to the controller, which double-writes to SSE fanout and durable object storage (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-3">I3</a>). A runner crash loses at most the unflushed tail.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-10">P10</a> — No silent fallbacks.</strong> A constraint the system cannot satisfy (capacity, label mismatch, image-pull failure) surfaces as a typed error, never a silently-degraded execution. Violate it → workflows run under unstated assumptions and postmortems cannot reconstruct intent.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-11">P11</a> — Idempotent retries only, by declaration.</strong> A retried step reuses the same workspace digest, cache keys, env, and re-issued secret scope; non-idempotent steps refuse retry unless explicitly opted in (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-7">I7</a>).</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-12">P12</a> — Cache is keyed, scoped, tenant-isolated.</strong> A <code>(tenant_id, namespace, primary_key, restore_keys[])</code> tuple; cross-tenant cache reads are impossible by construction, not by policy (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-12">I12</a>, <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#sec-24">§24</a> <a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#t-7">T7</a>).</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-13">P13</a> — Approvals and environments are first-class.</strong> A deployment to an environment requiring approval cannot proceed without a documented approver and an audit-logged decision (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/reliability/#inv-13">I13</a>); approval is out-of-band, never an in-pipeline script.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-14">P14</a> — The autoscaler scales to zero.</strong> A tenant with no in-flight work holds zero runner hosts; warm-pool floors are the configurable cost/latency knob (<a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/build/#sec-22">§22</a>).</li><li id="p-15"><strong><a class="cite" href="/system-design-blueprints/systems/ci-cd-runner/architecture/#p-15">P15</a> — Errors carry full context.</strong> Every failure surfaces run ID, job ID, step ID, runner ID (if assigned), executor backend, timestamp, trace ID, human explanation, runbook pointer, reproducer hint.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

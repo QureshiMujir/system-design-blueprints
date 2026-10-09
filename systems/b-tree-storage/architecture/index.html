@@ -1,0 +1,364 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>B-Tree Storage — Architecture · Engineering Blueprints</title><meta name="description" content="B-Tree Storage, hld: §3 overview + §8 domain model. A disk-backed, page-oriented B+tree key-value storage engine, embedded as a process-local library: it owns one or more files on disk and exposes a transactional get/put/delete/range-scan API with…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/b-tree-storage/">B-Tree Storage</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>B-Tree Storage</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~15 weeks</li> <li>2,280 lines</li> <li>blueprint #184</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/b-tree-storage/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/b-tree-storage/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/b-tree-storage/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/b-tree-storage/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/b-tree-storage/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/b-tree-storage/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/b-tree-storage/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/b-tree-storage/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/b-tree-storage/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/b-tree-storage/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:B-Tree Storage — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend rt: core engine layers (API, engine, tree, WAL)
+%% legend ingest: lower layers (buffer pool, codec)
+%% legend store: pager that touches the data file
+  API[&quot;&lt;b&gt;Public API (§21 / Phase 9)&lt;/b&gt;&lt;br/&gt;Db::open · begin_read/begin_write&lt;br/&gt;get/put/delete/range&lt;br/&gt;commit/abort · checkpoint · vacuum&lt;br/&gt;snapshot&quot;]
+  ENG[&quot;&lt;b&gt;Engine (§21)&lt;/b&gt;&lt;br/&gt;txn coordinator (1 writer,&lt;br/&gt;MVCC-free reads)&lt;br/&gt;snapshot lifecycle (root pgno +&lt;br/&gt;read-version)&lt;br/&gt;checkpoint/vacuum&quot;]
+  TREE[&quot;&lt;b&gt;Tree (§15–16, §19–20)&lt;/b&gt;&lt;br/&gt;search · insert · split&lt;br/&gt;delete · merge/borrow&lt;br/&gt;range scan · bulk load&lt;br/&gt;latch crabbing&quot;]
+  WAL[&quot;&lt;b&gt;WAL (§18)&lt;/b&gt;&lt;br/&gt;append-only, CRC32C/rec&lt;br/&gt;group commit + fsync&lt;br/&gt;redo replay · checkpoint&quot;]
+  BP[&quot;&lt;b&gt;Buffer Pool (§17)&lt;/b&gt;&lt;br/&gt;frame table, hash index, pin/unpin&lt;br/&gt;CLOCK, dirty bitmap, async flusher&quot;]
+  PC[&quot;&lt;b&gt;Page Codec (§14)&lt;/b&gt;&lt;br/&gt;header, slot array, cells&lt;br/&gt;CRC32C, overflow&quot;]
+  PG[&quot;&lt;b&gt;Pager (§13)&lt;/b&gt;&lt;br/&gt;pread/pwrite, fsync/fdatasync&lt;br/&gt;O_DIRECT, mmap RO&quot;]
+  API --&gt; ENG
+  ENG --&gt; TREE
+  ENG --&gt; WAL
+  TREE --&gt; BP
+  BP --&gt; PC
+  PC --&gt; PG
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  class API,ENG,TREE,WAL rt
+  class BP,PC ingest
+  class PG store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>core engine layers (API, engine, tree, WAL)</li><li><span class="swatch ingest"></span>lower layers (buffer pool, codec)</li><li><span class="swatch store"></span>pager that touches the data file</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>┌──────────────────────────────────────────────────────────────────┐
+│ Public API (§21 / Phase 9)                                       │
+│ Db::open · begin_read/begin_write · get/put/delete/range         │
+│ commit/abort · checkpoint · vacuum · snapshot                    │
+└───────────────────────────┬────────────────────────────────────--┘
+                            │
+┌───────────────────────────▼────────────────────────────────────--┐
+│ Engine (§21) — txn coordinator (1 writer, MVCC-free reads),      │
+│ snapshot lifecycle (root pgno + read-version), checkpoint/vacuum │
+└──────┬─────────────────────────────────────────────┬────────────-┘
+       │                                              │
+┌──────▼────────────────────┐          ┌──────────────▼───────────┐
+│ Tree (§15–16, §19–20)     │          │ WAL (§18)                 │
+│ search · insert · split   │          │ append-only, CRC32C/rec   │
+│ delete · merge/borrow     │          │ group commit + fsync      │
+│ range scan · bulk load    │          │ redo replay · checkpoint  │
+│ latch crabbing            │          └───────────────────────────┘
+└──────┬─────────────────────┘
+       │
+┌──────▼──────────────────────────────────────────────────────────┐
+│ Buffer Pool (§17) — frame table, hash index, pin/unpin, CLOCK,   │
+│ dirty bitmap, async flusher                                      │
+└──────┬────────────────────────────────────────────────────────--─┘
+       │
+┌──────▼──────────────────────────────────────────────────────────┐
+│ Page Codec (§14) — header, slot array, cells, CRC32C, overflow   │
+└──────┬────────────────────────────────────────────────────────--─┘
+       │
+┌──────▼──────────────────────────────────────────────────────────┐
+│ Pager (§13) — pread/pwrite, fsync/fdatasync, O_DIRECT, mmap RO   │
+└───────────────────────────────────────────────────────────────--─┘</code></pre></details>
+<p>Three properties hold throughout: (1) the data path is <strong>layered, not woven</strong> — the tree never
+touches a raw byte, the buffer pool never knows what a key is, the page codec never knows what a
+B+tree is, the pager never knows what a page&#39;s <em>meaning</em> is; (2) the <strong>WAL is the durability
+primitive</strong> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-5">I5</a>); every other component is an optimization against it — a page never written to
+disk is still recoverable from the WAL up to the last fsync&#39;d record; (3) every cross-cutting
+concern (page size, key/value limits, error type, telemetry) is owned by <code>btree-engine::config</code>
+and threaded through — no layer reaches across another.</p>
+<p><strong>Boxes, one paragraph each.</strong> <em>Public API</em> is the only surface an embedding application sees;
+it never exposes a page number, a latch handle, or a buffer-pool-lifetime-bound byte slice.
+<em>Engine</em> owns the one live <code>WriteTxn</code> at a time and the registry of live <code>Snapshot</code>s (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-9">I9</a>).
+<em>Tree</em> is pure algorithm over pages fetched through the buffer pool; it holds latches, never
+raw file offsets. <em>WAL</em> is append-only bytes plus a replay function; it does not know what a
+page&#39;s contents mean, only that a record is <code>(lsn, txn_id, kind, payload)</code>. <em>Buffer Pool</em> is a
+fixed-size cache with a pin discipline that makes eviction safe under concurrent access. <em>Page
+Codec</em> is a pure transform between bytes and <code>(header, slots, cells)</code>; it never touches disk.
+<em>Pager</em> is the only file-descriptor owner in the process for a given <code>Db</code>.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-1">8.1 On-disk page byte layout</h3>
+<pre class="diagram"><code>byte 0                                                      pagesize-4  pagesize
+┌────────────────┬──────────────┬───────────────┬───────────┬──────────┐
+│ PageHeader(24B)│ Slot array   │  free space   │ Cell area │ CRC32C(4)│
+│ pgno,kind,lsn, │ (grows right)│ (shrinks as   │(grows left│ trailer  │
+│ n_cells,free_* │ sorted by key│  both grow)   │ from end) │          │
+└────────────────┴──────────────┴───────────────┴───────────┴──────────┘</code></pre>
+<p>Cell (leaf, inline): <code>[u32 key_len][u32 val_len][key bytes][val bytes]</code>. Cell (leaf, overflow):
+<code>[u32 key_len][u32 0][u64 first_overflow_pgno][u64 total_len][key bytes]</code>. Cell (internal):
+<code>[u32 sep_len][u32 0][u64 child_pgno][sep bytes]</code>. All integers little-endian regardless of host
+(<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-14">P14</a>). File header (page 0) and the two meta pages (1, 2) use the same <code>PageHeader</code> + trailer
+layout as every other page (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-12-2">§12.2</a>) — no special case.</p>
+<h3 id="sec-8-2">8.2 WAL record wire format</h3>
+<pre class="diagram"><code>+---------+---------+--------+---------+----------+------------+
+| u64 lsn | u64 txn | u8 knd | 3B pad  | u32 plen | u32 crc32c |
++---------+---------+--------+---------+----------+------------+
+| payload (plen bytes, kind-specific: Begin/PageWrite/FullPage/  |
+| AllocPage/FreePage/SetMeta/Commit/Abort/Checkpoint)             |
++------------------------------------------------------------------+</code></pre>
+<p>CRC32C covers <code>(lsn, txn_id, kind, plen, payload)</code> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-12">I12</a>). Records never span a segment file;
+a record that would not fit is deferred to the next segment, padding the residual space of the
+current one with a <code>kind == 0, plen == 0</code> sentinel.</p>
+<h3 id="sec-8-3">8.3 Transaction state machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>—</td>
+<td><code>begin_write</code></td>
+<td>Active</td>
+<td>blocks if another <code>WriteTxn</code> is live (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-3">P3</a>)</td>
+</tr>
+<tr>
+<td>Active</td>
+<td><code>put</code>/<code>delete</code></td>
+<td>Active</td>
+<td>mutates the CoW ridge (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-21-1">§21.1</a>), no disk I/O required yet</td>
+</tr>
+<tr>
+<td>Active</td>
+<td><code>commit</code></td>
+<td>Committing</td>
+<td>WAL <code>Commit</code> record appended, <code>flush_through</code> called</td>
+</tr>
+<tr>
+<td>Committing</td>
+<td><code>flush_through</code> returns Ok</td>
+<td>Committed</td>
+<td><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-1">I1</a> satisfied; meta page swap follows</td>
+</tr>
+<tr>
+<td>Committing</td>
+<td>I/O error on flush</td>
+<td>Aborted</td>
+<td>WAL <code>Abort</code> implied by absence of <code>Commit</code> durability</td>
+</tr>
+<tr>
+<td>Active</td>
+<td><code>abort</code></td>
+<td>Aborted</td>
+<td>dirty pages discarded, no WAL record required for redo-only</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-4">8.4 Recovery state machine (redo-only, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-5">ADR-05</a>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Start</td>
+<td>meta pages read, newer-valid selected (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-10">I10</a>)</td>
+<td>Scanning</td>
+</tr>
+<tr>
+<td>Scanning</td>
+<td>WAL walked from <code>meta.last_committed_lsn + 1</code></td>
+<td>Buffering</td>
+</tr>
+<tr>
+<td>Buffering</td>
+<td><code>Commit(txn_id)</code> seen</td>
+<td>Applying</td>
+</tr>
+<tr>
+<td>Applying</td>
+<td>all buffered records for <code>txn_id</code> applied in LSN order (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-14">I14</a>)</td>
+<td>Scanning</td>
+</tr>
+<tr>
+<td>Buffering</td>
+<td><code>Abort(txn_id)</code> seen</td>
+<td>Scanning (txn&#39;s records discarded)</td>
+</tr>
+<tr>
+<td>Scanning</td>
+<td>bad CRC / truncated header</td>
+<td>Truncated (policy-gated, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-18-7">§18.7</a>)</td>
+</tr>
+<tr>
+<td>Truncated</td>
+<td>past last <code>Commit</code></td>
+<td>Done (discard tail)</td>
+</tr>
+<tr>
+<td>Truncated</td>
+<td>inside a replayed txn</td>
+<td>Fail (<code>Error::WalTruncated</code>, <code>StrictRedo</code>)</td>
+</tr>
+<tr>
+<td>Scanning</td>
+<td>EOF on a record boundary</td>
+<td>Done</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Worked example — insert causing a two-level split</h3>
+<p>Insert <code>k=500</code> into a leaf at 100% fill (fanout 4, illustrative): (1) leaf full → allocate leaf
+<code>R</code>; (2) copy upper half of leaf <code>L</code>&#39;s cells into <code>R</code>; (3) <code>R.next_sibling = L.next_sibling</code>,
+<code>L.next_sibling = R.pgno</code>; (4) separator = <code>R.cell(0).key</code>; (5) insert <code>(separator, R.pgno)</code> into
+parent <code>P</code>; (6) if <code>P</code> is also full, recurse: allocate <code>P&#39;</code>, split, propagate <code>(sep&#39;, P&#39;.pgno)</code>
+to grandparent; (7) if the root split, allocate a new root with two children, update meta
+<code>root_pgno</code> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-16-1">§16.1</a>, cites <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-2">P2</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-18">ADR-18</a>).</p>
+<h3 id="sec-8-6">8.6 Malformed-input example</h3>
+<p>A page whose <code>header.free_off</code> places the slot array past <code>pagesize - 4</code> (the CRC trailer) is
+rejected at <code>PageRef::new</code> with <code>Error::PageCorrupt(pgno)</code> before any cell is dereferenced —
+bounds are checked against the header fields, never trusted (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-13">P13</a>, <code>conformance/corpora/pages/ leaf-bad-slot.bin</code>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-14-8">§14.8</a>).</p>
+<h3 id="sec-8-7">8.7 Failure-path example</h3>
+<p><code>kill -9</code> between the WAL <code>pwrite</code> succeeding and its <code>fsync</code> completing: on reopen, recovery
+reads the meta pages (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-10">I10</a>), scans from <code>last_committed_lsn + 1</code>, and finds the un-fsync&#39;d record
+either absent (if the kernel had not yet flushed the write to its page cache view — indistinguish-
+able from &quot;never written&quot;) or present-but-un-committed (no matching <code>Commit</code> record) — either
+way the transaction is correctly treated as never-happened (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-1">I1</a>, <code>conformance/corpora/crash/ kill-after-pwrite.bin</code>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-18-5">§18.5</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-1">P1</a> — Crash safety is the ground truth.</strong> Every write that returns success from <code>commit()</code> is recoverable after <code>kill -9</code> + power cut. Tradeoff: forbids any optimization that reorders the WAL-fsync-before-meta-write sequence (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-18-6">§18.6</a>). Operational implication: crash-injection fixtures (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-26">§26</a>) gate every release. Violating it: silent data loss indistinguishable from a correct system until the next crash.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-2">P2</a> — The page is the unit of work.</strong> Buffer pool, WAL, checksum, and recovery all speak in whole pages; sub-page operations live only inside the codec. Tradeoff: some space waste on small values. Operational implication: every I/O is page-aligned, simplifying <code>O_DIRECT</code> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#adr-15">ADR-15</a>). Violating it: partial-page writes reintroduce torn-write risk the CRC (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-2">I2</a>) can&#39;t catch.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-3">P3</a> — One writer, many readers.</strong> Concurrent writers are a Phase-1+ surface (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-35">§35</a> row 1); <code>begin_write</code> blocks a second caller, <code>begin_read</code> never blocks. Tradeoff: write throughput capped by one thread&#39;s WAL-append rate. Operational implication: no write-write conflict resolution code exists in Phase 0. Violating it (accepting concurrent writers without B-link or MVCC, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/trade-offs/#sec-35">§35</a> rows 2/4) corrupts the tree under concurrent structural mutation.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-4">P4</a> — Snapshots are free for readers.</strong> A <code>ReadTxn</code> holds a root pgno + read-version; cost is one <code>u64</code> + a refcount (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-21-3">§21.3</a>). Tradeoff: CoW write amplification (every path from a modified leaf to the root is copied, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-21-1">§21.1</a>). Operational implication: no reader-side locking at all. Violating it: a global lock for consistency defeats the entire design&#39;s read-scaling claim (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#m-2">M2</a>).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-5">P5</a> — The WAL is the durability boundary.</strong> A transaction is durable iff its commit record is fsync&#39;d (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-1">I1</a>). The data file may lag unboundedly. Tradeoff: recovery must replay from the last checkpoint, bounding startup time by WAL size (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-32">§32</a> C10). Operational implication: checkpoint cadence is an RTO lever (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-24">§24</a>). Violating it: writing the meta page before the WAL fsync is the single bug class that loses committed data invisibly (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-27">§27</a> pitfall list).</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-6">P6</a> — No silent corruption.</strong> Every page and WAL record carries an independent CRC32C (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-12">I12</a>). A bad page surfaces as <code>Error::PageCorrupt</code>, never silently re-read or repaired. Tradeoff: a CRC-verified read costs one extra pass over the page bytes. Operational implication: repair is a separate, explicit <code>btreectl repair</code> subcommand. Violating it: silent auto-repair hides the operator signal that a device is failing.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-7">P7</a> — No silent fallbacks.</strong> A requested <code>O_DIRECT</code> that is unavailable is a hard open error, not a silent downgrade; a short <code>pwrite</code> is a hard error, not a silent retry. Tradeoff: the engine refuses to &quot;just work&quot; on a misconfigured host. Operational implication: operators get one clear error, not a mysteriously slow or unsafe database. Violating it: silent retry under a different durability policy destroys the auditability the whole threat model (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#sec-22">§22</a>) depends on.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-8">P8</a> — Latches do not nest unbounded.</strong> Lock coupling holds at most two latches at once (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-20-2">§20.2</a>), releasing the parent once the child is safe. Tradeoff: a split/merge that propagates to the root holds latches up the whole path — bounded but rare. Operational implication: a per-thread debug-build latch-stack assertion catches order violations before they become deadlocks. Violating it: unbounded latch nesting is the direct cause of the B-tree deadlocks that take a week to debug (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-27">§27</a>).</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-9">P9</a> — Allocation is bounded.</strong> A <code>WriteTxn</code>&#39;s dirty-page budget (default 64 MiB) triggers a flush, never an OOM (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/numbers/#sec-4">§4</a>). Tradeoff: a pathological single transaction is throttled, not allowed to run unbounded. Operational implication: budget exhaustion is a metric (<code>btree_buffer_pool_dirty_pages</code>), not a kernel OOM-killer event. Violating it moves the failure mode from &quot;visible in telemetry&quot; to &quot;invisible until the kernel kills the process.&quot;</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-10">P10</a> — One config struct, one error enum, one telemetry trait.</strong> All knobs on <code>DbOptions</code>; all errors are <code>Error</code> variants; all metrics flow through <code>Telemetry</code> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-11-4">§11.4</a>). Tradeoff: no plugin runtime — new behavior ships behind a <code>cfg(feature)</code> flag, recompiled. Operational implication: one place to look for every tunable. Violating it (scattering config across ad hoc globals) is what makes production incidents take hours instead of minutes to diagnose.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-11">P11</a> — Recovery is idempotent.</strong> Replaying the same WAL range N times produces the same on-disk state as replaying it once (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-14">I14</a>): a redo record applies only if the target page&#39;s <code>header.lsn &lt; record.lsn</code>. Tradeoff: every page carries its own LSN, one extra 8-byte field. Operational implication: a stuck recovery can be safely re-run without a special &quot;already partially recovered&quot; state. Violating it makes crash-during-recovery an unrecoverable state.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-12">P12</a> — The buffer pool is the only path to disk.</strong> No component but the async flusher (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-17-5">§17.5</a>) issues a <code>pwrite</code> to the data file after Phase 5 lands. Tradeoff: every read/write, even inside the tree, goes through <code>pin</code>/<code>pin_mut</code> (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-11-3">§11.3</a>). Operational implication: the WAL ordering rule (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-4">I4</a>) has exactly one enforcement point. Violating it (a component bypassing the pool) breaks <a class="cite" href="/system-design-blueprints/systems/b-tree-storage/reliability/#inv-4">I4</a> silently — a page can become durable before its log record.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-13">P13</a> — Checksums are structural, not semantic.</strong> CRC32C proves &quot;these bytes are what was written,&quot; never &quot;these bytes are meaningful&quot; (a well-formed-but-wrong key still passes CRC). Tradeoff: the codec still needs bounds checks (cell offsets inside the page) independent of the CRC. Operational implication: fuzzing (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/blueprint/#sec-26">§26</a>, <code>fuzz_targets/page_codec.rs</code>) targets logic bugs the CRC cannot catch. Violating it (treating a CRC pass as &quot;this page is correct&quot;) lets a bounds-check bug slip past code review.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#p-14">P14</a> — Every locked on-disk format is versioned.</strong> Page size, WAL record layout, and file magic are all read from the header at open (<a class="cite" href="/system-design-blueprints/systems/b-tree-storage/architecture/#sec-8-1">§8.1</a>), never assumed from a compile-time constant alone. Tradeoff: one extra field (<code>format_version</code>) per format. Operational implication: a future format change can detect and refuse (or migrate) an old file instead of misreading it. Violating it turns every future format change into a silent misinterpretation of old files.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

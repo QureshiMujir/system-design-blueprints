@@ -1,0 +1,306 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Tensor Runtime — Numbers · Engineering Blueprints</title><meta name="description" content="Distributed Tensor Runtime, constraints, perf targets, capacity. - Build a from-scratch distributed tensor runtime: device mesh + sharding spec → SPMD partitioner (resharding via collective insertion) → from-scratch collective engine over a custom transport →…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/distributed-tensor-runtime/">Distributed Tensor Runtime</a> </li><li> <span aria-current="page">Numbers</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>Distributed Tensor Runtime</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~57 weeks</li> <li>1,833 lines</li> <li>blueprint #351</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-tensor-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/" aria-current="page" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Tensor Runtime — Numbers">  <p class="note warn"><strong>Design targets, not measurements.</strong> Latency and throughput rows are the budgets the blueprint sets for its own benches; memory and capacity rows are arithmetic from stated inputs, formula shown. A build's <a href="/system-design-blueprints/systems/distributed-tensor-runtime/build/">status</a> says what has actually been measured.</p> <section class="prose"><h2 id="sec-4">4. System Constraints</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Constraint</th>
+<th>Target</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>M1</td>
+<td>Ring allreduce bandwidth</td>
+<td>≥ 90 % of <code>2(N−1)/N · D / link_BW</code> bound</td>
+<td>the bandwidth-optimal headline</td>
+</tr>
+<tr>
+<td>M2</td>
+<td>Small-message allreduce latency</td>
+<td>≈ <code>2·log₂N · (α + …)</code> (tree/RHD)</td>
+<td>latency-optimal for small D</td>
+</tr>
+<tr>
+<td>M3</td>
+<td>Algorithm crossover</td>
+<td>ring vs tree selected within 10 % of optimal by cost model</td>
+<td>the α–β model must be calibrated</td>
+</tr>
+<tr>
+<td>M4</td>
+<td>Compute/comm overlap</td>
+<td>≥ 80 % of communication hidden behind compute (overlappable graphs)</td>
+<td>overlap is the perf lever</td>
+</tr>
+<tr>
+<td>M5</td>
+<td>Distributed matmul efficiency</td>
+<td>per-rank #349 GEMM ≥ 80 % local peak; comm not the bottleneck for compute-bound shapes</td>
+<td>reuse #349</td>
+</tr>
+<tr>
+<td>M6</td>
+<td>Transport throughput</td>
+<td>≥ 90 % of TCP achievable bandwidth (single stream)</td>
+<td>data-plane efficiency</td>
+</tr>
+<tr>
+<td>M7</td>
+<td>Barrier latency</td>
+<td>≈ <code>O(log N)</code> rounds</td>
+<td>dissemination/tournament barrier</td>
+</tr>
+<tr>
+<td>M8</td>
+<td>Bootstrap (world setup)</td>
+<td>&lt; 5 s for N ≤ 1024 ranks</td>
+<td>rendezvous scaling</td>
+</tr>
+<tr>
+<td>M9</td>
+<td>Failure detection time</td>
+<td>&lt; 3 × heartbeat interval (configurable)</td>
+<td>bounded fail-stop</td>
+</tr>
+<tr>
+<td>M10</td>
+<td>Determinism</td>
+<td>same (program, mesh, algo) → bit-identical across runs (deterministic mode)</td>
+<td>reproducibility</td>
+</tr>
+<tr>
+<td>M11</td>
+<td>Memory (collective)</td>
+<td>O(chunk) ring buffers, not O(D) extra</td>
+<td>streaming, bounded</td>
+</tr>
+<tr>
+<td>M12</td>
+<td>Recovery</td>
+<td>fail-stop: detect + clean abort with diagnostics (in-job recovery deferred)</td>
+<td>scope</td>
+</tr>
+</tbody></table></div>
+<p>Perf-target IDs <code>M1</code>–<code>M12</code> are cited elsewhere in this document (Performance Engineering, Hard Questions, Appendix B) to point at a specific row without a dead §-number.</p>
+<p>Assumptions: homogeneous ranks (heterogeneous deferred); a flat or 2-level network (topology-aware hierarchical deferred); TCP with reasonable bandwidth/RTT; ranks ≤ ~1024 for P0 targets; per-rank compute via #349 (CPU; GPU deferred).</p>
+<h3 id="sec-4-1">4.1 Worked collective cost (the ring/RHD crossover)</h3>
+<ul>
+<li>Model: <code>T = α + β·n</code> per message; for <code>N</code> ranks reducing <code>D</code> bytes.</li>
+<li><strong>Ring allreduce:</strong> <code>T_ring ≈ 2(N−1)·α + 2·(N−1)/N·D·β</code> (+ reduce <code>γ</code>). Latency term scales <code>O(N)</code>; bandwidth term <code>→ 2D·β</code> (N-independent, optimal).</li>
+<li><strong>RHD allreduce:</strong> <code>T_rhd ≈ 2·log₂N·α + 2·(N−1)/N·D·β</code>. Latency term <code>O(log N)</code>; same bandwidth term.</li>
+<li><strong>Crossover:</strong> ring and RHD share the bandwidth term, so the choice is driven by the latency term: RHD wins whenever <code>2log₂N·α &lt; 2(N−1)·α</code>, i.e. essentially always on latency — but ring&#39;s simpler pipelining + better cache/overlap behavior makes it win for <strong>large D</strong> in practice; RHD wins for <strong>small D</strong> (latency-dominated). The <code>select()</code> function computes the crossover <code>D*</code> from the measured <code>α,β</code>.</li>
+<li><strong>Numeric example:</strong> N=64, α=5 µs, β=1/(10 GB/s). Small D=1 KB: latency dominates → RHD (<code>2·6·5µs=60µs</code> vs ring <code>2·63·5µs=630µs</code>). Large D=100 MB: bandwidth dominates (<code>≈2·100MB·β≈20ms</code>) → ring (simpler, overlaps better).</li>
+<li><strong>Implication:</strong> the <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/#sec-4">§4</a> targets are stated against the <em>bandwidth-optimal bound</em> for large D and the <em>log-latency bound</em> for small D — the cost model must be calibrated per cluster (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#p-4">P4</a>), never hardcoded.</li>
+</ul>
+<h3 id="sec-4-2">4.2 Worked overlap budget (why ≥ 80 % hidden is the target)</h3>
+<ul>
+<li>A step&#39;s wall-clock with perfect overlap is <code>max(compute, comm)</code>; with no overlap it is <code>compute + comm</code>.</li>
+<li>Suppose backward compute = 40 ms and gradient allreduce comm = 30 ms. Serial: 70 ms. Fully overlapped: <code>max(40,30)=40 ms</code> → 1.75× speedup; the 30 ms of comm is <em>free</em>.</li>
+<li>But overlap requires <em>independent</em> work to hide behind: gradients for layer L can allreduce while layer L−1&#39;s backward runs (reverse-order availability). The scheduler exploits exactly this (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#p-9">P9</a>).</li>
+<li><strong>Overlap %</strong> = <code>hidden_comm / total_comm</code>. At 80 %, effective comm = <code>0.2·30 = 6 ms</code> → wall-clock ≈ <code>max(40, 40+6) ≈ 46 ms</code> (vs 70 ms serial).</li>
+<li>Ceiling: if <code>comm &gt; compute</code>, even perfect overlap leaves <code>comm − compute</code> exposed → the workload is <strong>comm-bound</strong>, and the only fix is reducing volume (partitioning, <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#p-6">P6</a>) or raising bandwidth (topology/transport, <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#p-12">P12</a>).</li>
+<li>This is why <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/#sec-4">§4</a> targets ≥ 80 % overlap <em>and</em> near-optimal collective bandwidth — the two levers multiply.</li>
+</ul>
+<h3 id="sec-4-3">4.3 Failure-detection budget (the detection-vs-false-positive tradeoff)</h3>
+<ul>
+<li>Detection time <code>≈ k · heartbeat_interval</code> (k = suspicion confirmations). Smaller <code>heartbeat</code>/<code>k</code> → faster detection but more false positives (a slow rank wrongly declared dead).</li>
+<li>Example: <code>heartbeat=200 ms</code>, <code>k=3</code> → detection ≈ 600 ms (&lt; the <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/#sec-4">§4</a> &quot;3×heartbeat&quot; bound) with low false-positive rate via SWIM indirect probes.</li>
+<li>The cost of a false positive is high (the whole job fail-stops), so the default leans conservative; the cost of slow detection is a hung job — both are bounded, never unbounded (principle 8, <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-12">I12</a>).</li>
+<li>The bound holds independent of <code>N</code> because heartbeats use the SWIM gossip pattern (O(1) load per rank), so detection time does not grow with world size.</li>
+</ul>
+<hr>
+</section><section class="prose"><h2 id="sec-perf">Performance Engineering</h2>
+<ul>
+<li><strong>Cost model first:</strong> every collective placed against the α–β model + the bandwidth-optimal bound; the ring/RHD crossover is the canonical tuning artifact.</li>
+<li><strong>Profiling:</strong> distributed timeline (merged per-rank traces), network counters (bandwidth, retransmits), <code>perf</code> on the data plane, flamegraphs.</li>
+<li><strong>Overlap analysis:</strong> measure comm hidden behind compute (<code>overlapped_ns / comm_ns</code>); the headline lever (≥ 80 %).</li>
+<li><strong>Transport tuning:</strong> socket buffers, <code>TCP_NODELAY</code> for control, multiple connections for bandwidth, zero-copy <code>writev</code>.</li>
+<li><strong>Collective tuning:</strong> chunk size, stream count, fusion thresholds, hierarchical (intra/inter-node) topology.</li>
+<li><strong>Local compute:</strong> delegate to #349; per-rank GEMM efficiency is its own lever.</li>
+<li><strong>Determinism cost:</strong> det-mode (fixed reduction order) has a measured overhead — reported. On comm-bound workloads the overhead can be 5–15% (less pipelining freedom); on compute-bound workloads it is negligible. Always benchmark before disabling in production.</li>
+<li><strong>Roofline model:</strong> for each collective, plot achieved bandwidth vs message size against the α–β model prediction. A point far below the roofline indicates a transport bug, a serialization bottleneck, or a miscalibrated <code>NetParams</code>. A point above the roofline indicates measurement error (warmup missing, clock skew).</li>
+<li><strong>Scaling efficiency:</strong> defined as <code>speedup(N) / N</code>; ideal = 1.0. Communication overhead drives this below 1 — the partitioner (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#p-6">P6</a>) and overlap (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#p-9">P9</a>) are the tools to recover it. Track scaling efficiency at N = {2, 4, 8, 16, 32, 64} in the nightly bench suite.</li>
+<li><strong>Targets:</strong> <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/#sec-4">§4</a> (M1–M12) — enforced by the multi-host bench gate. Regressions ≥ 5% against M1 (bandwidth-%-of-bound) or M4 (overlap%) block merge; a ≥ 10% regression against M9 (failure detection time) or M7 (barrier latency) triggers a mandatory investigation before merge.</li>
+</ul>
+<hr>
+</section><section class="prose"><h2 id="sec-capacity">Back-of-Envelope Capacity Model</h2>
+<p>Derived from <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/#sec-4">§4</a> System Constraints. Symbols: N = world size, D = tensor bytes, α = per-message latency (s), β = 1/bandwidth (s/byte), chunk = ring buffer size (bytes).</p>
+<p><strong>1. Ring allreduce bytes/rank</strong>
+Formula: <code>2·(N−1)/N·D</code>
+Example: N=64, D=1 GB → <code>2·63/64·1e9 = 1.969 GB</code> moved per rank. This is essentially 2D for large N, and it is N-independent in the limit — the key bandwidth-optimality result.</p>
+<p><strong>2. Ring allreduce time (bandwidth-dominated)</strong>
+Formula: <code>2·(N−1)/N·D·β</code>
+Example: N=64, D=1 GB, link=25 GB/s (β=40 ps/byte) → <code>1.969e9 · 40e-12 = 78.7 ms</code>. At 90% efficiency (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/#sec-4">§4</a> target) this is ~87 ms wall-clock.</p>
+<p><strong>3. RHD allreduce time (latency-dominated)</strong>
+Formula: <code>2·log₂N·α</code>
+Example: N=64, log₂64=6, α=5 µs → <code>2·6·5e-6 = 60 µs</code> for a small (1 KB) message. Compare ring for the same message: <code>2·63·5µs = 630 µs</code> — RHD is 10× faster on latency-dominated workloads.</p>
+<p><strong>4. Crossover message size D</strong>*
+Ring and RHD share the same bandwidth term; the choice is driven by the latency term. Ring&#39;s latency = <code>2(N−1)·α</code>; RHD&#39;s latency = <code>2·log₂N·α</code>. The practical crossover where ring&#39;s bandwidth efficiency starts justifying its higher latency is empirically: <code>D* ≈ α·N / β</code> (ignoring constants). Example: N=64, α=5µs, β=40ps/byte → <code>5e-6·64 / 40e-12 ≈ 8 MB</code>. Below 8 MB prefer RHD; above prefer ring. This number must be measured per cluster — it varies by 10× between a 1 GbE LAN and a 200 Gb/s InfiniBand fabric.</p>
+<p><strong>5. Per-rank tensor memory (sharded)</strong>
+Formula: <code>global_bytes / N</code>
+Example: 7B parameter model, f32 (4 bytes/param) = 28 GB total; N=64 → <code>28e9/64 = 437 MB</code> per rank. This is the ZeRO-3 parameter sharding budget. At N=512 it drops to 54 MB/rank — fitting comfortably in CPU DRAM even for large models.</p>
+<p><strong>6. Overlap opportunity</strong>
+Formula: <code>min(compute_time, comm_time) / serial_time</code>
+Example: backward=40 ms, allreduce=30 ms, serial=70 ms → <code>min(40,30)/70 = 42.9%</code> max speedup from overlap; wall-clock floor = max(40,30) = 40 ms (vs 70 ms serial = 1.75× speedup). When comm &gt; compute, say backward=25 ms and allreduce=45 ms: floor = 45 ms, overlap saves only <code>25/70 = 35.7%</code> — the job is comm-bound and needs less communication, not more overlap.</p>
+<p><strong>7. Transport in-flight bytes (flow control window)</strong>
+Formula: <code>window_bytes ≥ 2 × BDP</code> where BDP = <code>link_BW × RTT</code>
+Example: 25 GB/s link, RTT=200µs → BDP = <code>25e9·200e-6 = 5 MB</code>; recommended window = 10 MB. Setting the window too small (&lt; BDP) starves the pipe; too large risks OOM under a slow receiver. The <code>JobConfig.window_bytes</code> default is 2×BDP of the expected cluster.</p>
+<p><strong>8. Barrier latency (dissemination)</strong>
+Formula: <code>log₂N · (α + small_msg_time)</code>
+Example: N=64, α=5µs, 8-byte msg at 25 GB/s (negligible) → <code>6·5µs = 30 µs</code>. This is the <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/#sec-4">§4</a> &quot;O(log N) rounds&quot; target. Compare a naive all-to-coordinator barrier: N·α = 64·5µs = 320 µs — 10× worse, and it scales O(N).</p>
+<p><strong>9. Bootstrap table size</strong>
+Formula: <code>N · (hostname + port) ≈ N · 64 bytes</code>
+Example: N=1024 → <code>1024·64 = 65 KB</code> — tiny; the O(N) cost is in the coordinator fan-out (N TCP connections + N×64 bytes broadcast), not in the data volume. For N=1024, a 1 Gbit coordinator link can broadcast the table in <code>65e3·8 / 1e9 = 0.5 ms</code> — the latency cost (N serial round trips) dominates, motivating the tree-broadcast for large N (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#sec-8-13">§8.13</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/#sec-4-3">§4.3</a>).</p>
+<p><strong>10. Failure detection latency</strong>
+Formula: <code>k · heartbeat_interval</code>
+Example: k=3, heartbeat=200ms → <code>600 ms</code> detection bound. SWIM indirect probes reduce false positives without changing the detection bound — a slow rank is probed via a third party before being declared dead. At N=1024, gossip-style SWIM disseminates failure information in <code>O(log N) = ~10</code> gossip rounds at <code>heartbeat_interval</code> each → ~2 s for full dissemination at 200 ms intervals. The <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/#sec-4">§4</a> target of <code>&lt; 3×heartbeat</code> is for detection, not full dissemination.</p>
+<hr>
+</section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

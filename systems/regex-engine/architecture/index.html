@@ -1,0 +1,509 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Regex Engine — Architecture · Engineering Blueprints</title><meta name="description" content="Regex Engine, hld: §3 overview + §8 domain model. - Build a from-scratch regular-expression engine in the RE2 / Rust regex-crate tradition: pattern string → recursive-descent parser → AST → desugared, Unicode-resolved HIR → Thompson-construction NFA…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/regex-engine/">Regex Engine</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Regex Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>13 phases</li> <li>~14 weeks</li> <li>1,819 lines</li> <li>blueprint #61</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/regex-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/regex-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/regex-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/regex-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/regex-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/regex-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/regex-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/regex-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/regex-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/regex-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Regex Engine — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Diagram</h3>
+<pre class="diagram"><code>   pattern: &amp;str                                   Input: &amp;str / &amp;[u8] / BufRead
+        │                                                     │
+        ▼                                                     ▼
+┌────────────────────┐   ┌─────────────────────┐   ┌───────────────────────────┐
+│  regex-syntax       │   │  regex-automata      │   │  input layer                │
+│  parser → AST       │──►│  HIR desugar +       │   │  Cursor (byte/codepoint)    │
+│  (recursive descent)│   │  Unicode resolve →   │   │  Stream (BufRead resume)    │
+└─────────────────────┘   │  Thompson NFA        │   └──────────────┬─────────────┘
+                          │  (bytecode Instr)     │                  │
+                          └──────────┬────────────┘                  │
+                                     │ Nfa (+ByteClasses)             │
+                     ┌───────────────┼──────────────────┐            │
+                     ▼               ▼                  ▼            │
+             ┌───────────────┐ ┌───────────┐   ┌─────────────────┐   │
+             │  analysis      │ │ literal    │   │  meta selector   │◄──┘
+             │  anchored /    │ │ extract →  │   │  (§19, compile-  │
+             │  one-pass /    │ │ BM / Aho-  │──►│  time decision)  │
+             │  backref /     │ │ Corasick   │   └────────┬─────────┘
+             │  lookaround    │ └───────────┘             │
+             └───────────────┘                            │
+              ┌─────────────────────────────────────────┬─┴───────────────────┐
+              ▼                                         ▼                     ▼
+     ┌─────────────────┐                     ┌──────────────────┐  ┌─────────────────────┐
+     │  PikeVM (§16-17) │                     │  LazyDfa (§18-19) │  │  BacktrackVM (§21)   │
+     │  thread list,    │                     │  bounded cache,   │  │  budgeted step count  │
+     │  captures,       │                     │  falls back to    │  │  backrefs + variable  │
+     │  leftmost-first/ │                     │  PikeVM on full   │  │  lookbehind only      │
+     │  longest         │                     └──────────────────┘  └─────────────────────┘
+     └─────────────────┘
+              │                                         │                     │
+              └───────────────────┬─────────────────────┴─────────────────────┘
+                                  ▼
+                     ┌────────────────────────────┐
+                     │  public API (crate regex)   │
+                     │  Regex / RegexSet / Match /  │
+                     │  Captures / RegexBuilder     │
+                     └────────────────────────────┘</code></pre>
+<h3 id="sec-3-2">3.2 Box Narratives</h3>
+<ul>
+<li><strong><code>regex-syntax</code> parser → AST.</strong> Hand-written recursive-descent parser (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-2">P2</a>, ADR-06) over the pattern grammar (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#sec-8-1">§8.1</a>); every node carries a byte-range <code>Span</code> for diagnostics; on any construct it cannot express it fails fast with a typed <code>ParseErrorKind</code>, never a partial parse (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-15">P15</a>).</li>
+<li><strong>HIR desugar + Unicode resolve → Thompson NFA.</strong> The AST is validated, desugared (<code>\d</code>/<code>\w</code> expand, <code>(?i)</code> case-folds), Unicode properties resolve against the generated tables (UTS#18 RL1.2), classes normalize, and the whole tree lowers to a flat <code>Instruction</code> bytecode via Thompson&#39;s construction (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-2">P2</a>, <a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-14">§14</a>–<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-15">§15</a>).</li>
+<li><strong>Input layer.</strong> <code>Cursor</code> owns every codepoint-boundary decision (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-12">P12</a>); <code>Stream</code> wraps a <code>BufRead</code> for incremental matching (<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-22">§22</a>); no engine below this box ever indexes a UTF-8 boundary itself.</li>
+<li><strong>Analysis passes.</strong> Four independent HIR walks decide, once, at compile time: is the pattern anchored, is it one-pass, does it need a backreference, does it need lookaround the NFA cannot express (<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-19">§19</a>–<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-20">§20</a>) — every downstream decision reads these flags, never re-derives them.</li>
+<li><strong>Literal extraction.</strong> A HIR pass identifies required prefix/suffix/inner literals and builds a <code>LiteralStrategy</code> (Boyer-Moore for one literal, Aho-Corasick for several) that skips positions the NFA/DFA cannot possibly match (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-10">P10</a>, <a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-18-5">§18.5</a>).</li>
+<li><strong>Meta selector.</strong> The single place engine choice is made, once, at <code>Regex::new</code> time (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-3">P3</a>); it never re-decides mid-match except the one documented, observable lazy-DFA-cache-exhaustion fallback (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-9">P9</a>).</li>
+<li><strong>PikeVM.</strong> The correctness ground truth (<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-16">§16</a>): NFA simulation with epsilon-closure deduplication, thread-local capture slots, leftmost-first/longest bookkeeping (<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-17">§17</a>).</li>
+<li><strong>LazyDfa.</strong> The throughput engine (<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-18">§18</a>): states are subsets of NFA states, built on demand, cached under <code>dfa_size_limit</code>, falling back to the PikeVM when the cache clears too often.</li>
+<li><strong>BacktrackVM.</strong> The engine of last resort (<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-21">§21</a>): a textbook backtracker with one addition — every step decrements an explicit budget; exhaustion returns <code>Err(Budget)</code>, never a silent hang.</li>
+<li><strong>Public API.</strong> <code>Regex</code>/<code>RegexSet</code>/<code>RegexBuilder</code>/<code>Captures</code>/<code>Match</code> — the only surface a host ever touches; the user never names which engine ran (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-3">P3</a>).</li>
+</ul>
+<h3 id="sec-3-3">3.3 Boundaries</h3>
+<ul>
+<li><strong>Trust:</strong> the pattern is untrusted when compiled from user input (bounded by <code>size_limit</code>); the haystack is always untrusted (the entire linear-time guarantee exists for this boundary); a build-time <code>regex!</code> pattern is trusted (checked at compile time, never attacker-controlled).</li>
+<li><strong>Concurrency:</strong> a compiled <code>Regex</code> is <code>Send + Sync</code>; concurrent <code>is_match</code>/<code>find</code>/<code>captures</code> calls from multiple threads are valid and allocate no shared mutable state (per-match scratch is arena-local, <a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-13">P13</a>).</li>
+<li><strong>Persistence:</strong> none at the engine&#39;s own layer — Unicode tables are checked-in <code>static</code> data (ADR-14); a compiled <code>Regex</code> holds no per-match heap between calls.</li>
+<li><strong>Protocol:</strong> the only &quot;wire format&quot; is the NFA bytecode snapshot format used for conformance fixtures (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-15-6">§15.6</a>) and the <code>regex!</code> macro&#39;s compile-time-emitted <code>const</code>/<code>static</code> program.</li>
+</ul>
+<h3 id="sec-3-4">3.4 Data-Flow Walk — One Match, End to End</h3>
+<ol>
+<li><code>Regex::new(r&quot;(?i)foo\d+&quot;)</code> → the parser produces the AST (<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-13">§13</a>) → HIR desugar case-folds <code>foo</code> and resolves <code>\d</code> to a Unicode digit class (<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-14">§14</a>).</li>
+<li>Thompson construction emits bytecode: <code>Byte</code>/<code>Class</code> instructions for the literal+digit run, a <code>Split</code> for the <code>+</code> repetition, a <code>Match</code> terminus (<a class="cite" href="/system-design-blueprints/systems/regex-engine/build/#sec-15">§15</a>).</li>
+<li>Analysis passes mark the pattern anchored=false, one-pass=false (the <code>+</code> creates ambiguity at the boundary), backref=false, lookaround=false.</li>
+<li>Literal extraction finds the required prefix <code>&quot;foo&quot;</code> (case-insensitive) → a Boyer-Moore <code>LiteralStrategy</code> (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-18-5">§18.5</a>).</li>
+<li>The meta selector picks <code>PikeVm + LazyDfa(opportunistic)</code> (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-19-1">§19.1</a>) — the default disposition.</li>
+<li><code>find(&quot;xxx FOO123 yyy&quot;)</code>: the BM prefilter skips to the case-insensitive <code>&quot;FOO&quot;</code> match at byte 4; the lazy DFA (or PikeVM) confirms and extends the match to <code>123</code>; the match range <code>4..10</code> returns.</li>
+<li>If the DFA&#39;s cache had filled mid-match, a <code>regex.dfa.fallback</code> trace event fires and the PikeVM finishes the match with an identical answer (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-9">P9</a>, cross-engine determinism, <a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#sec-7">§7</a>).</li>
+</ol>
+<h3 id="sec-3-5">3.5 The Matching Algorithm — Expanded (the Heart)</h3>
+<ul>
+<li><code>PikeVM::search</code>: seed <code>clist = epsilon_closure({start})</code>; for each input byte, build <code>nlist</code> by advancing every thread in <code>clist</code> whose next instruction accepts the byte, epsilon-closing each successor and <strong>deduplicating by NFA <code>StateId</code></strong> — two threads reaching the same state collapse into one (this single rule keeps the simulation O(n·m) instead of exponential; Cox 2007, <a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-16-2">§16.2</a>, <a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#inv-2">I2</a>).</li>
+<li>A thread reaching <code>Match</code> records its capture-slot vector; under leftmost-first the first such thread wins and the rest of <code>clist</code> is discarded; under leftmost-longest the simulation continues, keeping the longest match seen (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-17-3">§17.3</a>–<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-17-4">§17.4</a>, <a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#inv-5">I5</a>).</li>
+<li><code>LazyDfa::search</code> is the same automaton computed lazily: a DFA state <em>is</em> a canonicalized NFA state-set; a transition on a byte is &quot;advance every NFA state in the set, epsilon-close, canonicalize, cache-or-allocate&quot; (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-18-1">§18.1</a>, <a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#inv-6">I6</a>).</li>
+<li>This mutual grounding — the DFA is provably the same automaton as the PikeVM&#39;s frontier, just precomputed and cached — <strong>is</strong> the cross-engine determinism invariant (<a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#inv-2">I2</a>) and the reason the conformance suite treats the PikeVM as ground truth (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-24-4">§24.4</a>).</li>
+</ul>
+<h3 id="sec-3-6">3.6 Concurrency &amp; Determinism Sequence (Two Threads, One Compiled Regex)</h3>
+<pre class="diagram"><code>Thread A: regex.find(&quot;input A&quot;)   Thread B: regex.find(&quot;input B&quot;)   (same Arc&lt;Regex&gt;)
+  |                                  |
+  Scratch::new() (own arena)         Scratch::new() (own arena)
+  |                                  |
+  PikeVm::search(&amp;input_a, &amp;mut A)   PikeVm::search(&amp;input_b, &amp;mut B)   (run concurrently)
+  |                                  |
+  Scratch dropped/reset at call end  Scratch dropped/reset at call end</code></pre>
+<p>Neither thread touches the other&#39;s <code>Scratch</code>; the compiled <code>Regex</code>&#39;s own fields (<code>Nfa</code>, <code>ByteClasses</code>, <code>LiteralStrategy</code>) are read-only after construction (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-13">P13</a>, <a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-14">P14</a>). This is why the determinism invariant (<a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#inv-10">I10</a>) can be verified with a 1,024-run loop on a single thread and still be trusted under real concurrency — there is no shared mutable state for concurrency to perturb.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Grammar, Automata &amp; Matching Semantics</h2>
+<h3 id="sec-8-1">8.1 Pattern Grammar (EBNF, abridged from the <code>rust-regex</code>-compatible surface)</h3>
+<pre class="diagram"><code>pattern     ::= alternation
+alternation ::= concat (&quot;|&quot; concat)*
+concat      ::= factor*
+factor      ::= atom repetition?
+repetition  ::= (&quot;*&quot; | &quot;+&quot; | &quot;?&quot; | &quot;{&quot; INT (&quot;,&quot; INT?)? &quot;}&quot;) &quot;?&quot;?
+atom        ::= literal | escape | class | group | anchor | &quot;.&quot;
+escape      ::= &quot;\&quot; (perl_class | unicode_property | hex | oct | special)
+class       ::= &quot;[&quot; &quot;^&quot;? class_item+ &quot;]&quot;
+group       ::= &quot;(&quot; group_kind? alternation &quot;)&quot;
+group_kind  ::= &quot;?:&quot; | &quot;?P&lt;&quot; NAME &quot;&gt;&quot; | &quot;?&lt;&quot; NAME &quot;&gt;&quot; | &quot;?=&quot; | &quot;?!&quot; | &quot;?&lt;=&quot; | &quot;?&lt;!&quot;
+anchor      ::= &quot;^&quot; | &quot;$&quot; | &quot;\b&quot; | &quot;\B&quot; | &quot;\A&quot; | &quot;\z&quot;</code></pre>
+<p>Each construct is either accepted or rejected with a typed <code>ParseErrorKind</code> (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#sec-8-9">§8.9</a>); the parser never partially accepts.</p>
+<h3 id="sec-8-2">8.2 HIR Desugaring Rules</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>AST Construct</th>
+<th>HIR Form</th>
+<th>Rule Applied</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>\d</code>, <code>\w</code>, <code>\s</code></td>
+<td>resolved Unicode/byte class</td>
+<td>UTS#18 RL1.2 property lookup (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-14-1">§14.1</a>)</td>
+</tr>
+<tr>
+<td><code>(?i)…</code></td>
+<td>case-folded literal/class chain</td>
+<td>UTS#18 RL1.5 simple fold (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-14-1">§14.1</a>)</td>
+</tr>
+<tr>
+<td><code>a{m,n}</code></td>
+<td><code>m</code> required copies + <code>n-m</code> optional copies</td>
+<td>bounded by <code>size_limit</code> (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-15-3">§15.3</a>)</td>
+</tr>
+<tr>
+<td><code>a{m,}</code></td>
+<td><code>m</code> copies + <code>a*</code></td>
+<td>unbounded tail</td>
+</tr>
+<tr>
+<td><code>\p{Property}</code></td>
+<td>codepoint-range set → UTF-8 byte-range fan</td>
+<td><a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-14-3">§14.3</a>, Cox&#39;s byte-class construction</td>
+</tr>
+<tr>
+<td>overlapping class ranges</td>
+<td>merged, complements computed eagerly</td>
+<td><a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-14-1">§14.1</a> step 5</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Thompson Construction Rules (State-Transition Table)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>HIR Node</th>
+<th>Fragment (Entry → Exit)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Empty</code></td>
+<td>ε</td>
+</tr>
+<tr>
+<td><code>Literal(b)</code></td>
+<td><code>Byte(b, exit)</code></td>
+</tr>
+<tr>
+<td><code>Class(c)</code></td>
+<td><code>Class(c, exit)</code></td>
+</tr>
+<tr>
+<td><code>Concat(a,b)</code></td>
+<td><code>a.exit = b.entry</code></td>
+</tr>
+<tr>
+<td><code>Alternation(a,b)</code></td>
+<td><code>Split(a.entry, b.entry)</code>; both exits → shared exit</td>
+</tr>
+<tr>
+<td><code>Repetition*(a)</code> greedy</td>
+<td><code>s = Split(a.entry, exit)</code>; <code>a.exit → s</code></td>
+</tr>
+<tr>
+<td><code>Repetition+(a)</code> greedy</td>
+<td><code>a.exit = Split(a.entry, exit)</code></td>
+</tr>
+<tr>
+<td><code>Repetition?(a)</code> greedy</td>
+<td><code>Split(a.entry, exit)</code></td>
+</tr>
+<tr>
+<td><code>Capture(i, a)</code></td>
+<td><code>Capture(2i, a.entry) → a.exit → Capture(2i+1, exit)</code></td>
+</tr>
+</tbody></table></div>
+<p>Greediness is purely <code>Split</code> branch order: <code>next_a</code> is preferred. Lazy quantifiers swap the order (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-15-1">§15.1</a>).</p>
+<h3 id="sec-8-4">8.4 NFA Instruction Set</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Instruction</th>
+<th>Semantics</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Byte{byte,next}</code></td>
+<td>consume exactly this byte</td>
+</tr>
+<tr>
+<td><code>Class{class_id,next}</code></td>
+<td>consume any byte in the interned byte class</td>
+</tr>
+<tr>
+<td><code>Split{next_a,next_b}</code></td>
+<td>epsilon transition, <code>next_a</code> preferred</td>
+</tr>
+<tr>
+<td><code>Capture{slot,next}</code></td>
+<td>zero-width; write current offset into <code>slot</code></td>
+</tr>
+<tr>
+<td><code>Look{look,next}</code></td>
+<td>zero-width anchor/boundary assertion</td>
+</tr>
+<tr>
+<td><code>Backref{group,next}</code></td>
+<td>reachable only via <code>BacktrackVM</code> (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-21-2">§21.2</a>)</td>
+</tr>
+<tr>
+<td><code>Match{pattern_id}</code></td>
+<td>terminus; which pattern (for <code>RegexSet</code>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Capture Slot Model</h3>
+<p>Group <code>i</code>&#39;s start/end occupy slots <code>2i</code>/<code>2i+1</code>; slot 0/1 are the implicit whole-match group. Slot count is fixed at compile time (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-15-4">§15.4</a>). A thread&#39;s <code>SlotVec</code> is copy-on-write (<a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#inv-9">I9</a>); the copy fires exactly when a <code>Split</code> produces two threads about to diverge in what they write (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-17-1">§17.1</a>).</p>
+<h3 id="sec-8-6">8.6 Leftmost-First vs Leftmost-Longest (Rule Table)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Semantics</th>
+<th>Rule</th>
+<th>Default?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Leftmost-first (PCRE)</td>
+<td>first thread to reach <code>Match</code> wins; greedy <code>Split</code> prefers its body</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>Leftmost-longest (POSIX)</td>
+<td>simulation continues after the first <code>Match</code>; longest wins; ties broken by earliest start</td>
+<td>opt-in (<code>RegexBuilder::longest_match(true)</code>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 The Matching Algorithm (State-Machine View)</h3>
+<ul>
+<li><code>PikeVM</code>: <code>Ready → Stepping(clist,nlist) → {Matched(slots) | Exhausted}</code>. Each byte transitions <code>Stepping</code> to itself with <code>clist,nlist</code> swapped; <code>Matched</code> short-circuits under leftmost-first, continues under leftmost-longest until <code>Exhausted</code>.</li>
+<li><code>LazyDfa</code>: <code>Ready → Stepping(dfa_state) → {Matched | CacheFull→FallbackToPikeVM | Exhausted}</code>. Every <code>Stepping</code> transition either hits a cached transition or computes-and-caches one.</li>
+<li><code>BacktrackVM</code>: <code>Ready → Stepping(frame_stack) → {Matched | BudgetExceeded | Exhausted}</code>. Each <code>Split</code> pushes the loser frame; each step decrements the budget.</li>
+</ul>
+<h3 id="sec-8-8">8.8 Worked Match Trace</h3>
+<pre class="diagram"><code>Pattern: (a|ab)(c|bcd)(d*)   Input: &quot;abcd&quot;   Engine: PikeVM, leftmost-first
+
+pos  clist (abbreviated)                  action
+0    {S0}                                 epsilon-closure of start
+0    {a-branch, ab-branch}                Split at group-1 entry
+1    after &#39;a&#39;: {c-branch, bcd-branch@b}  consumed &#39;a&#39;; two live threads
+2    after &#39;b&#39;: {bcd-branch@c}            a-branch died (expects c/bcd); ab-branch alive
+3    after &#39;c&#39;: {d*-branch}               bcd matched; group2 = &quot;bcd&quot;
+4    after &#39;d&#39;: {d*-branch, Match}        d* may stop or continue; Match recorded
+end  Match: group0=&quot;abcd&quot; group1=&quot;ab&quot; group2=&quot;bcd&quot; group3=&quot;d&quot;</code></pre>
+<p>This is the textbook &quot;ambiguous alternation&quot; case Thompson NFA simulation resolves without backtracking: both <code>a</code> and <code>ab</code> branches run simultaneously as separate threads (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-16-1">§16.1</a>) until one dies naturally.</p>
+<h3 id="sec-8-9">8.9 Malformed-Input / Failure-Path Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Expected</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>(unclosed</code></td>
+<td><code>ParseErrorKind::UnclosedGroup</code> with the byte span of the opening <code>(</code></td>
+</tr>
+<tr>
+<td><code>[z-a]</code> (inverted range)</td>
+<td>a class-range error naming the bad range</td>
+</tr>
+<tr>
+<td><code>a{1000000,1000001}</code></td>
+<td><code>ParseErrorKind::SizeLimitExceeded</code> at parse time, before NFA construction</td>
+</tr>
+<tr>
+<td><code>\p{NotAProperty}</code></td>
+<td><code>ParseErrorKind::InvalidUnicodeProperty(&quot;NotAProperty&quot;)</code></td>
+</tr>
+<tr>
+<td><code>(a+)+$</code> vs <code>&quot;aaa…a!&quot;</code> on <code>BacktrackVM</code></td>
+<td><code>Err(MatchError::Budget)</code> at the configured step cap, never a hang</td>
+</tr>
+<tr>
+<td><code>\1</code> with <code>RegexBuilder::engine(PikeVm)</code></td>
+<td><code>ParseErrorKind::EngineUnsupported{needed: Backtrack, requested: PikeVm}</code></td>
+</tr>
+<tr>
+<td>a lone surrogate in a <code>&amp;str</code> haystack</td>
+<td>impossible — <code>&amp;str</code> is guaranteed valid UTF-8 at the type level; bytes-mode never decodes codepoints</td>
+</tr>
+<tr>
+<td><code>a{5,2}</code> (min greater than max)</td>
+<td><code>ParseErrorKind::InvalidRepetition</code> naming the inverted bound</td>
+</tr>
+<tr>
+<td><code>(?P&lt;name&gt;a)(?P&lt;name&gt;b)</code> (duplicate capture name outside alternation)</td>
+<td>a duplicate-name parse error (distinct from the same-name-in-alternation case documented in <a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-17-8">§17.8</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-10">8.10 Worked Lazy-DFA Cache Trace</h3>
+<pre class="diagram"><code>state S0 (start) --&#39;f&#39;--&gt; compute: advance NFA states, epsilon-close, canonicalize
+                          -&gt; cache miss: allocate S1, cache[S0][&#39;f&#39;]=S1
+S1 --&#39;o&#39;--&gt; cache miss -&gt; allocate S2, cache[S1][&#39;o&#39;]=S2
+S2 --&#39;o&#39;--&gt; cache hit (pattern &quot;foo&quot; repeats) -&gt; reuse cached transition
+[cache reaches dfa_size_limit] -&gt; clear() -&gt; resume from S0, re-populate on demand</code></pre>
+<p>The clear-not-evict policy (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-18-2">§18.2</a>) trades a brief slowdown for zero bookkeeping complexity — RE2&#39;s own tradeoff (ADR-06, <a class="cite" href="/system-design-blueprints/systems/regex-engine/trade-offs/#sec-9">§9</a>).</p>
+<h3 id="sec-8-11">8.11 ReDoS Failure-Path Trace (the Incident-Class Example)</h3>
+<pre class="diagram"><code>Pattern: (a+)+$        Input: 30 &#39;a&#39; characters, then a mismatch
+A purely-backtracking engine (PCRE-style) tries every partition of the &#39;a&#39;-run
+across the outer/inner &#39;+&#39;: step count grows combinatorially with n.
+This engine&#39;s BacktrackVM: budget=1,000,000 steps; exceeded well under the ~2^30
+total partitions -&gt; Err(MatchError::Budget) returned in low milliseconds.
+This engine&#39;s default disposition: the pattern has no backreference, so it never
+reaches BacktrackVM at all -- it runs the linear-time NFA path in O(n) (I4, P7).</code></pre>
+<p>The trace exists to show why a purely-backtracking engine (the pre-2019 Cloudflare WAF&#39;s engine class) stalls on this pattern, and why this engine&#39;s default routing never sends a backreference-free pattern there (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-2-2">§2.2</a>, <a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#sec-25">§25</a>).</p>
+<h3 id="sec-8-12">8.12 Unicode Class → UTF-8 Byte Class (Worked Example)</h3>
+<p><code>\p{L}</code> (all letters) resolves to a disjoint set of codepoint ranges; each range decomposes by UTF-8 leading-byte arity (1/2/3/4-byte sequences) into a fan of byte-range instructions Thompson construction consumes directly (Cox&#39;s &quot;compiling Unicode classes to UTF-8 byte classes,&quot; <a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-14-3">§14.3</a>) — e.g. the ASCII sub-range <code>[A-Za-z]</code> becomes one single-byte class; the Latin-1 supplement range becomes a two-byte-sequence fan with a fixed leading byte <code>0xC2</code>–<code>0xC3</code>.</p>
+<h3 id="sec-8-13">8.13 State Machines Summary</h3>
+<ul>
+<li><strong>Compile lifecycle:</strong> <code>Parsed → Desugared → Analyzed → EngineSelected → Compiled</code>; any stage failure returns a typed error and the pipeline halts (never a partial <code>Regex</code>).</li>
+<li><strong>Match lifecycle (any engine):</strong> <code>Ready → Stepping → {Matched | Exhausted | Err}</code>; the three engines share this shape (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#sec-8-7">§8.7</a>) — only the per-step work differs.</li>
+</ul>
+<h3 id="sec-8-14">8.14 Cross-Engine Determinism (the Domain Model&#39;s Closing Invariant)</h3>
+<p>For any <code>(pattern, input)</code> pair where more than one engine is eligible, PikeVM, LazyDfa, and BacktrackVM (run with a generous budget) must return the identical <code>Option&lt;Captures&gt;</code> (<a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#inv-2">I2</a>). This is the single fixture bucket (<code>cross_engine</code>, <a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-24-4">§24.4</a>) every other domain-model guarantee in this section ultimately reduces to.</p>
+<h3 id="sec-8-15">8.15 Worked RegexSet Composition Example</h3>
+<pre class="diagram"><code>Patterns: [&quot;foo&quot;, &quot;bar&quot;, &quot;foo.*baz&quot;]     Haystack: &quot;xx foobaz yy&quot;
+
+Thompson construction (shared NFA):
+  pattern 0 &quot;foo&quot;        -&gt; ... -&gt; Match{pattern_id: 0}
+  pattern 1 &quot;bar&quot;        -&gt; ... -&gt; Match{pattern_id: 1}
+  pattern 2 &quot;foo.*baz&quot;   -&gt; ... -&gt; Match{pattern_id: 2}
+  (all three share byte-class table + any common literal prefix analysis)
+
+PikeVM simulation against &quot;xx foobaz yy&quot;:
+  pos 3: threads for pattern 0 and pattern 2 both become live (shared &quot;foo&quot; prefix)
+  pos 6: pattern 0&#39;s thread reaches Match{0} -- record pattern_id 0 as matched
+  pos 9: pattern 2&#39;s thread reaches Match{2} after &quot;.*baz&quot; -- record pattern_id 2
+  pattern 1 (&quot;bar&quot;) never has a live thread -- not in the result set
+
+SetMatches: { 0, 2 }   (pattern 1 correctly absent, I15)</code></pre>
+<p>The shared-prefix threads for patterns 0 and 2 are the same PikeVM mechanism that resolves an ordinary ambiguous alternation (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#sec-8-8">§8.8</a>) — <code>RegexSet</code> is not a special algorithm, it is the existing simulation with per-thread <code>pattern_id</code> bookkeeping added at <code>Match</code> (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-19-2">§19.2</a>).</p>
+<h3 id="sec-8-16">8.16 Worked Streaming Match Trace</h3>
+<pre class="diagram"><code>Pattern: &quot;error: \d+&quot;   Stream fed in three chunks (chunk boundary mid-literal)
+
+feed(b&quot;...err&quot;)     -&gt; NeedMore   (carry buffer holds &quot;err&quot;, no live Match thread yet)
+feed(b&quot;or: 42 &quot;)     -&gt; Match found at absolute range 10..19 (&quot;error: 42&quot;)
+                        (resumption token carried the partial &quot;err&quot; state across the boundary)
+feed(b&quot;more text&quot;)   -&gt; NoMatch   (no further match in the remaining stream)
+finish()             -&gt; None      (no additional pending match at EOF)</code></pre>
+<p>The resumption token is exactly the lazy DFA&#39;s canonicalized state-set (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-18-1">§18.1</a>) or the PikeVM&#39;s serialized thread list, carried across the <code>feed()</code> boundary — the match found in the second chunk is correct only because the engine&#39;s internal state survived the boundary, which is the entire point of <code>StreamMatcher</code> over re-slicing and re-scanning each chunk independently (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-22-2">§22.2</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Linear-time on every pattern that does not use backreferences (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-1">P1</a>).</strong> The NFA path runs in O(n·m); the lazy DFA runs in O(n) plus bounded compile overhead. Violating this by letting a &quot;convenience&quot; pattern class quietly reach the backtracking VM reopens the exact ReDoS surface <a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#sec-25">§25</a> exists to close.</li><li id="p-2"><strong>Two parsers do not exist (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-2">P2</a>).</strong> Every engine consumes the same HIR from one parse. Violating this lets syntax bugs diverge silently across engines, breaking the cross-engine determinism invariant (<a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#inv-2">I2</a>).</li><li id="p-3"><strong>The engine you run is not the engine you wrote against (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-3">P3</a>).</strong> The meta selector picks PikeVM, lazy DFA, or backtracking VM once, at compile time; violating this with a match-time branch makes engine choice unauditable and non-deterministic across builds.</li><li id="p-4"><strong>The lazy DFA has a bounded cache and an explicit eviction policy (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-4">P4</a>).</strong> No global LRU, no silent eviction mid-match; the bound is <code>dfa_size_limit</code>, configurable. Violating this either unbounds memory or corrupts an in-flight match&#39;s state set.</li><li id="p-5"><strong>Unicode is the default; bytes is opt-in (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-5">P5</a>).</strong> <code>RegexBuilder::unicode(false)</code> switches to 8-bit byte classes and rejects <code>\p{...}</code> at parse time. Violating the boundary (mixing modes at runtime) produces classes that mean different things on the same bytes.</li><li id="p-6"><strong>Leftmost-first is the default; leftmost-longest is opt-in (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-6">P6</a>).</strong> Same engine, different bookkeeping rule (<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-17-3">§17.3</a>–<a class="cite" href="/system-design-blueprints/systems/regex-engine/blueprint/#sec-17-4">§17.4</a>), never a different algorithm. Violating this by forking the engine doubles the maintenance and correctness-testing surface.</li><li id="p-7"><strong>Backreferences are gated, never silently accepted onto the linear-time path (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-7">P7</a>).</strong> A pattern using <code>\1</code>–<code>\9</code> compiles successfully but is only matchable through the backtracking VM; requesting <code>PikeVm</code> explicitly on such a pattern is a construction error. Violating this is precisely how a backtracking bug becomes a linear-time-engine&#39;s problem.</li><li id="p-8"><strong>The backtracking VM is budget-bounded (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-8">P8</a>).</strong> Every backtrack step consumes one unit of an explicit, finite budget (default 1,000,000; max 100,000,000; <a class="cite" href="/system-design-blueprints/systems/regex-engine/numbers/#sec-4-1">§4.1</a>). Violating this removes the only defense the last-resort engine has against exponential blowup.</li><li id="p-9"><strong>No silent fallbacks (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-9">P9</a>).</strong> A DFA-cache-full fallback to PikeVM is explicit and traced (<code>regex.dfa.fallback</code>); an engine mismatch against an explicit <code>RegexBuilder::engine(...)</code> request is a build error, not a silent substitution. Violating this hides a correctness-relevant decision from the operator.</li><li id="p-10"><strong>The literal prefilter is optional and observable (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-10">P10</a>).</strong> <code>Regex::literal_strategy()</code> exposes exactly what the extractor decided. Violating observability turns a prefilter bug (skipping a real match) into an unreproducible, silent wrong answer.</li><li id="p-11"><strong>Compile-time patterns are first-class (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-11">P11</a>).</strong> The <code>regex!</code> procedural macro performs the full parse→HIR→NFA→literal-extraction pipeline at build time with span-precise diagnostics. Violating this by treating build-time compilation as an afterthought loses the zero-parse-cost hot-path guarantee.</li><li id="p-12"><strong>Strings are owned by the input layer (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-12">P12</a>).</strong> Only <code>Cursor</code> understands codepoint boundaries; every engine below it sees <code>(byte_offset, byte_class)</code> pairs. Violating this is the source of the single most common regex-engine memory bug: indexing a UTF-8 boundary from inside an engine.</li><li id="p-13"><strong>One arena per match (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-13">P13</a>).</strong> The PikeVM thread list, the DFA&#39;s transient state set, and the capture-slot vector all come from a per-match arena reset at the start of each top-level call; the compiled <code>Regex</code> owns no per-match heap. Violating this reintroduces per-match allocator pressure the throughput targets (<a class="cite" href="/system-design-blueprints/systems/regex-engine/numbers/#sec-4">§4</a>) assume away.</li><li id="p-14"><strong>Determinism is the default (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-14">P14</a>).</strong> A given <code>(pattern, input, RegexBuilder configuration)</code> triple produces a deterministic result across builds, hosts, and engine selections (<a class="cite" href="/system-design-blueprints/systems/regex-engine/reliability/#inv-2">I2</a>). Violating this breaks every differential and cross-engine conformance test simultaneously.</li><li id="p-15"><strong>No surprises in error reporting (<a class="cite" href="/system-design-blueprints/systems/regex-engine/architecture/#p-15">P15</a>).</strong> Parse errors carry a byte span, a category, and a one-line explanation naming the offending construct and the rule it violated; construction errors carry the same for semantic problems. Violating this turns a debuggable pattern-authoring mistake into a silent construction failure.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

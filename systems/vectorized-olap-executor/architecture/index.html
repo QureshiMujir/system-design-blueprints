@@ -1,0 +1,299 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Vectorized OLAP Query Executor — Architecture · Engineering Blueprints</title><meta name="description" content="Vectorized OLAP Query Executor, hld: §3 overview + §8 domain model. VOE is a single-node, multi-core, read-only physical-plan executor for analytical (OLAP) workloads: it consumes a pre-planned physical operator tree (schemas resolved, expressions bound, no…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/vectorized-olap-executor/">Vectorized OLAP Query Executor</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Vectorized OLAP Query Executor</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~19 weeks</li> <li>3,006 lines</li> <li>blueprint #104</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/vectorized-olap-executor/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Vectorized OLAP Query Executor — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌───────────────────────────────────────────────────────────────┐
+│ Caller: physical plan tree (schemas + bound expressions)       │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ PhysicalPlan
+┌────────────────────────────▼────────────────────────────────────┐
+│ Pipeline Builder (voe-plan) — §15 Phase 3, §8 Domain Model       │
+│ cuts plan at breakers: Sort, HashAggFinal, HashJoinBuild,        │
+│ Exchange. Emits Vec&lt;Pipeline&gt; = source + ops + sink.             │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ Vec&lt;Pipeline&gt;
+┌────────────────────────────▼────────────────────────────────────┐
+│ Morsel Scheduler (voe-morsel) — §15 Phase 3 — invariant I8       │
+│ per-NUMA-node MorselQueue; work-stealing across nodes;           │
+│ worker pool sized to local physical cores.                       │
+└──────────┬─────────────────────────────────┬─────────────────────┘
+           │ Morsel{batch,part_id,numa_node}  │
+┌──────────▼───────────────┐      ┌───────────▼──────────────────┐
+│ Worker (NUMA node N)      │      │ Worker (NUMA node M)          │
+│ pop local → consume →     │      │ steal → consume → push        │
+│ push downstream           │      │ downstream                    │
+└──────────┬────────────────┘      └───────────┬────────────────────┘
+           │                                    │
+┌──────────▼────────────────────────────────────▼──────────────────┐
+│ Operator Layer (voe-ops) — §12–§22 phases                         │
+│ Scan · Filter · Project · HashAgg{Build,Final} · HashJoin          │
+│ {Build,Probe} · Sort/TopK · Exchange{Out,In} · Materialize         │
+└──────────┬──────────────────────────────────────────────────────────┘
+           │
+┌──────────▼──────────────────────────────────────────────────────┐
+│ Kernel Layer (voe-kernels, voe-codegen) — §14 Phase 2, §21 P9     │
+│ pulp-dispatched SIMD kernels; cranelift sidecar for hot exprs;    │
+│ dictionary pass-through; null-bitmap-aware.                       │
+└──────────┬──────────────────────────────────────────────────────┘
+           │
+┌──────────▼──────────────────────────────────────────────────────┐
+│ Record Batch Layer (voe-core) — §13 Phase 1                      │
+│ Schema, ArrayRef columns, validity bitmaps, offsets,              │
+│ dictionary child arrays; zero-copy slice; mmap-backed scan.       │
+└──────────┬──────────────────────────────────────────────────────┘
+           │ spill path (memory budget exceeded — invariant I7)
+┌──────────▼──────────────────────────────────────────────────────┐
+│ Spill Subsystem (voe-spill) — §20 Phase 8 — persistence boundary  │
+│ Arrow-IPC-formatted partition files, ephemeral, query-scoped.     │
+└────────────────────────────────────────────────────────────────────┘</code></pre>
+<p>Four properties recur throughout this document. <strong>Operators and kernels are independent</strong> — an
+operator (filter, project, hash-agg) is a state machine over record batches; it does not know
+whether the underlying kernel is interpreted, SIMD-dispatched, or cranelift-compiled (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-6">P6</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#sec-6">§6</a>).
+<strong>Parallelism is morsel-driven, not exchange-driven</strong> — a pipeline is a chain of streaming
+operators sharing state; the scheduler dispatches 100K-row morsels to worker threads, and
+pipelines synchronize only at pipeline breakers (Sort, HashAggFinal, HashJoinBuild, Exchange —
+<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#sec-7">§7</a>). <strong>Execution is push-based by default</strong> — each operator&#39;s <code>consume(RecordBatch)</code> is
+the hot path; the Volcano pull model survives only as a debug surface (<code>next()</code>) for unit tests
+and the CLI (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-5">ADR-05</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#sec-9">§9</a>). <strong>The record batch is the unit of data flow</strong> — a batch is
+<code>Schema + Vec&lt;ArrayRef&gt;</code> (Arrow-compatible, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-13">§13</a>); the operator&#39;s loop runs over arrays, never
+rows; the row appears only at the result-set boundary.</p>
+<p><strong>Trust boundary:</strong> the Caller box — VOE trusts the supplied plan to be schema-valid and
+type-checked (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#t-1">T1</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#sec-23">§23</a>); it does not re-verify SQL-level semantics. <strong>Concurrency boundary:</strong> the
+Morsel Scheduler — everything below it runs inside worker threads; everything above is
+single-threaded plan construction. <strong>Persistence boundary:</strong> the Spill Subsystem — the only
+component that writes to durable storage, and only ephemeral, query-scoped Arrow IPC files
+(deleted on query completion or cancellation, FM6 <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#sec-24">§24</a>). <strong>Protocol boundary:</strong> Arrow IPC is the
+sole wire format, used for both external ingest (Parquet/Arrow files) and internal spill; there
+is no network boundary in Phase 0–10 scope (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-4">§4</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-1">8.1 Physical-plan grammar (EBNF)</h3>
+<pre class="diagram"><code>PhysicalPlan   ::= Scan | Filter | Project | HashAggregate | HashJoin
+                 | Sort | TopK | Exchange
+Scan           ::= &quot;Scan&quot; &quot;{&quot; source: SourceRef, schema: Schema,
+                     predicates: Expression* &quot;}&quot;
+Filter         ::= &quot;Filter&quot; &quot;{&quot; child: PhysicalPlan, predicate: Expression &quot;}&quot;
+Project        ::= &quot;Project&quot; &quot;{&quot; child: PhysicalPlan, exprs: Expression+ &quot;}&quot;
+HashAggregate  ::= &quot;HashAggregate&quot; &quot;{&quot; child: PhysicalPlan,
+                     group_by: ColumnRef*, agg_fns: AggFn+ &quot;}&quot;
+HashJoin       ::= &quot;HashJoin&quot; &quot;{&quot; build: PhysicalPlan, probe: PhysicalPlan,
+                     build_keys: ColumnRef+, probe_keys: ColumnRef+,
+                     join_type: JoinType &quot;}&quot;
+Sort           ::= &quot;Sort&quot; &quot;{&quot; child: PhysicalPlan, keys: (ColumnRef, Order)+ &quot;}&quot;
+TopK           ::= &quot;TopK&quot; &quot;{&quot; child: PhysicalPlan, keys: (ColumnRef, Order)+,
+                     k: u64 &quot;}&quot;
+Exchange       ::= &quot;Exchange&quot; &quot;{&quot; child: PhysicalPlan, partition_keys: ColumnRef+,
+                     num_partitions: u32 &quot;}&quot;</code></pre>
+<h3 id="sec-8-2">8.2 Expression grammar (EBNF)</h3>
+<pre class="diagram"><code>Expression ::= Column(idx: usize)
+             | Literal(value: ScalarValue)
+             | BinaryOp(op: BinaryOp, left: Expression, right: Expression)
+             | UnaryOp(op: UnaryOp, child: Expression)
+             | Cast(child: Expression, to: DataType)
+             | Case(whens: (Expression, Expression)+, otherwise: Expression)
+BinaryOp   ::= Add | Sub | Mul | Div | Eq | NotEq | Lt | LtEq | Gt | GtEq | And | Or
+UnaryOp    ::= Not | Neg | IsNull | IsNotNull</code></pre>
+<p>Every <code>Expression</code> is resolved (column indices bound, types checked) before it reaches VOE — the
+planner&#39;s job (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-1">§1</a> non-goal). A malformed <code>Column(idx)</code> whose <code>idx</code> exceeds its child&#39;s schema
+width is rejected at pipeline-build time, never at row-evaluation time (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#sec-8-4">§8.4</a>).</p>
+<h3 id="sec-8-3">8.3 Pipeline state machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entry Condition</th>
+<th>Valid Transitions</th>
+<th>Exit Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Building</code></td>
+<td>Pipeline object constructed by <code>pipeline_builder</code></td>
+<td>→ <code>Running</code></td>
+<td>Scheduler dispatch begins</td>
+</tr>
+<tr>
+<td><code>Running</code></td>
+<td>First morsel popped by a worker</td>
+<td>→ <code>Draining</code></td>
+<td>Source exhausted, <code>finish()</code> called down the operator chain</td>
+</tr>
+<tr>
+<td><code>Draining</code></td>
+<td>All source morsels consumed; <code>finish()</code> propagating</td>
+<td>→ <code>Finished</code></td>
+<td>Sink&#39;s <code>finish()</code> returns</td>
+</tr>
+<tr>
+<td><code>Finished</code></td>
+<td>Sink <code>finish()</code> returned <code>Ok</code></td>
+<td>(terminal)</td>
+<td>Results handed to the downstream pipeline or the caller</td>
+</tr>
+</tbody></table></div>
+<p>A pipeline breaker (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-11">I11</a>) never enters <code>Running</code> for its <em>downstream</em> pipeline until its own
+<code>Finished</code> state is reached — the scheduler barrier that enforces this is the concrete mechanism
+behind <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-11">I11</a>.</p>
+<h3 id="sec-8-4">8.4 Worked example — TPC-H Q1</h3>
+<p>Q1 (<code>GROUP BY l_returnflag, l_linestatus</code> over a filtered <code>lineitem</code> scan) compiles to two
+pipelines: <strong>Pipeline 0</strong> = <code>Scan(lineitem) → Filter(l_shipdate ≤ X) → Project(...) → HashAggBuild(sink)</code>; <strong>Pipeline 1</strong> = <code>HashAggFinal(source) → Sort(l_returnflag, l_linestatus) → Result</code>. Pipeline 0 fans out across all workers (no join, fully parallel); Pipeline 1 begins only
+after every Pipeline-0 worker&#39;s <code>HashAggBuild::finish()</code> has merged into the final table (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-11">I11</a>).</p>
+<h3 id="sec-8-5">8.5 Malformed-input example</h3>
+<p>A <code>Filter</code> node whose <code>predicate</code> is <code>Column(7)</code> but whose <code>child</code> schema has 5 fields is
+rejected by <code>pipeline_builder::validate</code> with <code>Error::ColumnIndexOutOfBounds { index: 7, schema_width: 5 }</code> at plan-build time — before any worker thread starts, before any morsel is
+read (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-11">I11</a>).</p>
+<h3 id="sec-8-6">8.6 Failure-path example — hash-agg spill</h3>
+<p>Sequence: (1) <code>HashAggBuild::consume</code> inserts a batch, memory estimate crosses 80% of budget
+(<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-9">ADR-09</a>); (2) <code>MemoryBudget::check</code> returns <code>Action::Spill</code> (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-7">I7</a>); (3) the operator drains its
+<code>LinearProbeTable</code> into <code>N</code> <code>SpillWriter</code>s, one per hash-partition, using the query&#39;s seed (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-6">I6</a>);
+(4) subsequent batches are hashed directly to the matching spill partition without touching an
+in-memory table; (5) at <code>finish()</code>, each spilled partition is re-read and merged
+partition-by-partition, bounding peak memory to one partition&#39;s worth regardless of total input
+size. See <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-20">§20</a> (Phase 8) for the full mechanism and <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#sec-24">§24</a> (FM4) for the failure-mode table.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Vectorized beats tuple-at-a-time, full stop (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-1">P1</a>).</strong> No operator&#39;s inner loop sees a scalar except at result-set boundaries. The Boncz-Zukowski-Nes 2005 speedup ratios are measured in <code>voe-bench</code> and gate merges (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-3">M3</a>/<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#m-4">M4</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/numbers/#sec-29">§29</a>). Violation: any <code>for row in batch</code> loop inside <code>consume</code> (Pitfall in <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-14-6">§14.6</a>).</li><li id="p-2"><strong>Push beats pull for parallelism (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-2">P2</a>).</strong> <code>consume(RecordBatch)</code> is the hot path; <code>next()</code> is a debug-only pull surface (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-5">ADR-05</a>). Violation: reintroducing pull on the hot path serializes at every operator boundary (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-18-6">§18.6</a>).</li><li id="p-3"><strong>Morsel-driven beats exchange-based for NUMA (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-3">P3</a>).</strong> Leis et al. 2014, section 3, closes the exchange-everywhere-serializes case; morsels + work-stealing + NUMA-aware allocation is the alternative (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-4">ADR-04</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-6">ADR-06</a>). Violation: a pipeline that inserts an exchange at every operator boundary reintroduces the bottleneck this design exists to avoid.</li><li id="p-4"><strong>Late materialization wins on selective queries (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-4">P4</a>).</strong> A pipeline carrying <code>(row_id, key_cols)</code> through filter/project, materializing full rows only at the sink, beats eager materialization on wide, selective queries (Abadi et al. 2008, section 4; <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-11">ADR-11</a>). Violation: an operator that eagerly fetches every column loses the win entirely (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-22-7">§22.7</a>).</li><li id="p-5"><strong>Dictionary-encoded vectors pass through unchanged (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-5">P5</a>).</strong> <code>Dict&lt;u32, Utf8&gt;</code> flows through <code>filter</code>, <code>project</code>, <code>partial_agg</code>, <code>hash_join_probe</code> without decoding (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-10">ADR-10</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-9">I9</a>). Violation: eager decode at the scan boundary defeats the optimization on low-cardinality string columns.</li><li id="p-6"><strong>Compiled kernels are a sidecar, not a default (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-6">P6</a>).</strong> Cranelift compiles expressions that have processed &gt; 1M interpreted rows (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-16">ADR-16</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/build/#sec-21">§21</a>). Violation: compiling cold expressions makes compile time exceed execution time (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-21-6">§21.6</a>).</li><li id="p-7"><strong>SIMD is beneath kernels, runtime-dispatched (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-7">P7</a>).</strong> Every kernel has a scalar reference plus a <code>pulp</code>-dispatched specialization selected once per process at first use (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-13">ADR-13</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-14">ADR-14</a>). Violation: calling <code>std::arch</code> intrinsics directly bypasses dispatch and SIGILLs on unsupported hosts (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-14-6">§14.6</a>).</li><li id="p-8"><strong>Arrow at the buffer layer, not at the operator layer (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-8">P8</a>).</strong> <code>RecordBatch</code> is byte-compatible with Arrow (zero-copy ingest/emit, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-2">ADR-02</a>); the operator trait (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/design/#sec-11">§11</a>) is VOE&#39;s own. Violation: importing Arrow&#39;s own kernel/operator API couples VOE to a dependency&#39;s release cadence.</li><li id="p-9"><strong>The hash table dominates memory (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-9">P9</a>).</strong> Hash agg and hash join are the two largest memory consumers in a TPC-H-class workload; the vectorized linear-probing layout (Polychroniou et al. 2015, section 4) is load-bearing (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-8">ADR-08</a>). Violation: an unbounded hash table without spill OOMs on <code>GROUP BY &lt;high-cardinality&gt;</code> (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/blueprint/#sec-16-6">§16.6</a>).</li><li id="p-10"><strong>Spill-to-disk is mandatory for unbounded operators (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-10">P10</a>).</strong> Hash agg, hash join, sort, and top-K can each exceed memory; every one has a spill path triggered at 80% of budget (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-9">ADR-09</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-7">I7</a>). Violation: shipping any of them without a spill path caps the maximum supported dataset size at available RAM.</li><li id="p-11"><strong>Pipeline breakers are explicit (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-11">P11</a>).</strong> Sort, HashAggFinal, HashJoinBuild, Exchange. The pipeline builder cuts the plan at these points (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#sec-8">§8</a>). Violation: an operator that silently buffers instead of declaring itself a breaker corrupts the scheduler&#39;s barrier semantics.</li><li id="p-12"><strong>Predicate pushdown is a planner concern; the executor must accept it (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-12">P12</a>).</strong> A scan operator accepts <code>Vec&lt;Expression&gt;</code> pushdown predicates (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-12">ADR-12</a>); Parquet applies them at the page level, in-memory scans at the batch level. Violation: ignoring pushed predicates wastes the planner&#39;s analysis and the page-skip IO savings.</li><li id="p-13"><strong>Nullability is first-class (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-13">P13</a>).</strong> Every kernel takes and produces <code>Bitmap</code> validity; Kleene three-valued logic governs boolean operations on NULL (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-3">I3</a>). Violation: a kernel that drops or mis-propagates validity produces silently wrong query results.</li><li id="p-14"><strong>The schema is immutable through a pipeline (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-14">P14</a>).</strong> An operator&#39;s output schema is fully determined at plan-construction time (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#inv-4">I4</a>). Violation: an operator that &quot;discovers&quot; a column at runtime breaks the pipeline builder&#39;s static schema-compatibility check.</li><li id="p-15"><strong>No <code>unsafe</code> outside two audited surfaces (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/architecture/#p-15">P15</a>).</strong> The SIMD kernel inner loops and the cranelift trampoline are the only permitted <code>unsafe</code>; both have safe scalar fallbacks and are covered by fuzzing and cross-validation (<a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/trade-offs/#adr-1">ADR-01</a>, <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#t-4">T4</a> <a class="cite" href="/system-design-blueprints/systems/vectorized-olap-executor/reliability/#sec-23">§23</a>). Violation: any third <code>unsafe</code> site is an automatic code-review rejection.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

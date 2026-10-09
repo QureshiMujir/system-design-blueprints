@@ -1,0 +1,445 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Graph Database — Architecture · Engineering Blueprints</title><meta name="description" content="Graph Database, hld: §3 overview + §8 domain model. graphd is a single-node, native property-graph database engine: it owns its page-based storage, its index-free adjacency representation, its write-ahead log and ARIES recovery, its snapshot-isolation…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/graph-database/">Graph Database</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Graph Database</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~21 weeks</li> <li>2,487 lines</li> <li>blueprint #84</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/graph-database/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/graph-database/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/graph-database/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/graph-database/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/graph-database/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/graph-database/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/graph-database/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/graph-database/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/graph-database/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/graph-database/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Graph Database — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend side: clients
+%% legend ingest: server and supporting components
+%% legend rt: query path and execution core
+%% legend store: transactions and storage
+C([&quot;&lt;b&gt;Clients&lt;/b&gt;&lt;br/&gt;Bolt v4 (binary) | gRPC | REST&quot;])
+SV[&quot;&lt;b&gt;Server&lt;/b&gt; (Phase 8-9, S20-21)&lt;br/&gt;Bolt decoder, session state,&lt;br/&gt;txn glue&quot;]
+QE[&quot;&lt;b&gt;Query Engine&lt;/b&gt; (Phase 5-6, S17-18)&lt;br/&gt;lexer-parser-AST-logical plan&lt;br/&gt;-physical plan&lt;br/&gt;Rule-based + cost-based planner&lt;br/&gt;cardinality est.&quot;]
+EX[&quot;&lt;b&gt;Execution Runtime&lt;/b&gt; (Phase 6, S18)&lt;br/&gt;Volcano pull pipeline&lt;br/&gt;(NodeByLabelScan, ExpandAll, Filter,&lt;br/&gt;Project, Sort, Apply, ...)&lt;br/&gt;+ vertex-centric Pregel runtime&lt;br/&gt;for analytics&quot;]
+IX[&quot;&lt;b&gt;Indexes&lt;/b&gt; (Phase 4)&lt;br/&gt;label/property&lt;br/&gt;B-tree, hash, R-tree&quot;]
+AL[&quot;&lt;b&gt;Algorithms&lt;/b&gt; (Phase 7, S19)&lt;br/&gt;BFS DFS Dijkstra A* PageRank&lt;br/&gt;CC Louvain k-SP betweenness&quot;]
+TM[&quot;&lt;b&gt;Transaction Manager&lt;/b&gt; (Phase 3, S15)&lt;br/&gt;snapshot-isolation MVCC,&lt;br/&gt;version chain in property records,&lt;br/&gt;visibility = f(xmin,xmax,active)&quot;]
+SE[(&quot;&lt;b&gt;Storage Engine&lt;/b&gt; (Phase 1-2, S13-14)&lt;br/&gt;NodeStore | RelationshipStore |&lt;br/&gt;PropertyStore (fixed + chained)&lt;br/&gt;Page cache - WAL - Checkpointer&lt;br/&gt;page=8KiB, checksum=xxhash3-64&quot;)]
+C -- &quot;TCP / HTTP&quot; --&gt; SV
+SV -- &quot;RequestEnvelope&quot; --&gt; QE
+QE -- &quot;physical plan operators&quot; --&gt; EX
+EX --&gt; IX
+EX --&gt; AL
+IX --&gt; TM
+TM --&gt; SE
+classDef side stroke-width:1.5px
+classDef ingest stroke-width:1.5px
+classDef rt stroke-width:1.5px
+classDef store stroke-width:1.5px
+class C side
+class SV,IX,AL ingest
+class QE,EX rt
+class TM,SE store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch side"></span>clients</li><li><span class="swatch ingest"></span>server and supporting components</li><li><span class="swatch rt"></span>query path and execution core</li><li><span class="swatch store"></span>transactions and storage</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>+----------------------------------------------------------------------+
+|  Clients: Bolt v4 (binary) | gRPC | REST                             |
++--------------------------------+-------------------------------------+
+                                  | TCP / HTTP
++--------------------------------v-------------------------------------+
+|  Server (Phase 8-9, S20-21): Bolt decoder, session state, txn glue    |
++--------------------------------+-------------------------------------+
+                                  | RequestEnvelope
++--------------------------------v-------------------------------------+
+|  Query Engine (Phase 5-6, S17-18): lexer-&gt;parser-&gt;AST-&gt;logical plan  |
+|  -&gt;physical plan. Rule-based + cost-based planner; cardinality est.  |
++--------------------------------+-------------------------------------+
+                                  | physical plan operators
++--------------------------------v-------------------------------------+
+|  Execution Runtime (Phase 6, S18): Volcano pull pipeline             |
+|  (NodeByLabelScan, ExpandAll, Filter, Project, Sort, Apply, ...)      |
+|  + vertex-centric Pregel runtime for analytics                       |
++----------+--------------------------------------------+--------------+
+           |                                            |
++----------v---------+                  +---------------v--------------+
+|  Indexes (Phase 4)  |                  |  Algorithms (Phase 7, S19)   |
+|  label/property     |                  |  BFS DFS Dijkstra A* PageRank|
+|  B-tree, hash, R-tree|                 |  CC Louvain k-SP betweenness |
++----------+----------+                  +------------------------------+
+           |
++----------v-----------------------------------------------------------+
+|  Transaction Manager (Phase 3, S15): snapshot-isolation MVCC,         |
+|  version chain in property records, visibility = f(xmin,xmax,active) |
++----------+-----------------------------------------------------------+
+           |
++----------v-----------------------------------------------------------+
+|  Storage Engine (Phase 1-2, S13-14)                                    |
+|  NodeStore | RelationshipStore | PropertyStore  (fixed + chained)     |
+|  Page cache - WAL - Checkpointer. page=8KiB, checksum=xxhash3-64      |
++----------------------------------------------------------------------+</code></pre></details>
+<p>Three properties this diagram fixes for the rest of the document. First, storage is
+record-oriented and fixed-width for nodes/relationships with index-free adjacency: a node
+record holds a pointer to its first relationship; relationship records form a doubly-linked
+list per direction (<a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-2">P2</a>). Second, the MVCC version chain lives inside the property
+record, not a separate undo log (<a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-2">P2</a>, <a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-4">I4</a>). Third, the planner emits Volcano operators that
+pull from each other; execution is single-threaded per query in Phase 0 and parallelised at
+the operator boundary later, so the planner never branches on parallelism (<a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-7">P7</a>). Every later
+section stays consistent with these three facts and this box list.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Property Graph Data Model</h3>
+<p>A <strong>node</strong> is <code>(id, label-set, properties)</code>; a <strong>relationship</strong> is <code>(id, type, direction, start-node, end-node, properties)</code> — always directed and always typed, exactly one type per
+relationship. A <strong>property value</strong> is one of: <code>null | bool | i64 | f64 | string | list | map | point | date | time | datetime | duration</code> (the Bolt/PackStream structure set, <a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#sec-8-3">§8.3</a>).
+Pattern grammar (EBNF fragment, the Phase-5 parser target, <a class="cite" href="/system-design-blueprints/systems/graph-database/build/#sec-17">§17</a>):</p>
+<pre class="diagram"><code>Pattern       ::= PatternPart (&#39;,&#39; PatternPart)*
+PatternPart   ::= NodePattern (RelPattern NodePattern)*
+NodePattern   ::= &#39;(&#39; Variable? Labels? Properties? &#39;)&#39;
+RelPattern    ::= (&#39;-&#39; | &#39;&lt;-&#39;) &#39;[&#39; Variable? RelTypes? RangeLit? Properties? &#39;]&#39; (&#39;-&#39; | &#39;-&gt;&#39;)
+Labels        ::= (&#39;:&#39; SymbolicName)+
+RelTypes      ::= &#39;:&#39; SymbolicName (&#39;|&#39; SymbolicName)*
+RangeLit      ::= &#39;*&#39; IntegerLit? (&#39;..&#39; IntegerLit?)?</code></pre>
+<h3 id="sec-8-2">8.2 Storage Record Layout</h3>
+<p>Every record type is fixed-width (<a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-2">P2</a>); the property record&#39;s payload chains via
+<code>next_prop</code>/<code>prev_version</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Record</th>
+<th>Field</th>
+<th>Size</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>NodeRecord</code> (40 B)</td>
+<td><code>in_use</code></td>
+<td>1 B</td>
+<td>1 = live, 0 = free (feeds <a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-12">I12</a> free-list check)</td>
+</tr>
+<tr>
+<td></td>
+<td><code>label_set_id</code></td>
+<td>4 B</td>
+<td>bitset id, or pointer into label store if &gt; 32 labels</td>
+</tr>
+<tr>
+<td></td>
+<td><code>first_rel</code></td>
+<td>8 B</td>
+<td>first outgoing/incoming relationship (0 = none) — the <a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-1">I1</a> anchor</td>
+</tr>
+<tr>
+<td></td>
+<td><code>first_prop</code></td>
+<td>8 B</td>
+<td>first property-chain block (0 = none)</td>
+</tr>
+<tr>
+<td></td>
+<td><code>xmin</code> / <code>xmax</code></td>
+<td>8 B / 8 B</td>
+<td>creator / deleter transaction (<a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-4">I4</a>)</td>
+</tr>
+<tr>
+<td></td>
+<td>padding</td>
+<td>3 B</td>
+<td>rounds to 40 B (<code>(8192-32)/40 = 204</code> records/page)</td>
+</tr>
+<tr>
+<td><code>RelRecord</code> (88 B)</td>
+<td><code>in_use</code>, <code>rel_type</code></td>
+<td>1 B, 4 B</td>
+<td>live flag, relationship-type id</td>
+</tr>
+<tr>
+<td></td>
+<td><code>start_node</code>, <code>end_node</code></td>
+<td>8 B, 8 B</td>
+<td>endpoint node ids</td>
+</tr>
+<tr>
+<td></td>
+<td><code>start_prev_rel</code>/<code>start_next_rel</code></td>
+<td>8 B ea</td>
+<td>doubly-linked list at the start node</td>
+</tr>
+<tr>
+<td></td>
+<td><code>end_prev_rel</code>/<code>end_next_rel</code></td>
+<td>8 B ea</td>
+<td>doubly-linked list at the end node (<a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-1">I1</a>)</td>
+</tr>
+<tr>
+<td></td>
+<td><code>first_prop</code>, <code>xmin</code>, <code>xmax</code></td>
+<td>8 B ea</td>
+<td>property chain head, MVCC stamps</td>
+</tr>
+<tr>
+<td></td>
+<td>padding</td>
+<td>11 B</td>
+<td>rounds to 88 B (<code>8160/88 = 92</code> records/page)</td>
+</tr>
+<tr>
+<td><code>PropertyRecord</code> (64 B)</td>
+<td><code>in_use</code>, <code>key_id</code>, <code>kind</code></td>
+<td>1 B, 4 B, 1 B</td>
+<td>live flag, dictionary key, value-type tag</td>
+</tr>
+<tr>
+<td></td>
+<td><code>inline</code></td>
+<td>16 B</td>
+<td>small values stored in place</td>
+</tr>
+<tr>
+<td></td>
+<td><code>overflow_block</code></td>
+<td>8 B</td>
+<td>pointer into the dynamic block store for large values</td>
+</tr>
+<tr>
+<td></td>
+<td><code>next_prop</code></td>
+<td>8 B</td>
+<td>property chain link</td>
+</tr>
+<tr>
+<td></td>
+<td><code>xmin</code>, <code>xmax</code></td>
+<td>8 B ea</td>
+<td>MVCC stamps</td>
+</tr>
+<tr>
+<td></td>
+<td><code>prev_version</code></td>
+<td>8 B</td>
+<td>version-chain link (<a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-4">I4</a>, older version, 0 = none)</td>
+</tr>
+<tr>
+<td></td>
+<td>padding</td>
+<td>2 B</td>
+<td>rounds to 64 B (<code>8160/64 = 127</code> records/page)</td>
+</tr>
+</tbody></table></div>
+<p>Page header (32 B, prefixes every 8,192 B page): <code>magic</code>(4B) <code>page_type</code>(1B) <code>reserved</code>(1B)
+<code>slot_count</code>(2B) <code>page_id</code>(8B) <code>lsn</code>(8B) <code>checksum</code>(8B).</p>
+<h3 id="sec-8-3">8.3 Wire Protocol Frame Layout</h3>
+<p>Bolt v4 frames a message as a sequence of length-prefixed chunks terminated by a
+zero-length chunk; PackStream serializes the property-value set of <a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#sec-8-1">§8.1</a> plus the
+<code>Node</code>/<code>Relationship</code>/<code>Path</code> structures.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Bolt chunk field</th>
+<th>Size</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>chunk_len</code></td>
+<td>2 B</td>
+<td>big-endian byte count of the chunk body (0 = message terminator)</td>
+</tr>
+<tr>
+<td><code>chunk_body</code></td>
+<td><code>chunk_len</code> B</td>
+<td>PackStream-encoded bytes; a message may span many chunks</td>
+</tr>
+</tbody></table></div>
+<p>Session states (the <a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-10">I10</a> state machine, detailed in <a class="cite" href="/system-design-blueprints/systems/graph-database/blueprint/#sec-20-2">§20.2</a>): <code>Disconnected → Connected → Ready ⇄ Streaming</code>, and <code>Ready ⇄ TxReady ⇄ TxStreaming</code>, with <code>Failed</code>/<code>Interrupted</code> as
+error states reachable from any state and requiring an explicit <code>RESET</code> to return to
+<code>Ready</code>.</p>
+<h3 id="sec-8-4">8.4 Query Semantics — Logical → Physical Lowering (Worked Example)</h3>
+<p><code>MATCH (a:Person)-[:KNOWS]-&gt;(b:Person) WHERE b.age &gt; 30 RETURN b.name</code> lowers as:</p>
+<pre class="diagram"><code>AST                     Logical Plan                  Physical Plan
+Match(a:Person)     -&gt;  NodeByLabelScan(Person, a) -&gt;  NodeByLabelScan(Person, a)
+-[:KNOWS]-&gt;(b:Person)  Expand(a, OUT, KNOWS, b)     -&gt;  ExpandAll(a, OUT, KNOWS, b)
+Where b.age &gt; 30    -&gt;  Filter(b.age &gt; 30)          -&gt;  Filter(b.age &gt; 30)
+Return b.name       -&gt;  Project(b.name)             -&gt;  Projection(b.name)</code></pre>
+<p>Predicate push-down (<a class="cite" href="/system-design-blueprints/systems/graph-database/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/graph-database/trade-offs/#adr-9">ADR-09</a>) would move <code>Filter</code> earlier only if <code>age</code> were bound
+before the expand; here it cannot, since <code>b</code> is produced by <code>Expand</code>.</p>
+<h3 id="sec-8-5">8.5 Transaction &amp; Snapshot State Machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entered by</th>
+<th>Reads see</th>
+<th>Exits to</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Active</code></td>
+<td><code>BEGIN</code></td>
+<td><code>Snapshot{xmin, xmax, active}</code> taken at entry</td>
+<td><code>Committed</code> or <code>Aborted</code></td>
+</tr>
+<tr>
+<td><code>Committed</code></td>
+<td>conflict-free <code>COMMIT</code> (<a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-5">I5</a>)</td>
+<td>— (terminal; versions become visible to later snapshots)</td>
+<td>terminal</td>
+</tr>
+<tr>
+<td><code>Aborted</code></td>
+<td>conflict detected, or explicit <code>ROLLBACK</code></td>
+<td>— (terminal; versions unlinked and freed)</td>
+<td>terminal</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Worked Example — End-to-End Trace</h3>
+<p>Ingest two <code>:Person</code> nodes (<code>Ada</code>, <code>Grace</code>) and one <code>[:KNOWS]</code> relationship, then run
+<code>MATCH (a:Person)-[:KNOWS]-&gt;(b:Person) RETURN b.name</code>. Trace: <code>NodeByLabelScan(Person)</code>
+yields <code>{Ada, Grace}</code> in id order → <code>ExpandAll(OUT, KNOWS)</code> walks <code>Ada.first_rel</code> (<a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-1">I1</a>),
+finds the <code>KNOWS</code> relationship to <code>Grace</code>, yields <code>(Ada, Grace)</code> — <code>Grace</code> has no outgoing
+<code>KNOWS</code> so contributes no row → <code>Projection(b.name)</code> emits <code>{&quot;name&quot;: &quot;Grace&quot;}</code>. One row.</p>
+<h3 id="sec-8-7">8.7 Malformed-Input Example</h3>
+<p><code>MATCH (a)-[:KNOWS]-&gt;(b RETURN b.name</code> (missing closing paren). The parser (<a class="cite" href="/system-design-blueprints/systems/graph-database/blueprint/#sec-17-3">§17.3</a>) fails at
+the token following <code>b</code>, expected one of <code>{&#39;)&#39;, &#39;:&#39;, &#39;{&#39;}</code>; <code>graphd-cypher</code> emits a
+<code>ParseError{position: 27, expected: [...], found: &quot;RETURN&quot;}</code> — no partial execution occurs.</p>
+<h3 id="sec-8-8">8.8 Failure-Path Example</h3>
+<p>A transaction writes <code>INSERT_PROP</code> and <code>COMMIT</code> WAL records (durable), but the process is
+killed before the dirtied property page is flushed. Recovery: <strong>Analysis</strong> finds the
+transaction in the transaction table as committed; <strong>Redo</strong> replays <code>INSERT_PROP</code> because
+the on-disk page LSN is older than the record&#39;s LSN (<a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-8">I8</a>); <strong>Undo</strong> does nothing for
+this transaction. Post-recovery, the property is visible — exactly the ARIES contract
+(<a class="cite" href="/system-design-blueprints/systems/graph-database/blueprint/#sec-14-5">§14.5</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-1">P1</a> — Index-free adjacency is load-bearing.</strong> A node&#39;s neighbours are reachable by pointer chase, not a B-tree probe. Tradeoff: no secondary structure to keep in sync for traversal, at the cost of random-access page churn at high degree. Violating it (e.g. storing adjacency as a keyed lookup) turns every traversal into a probe and removes the engine&#39;s reason to exist.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-2">P2</a> — Records are fixed-width; properties are chained.</strong> Node/relationship/label records are fixed-width so record <code>id</code> resolves to <code>id * record_size</code>. Tradeoff: wasted padding bytes vs O(1) offset math. Violating it means variable offsets and a directory structure the page cache must consult before every read.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-3">P3</a> — One page format, one checksum.</strong> Every page is 8 KiB with a 32-byte header (magic, type, LSN, slot count, checksum) and an <code>xxhash3-64</code> body checksum verified on every disk read. Tradeoff: 0.4% header overhead per page vs corruption detection. Violating it hides bit rot until a query returns wrong answers.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-4">P4</a> — Snapshot isolation is the default.</strong> Readers see the snapshot at transaction start; writers see their own writes plus that snapshot. Tradeoff: write skew is possible (accepted); lost update is not (rejected at commit). Violating it either serializes everything (throughput loss) or silently drops updates (correctness loss).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-5">P5</a> — The WAL is the source of truth.</strong> Every change is logged before the page is dirtied (write-ahead rule); recovery is &quot;redo committed, undo uncommitted&quot; (ARIES). Tradeoff: an fsync on the write path vs a database that can survive <code>kill -9</code>. Violating it makes crash recovery a coin flip.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-6">P6</a> — openCypher is the one query language.</strong> Not Gremlin, not GQL-native, not SPARQL. Tradeoff: a smaller, well-specified surface (public TCK) vs the imperative composability Gremlin offers. Violating it (shipping two first-class languages at once) forces two planners to stay semantically identical forever.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-7">P7</a> — The planner emits Volcano pull operators.</strong> Each operator is <code>init</code>/<code>next</code>/ <code>close</code>; the runtime is single-threaded per query in Phase 0. Tradeoff: simplicity and backpressure-for-free vs throughput left on the table until operator-level parallelism lands. Violating it (push-based execution) requires an explicit backpressure protocol from day one.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-8">P8</a> — Cardinality lives in the index, not the planner.</strong> The planner asks &quot;how many nodes match label X&quot; and the index answers from a maintained counter. Tradeoff: the index carries bookkeeping weight vs a planner that stays storage-agnostic. Violating it (planner-side heuristics) drifts from ground truth as the index is the only thing that is ever exactly right.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-9">P9</a> — Bolt is the wire format of record.</strong> gRPC and REST are convenience adapters over the same session machine. Tradeoff: adopting someone else&#39;s binary framing vs a from-scratch protocol. Violating it (inventing a new wire format) forfeits every existing Bolt driver.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-10">P10</a> — Determinism is default.</strong> Two reads of the same snapshot, or two runs of the same query at the same snapshot, return bit-identical results (row order excepted absent <code>ORDER BY</code>). Tradeoff: cardinality estimates must be pinned to the snapshot, not to wall-clock sampling. Violating it makes <code>EXPLAIN</code> a lie and a flaky conformance suite.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-11">P11</a> — Single writer per transaction, unlimited concurrent readers.</strong> A transaction&#39;s own writes are never contended by itself; other writers detect conflict only at commit (<a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-5">I5</a>). Tradeoff: optimistic concurrency (retries) vs pessimistic locking (stalls). Violating it (locking on first write) turns every hot node into a serialization point.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-12">P12</a> — Backpressure is implicit in pull iteration.</strong> A consumer only calls <code>next</code> when ready; no explicit credit protocol exists inside one process. Tradeoff: simplicity vs the need for an explicit protocol once execution crosses a process/network boundary (Bolt&#39;s <code>PULL n</code> message is exactly that boundary crossing, <a class="cite" href="/system-design-blueprints/systems/graph-database/build/#sec-20">§20</a>).</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-13">P13</a> — Recovery must be idempotent.</strong> Redo, applied twice, produces the same state as applied once (<a class="cite" href="/system-design-blueprints/systems/graph-database/reliability/#inv-8">I8</a>). Tradeoff: every WAL record must carry enough information (page LSN comparison) to become a no-op on replay. Violating it turns a second crash during recovery into data corruption instead of a safe retry.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/graph-database/architecture/#p-14">P14</a> — Every deferred surface gets an ADR and a register row.</strong> No feature is silently dropped; it is either built or explicitly deferred with an anchor in the Deferred Features Register (<a class="cite" href="/system-design-blueprints/systems/graph-database/trade-offs/#sec-36">§36</a>). Violating it is how a codebase accumulates undocumented scope gaps that surface as production surprises.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

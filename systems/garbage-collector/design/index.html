@@ -1,0 +1,408 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Garbage Collector — Design · Engineering Blueprints</title><meta name="description" content="Garbage Collector, lld: core types, repo tree, file inventory. Build a portable, embeddable tracing garbage collector, hostable by a virtual machine or compiled-language runtime, that walks the full historical lineage of GC technique — reference counting…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/garbage-collector/">Garbage Collector</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Garbage Collector</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">C/C++</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~16 weeks</li> <li>2,459 lines</li> <li>blueprint #32</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/garbage-collector/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/garbage-collector/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/garbage-collector/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/garbage-collector/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/garbage-collector/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/garbage-collector/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/garbage-collector/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/garbage-collector/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/garbage-collector/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/garbage-collector/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Garbage Collector — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/garbage-collector/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>typedef uintptr_t gc_word_t;                 /* machine word; owner: none (value type) */
+
+typedef enum gc_color {                      /* tri-color tag; mutated by tracer + barriers */
+    GC_WHITE = 0, GC_GREY = 1, GC_BLACK = 2, GC_OFF_HEAP = 3,
+} gc_color_t;
+
+typedef uint8_t gc_age_t;                    /* 0..15 saturating generational age */
+
+typedef struct gc_typeinfo {                 /* host-owned; collector reads only */
+    const char *name;
+    uint32_t    size;
+    uint32_t    n_ptr_slots;
+    const uint32_t *ptr_offsets;              /* invariant I14 */
+    size_t (*size_of)(const void *obj);       /* signature only, variable-length types */
+    void   (*finalize)(void *obj);             /* signature only; NULL if unused */
+    uint16_t flags;                            /* GC_TYPE_HAS_FINALIZER | GC_TYPE_WEAK */
+    uint16_t hash;
+} gc_typeinfo_t;
+
+typedef struct gc_header {                   /* owner: collector; mutated under I1/I4/I9 */
+    gc_word_t bits;                           /* [63] fwd? | [62:59] age | [58:57] color | [56:0] typeinfo-ptr-or-fwd-addr */
+} gc_header_t;
+
+typedef void *gc_object_t;                   /* opaque payload pointer; header at offset -sizeof(gc_header_t) */
+
+typedef struct gc_thread_ctx gc_thread_ctx_t; /* opaque; owner: collector; one per attached thread */
+
+typedef struct gc_rootset {                  /* owner: collector; concurrency: handshake-guarded (I7) */
+    void ***globals; size_t n_globals; size_t cap_globals;
+    gc_thread_ctx_t *threads; size_t n_threads;
+} gc_rootset_t;</code></pre><pre class="code"><code>typedef struct gc_event {                    /* owner: collector; emitted read-only to host callback */
+    uint64_t start_ns, end_ns;
+    uint32_t kind;                            /* gc_collect_kind_t */
+    size_t bytes_before, bytes_after, bytes_promoted, bytes_freed;
+    size_t roots_scanned, marked_objects, swept_objects, compacted_objects;
+    size_t bytes_floating_estimate;
+    uint32_t worker_count, worklist_steals, cas_retries, cards_dirtied;
+} gc_event_t;
+
+typedef enum gc_collect_kind {
+    GC_COLLECT_MINOR = 0, GC_COLLECT_MAJOR = 1,
+    GC_COLLECT_ON_OOM = 2, GC_COLLECT_REQUESTED = 3,
+} gc_collect_kind_t;
+
+typedef struct gc_config {                   /* owner: host; immutable after gc_new(); not serialized */
+    size_t initial_heap_bytes, max_heap_bytes, young_gen_bytes;
+    double growth_ratio;
+    uint32_t pause_target_ms_p99;
+    uint8_t  collector_kind, precise_roots;
+    uint32_t worker_threads, card_size_bytes, region_size_bytes;
+    uint64_t rng_seed;
+    void (*on_event)(const gc_event_t *, void *user);
+    void  *on_event_user;
+} gc_config_t;
+
+typedef struct gc gc_t;                       /* opaque collector instance handle */</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>Garbage-Collector/
+|-- README.md                       # project overview, quickstart
+|-- FINAL_BLUEPRINT.md               # this file
+|-- BUILD_PLAN.md                    # session continuity tracker
+|-- BLUEPRINT_LOG.md                 # change history of this spec
+|-- CHANGELOG.md                     # Keep a Changelog format
+|-- CONTRIBUTING.md
+|-- CODE_OF_CONDUCT.md
+|-- SECURITY.md                      # disclosure policy, PGP fingerprint
+|-- LICENSES/
+|   |-- Apache-2.0.txt               # core (ADR-0018)
+|   |-- MIT.txt                      # harness (ADR-0002)
+|-- Makefile                         # bootstrap/build/test/lint/bench targets
+|-- CMakeLists.txt                   # primary build (ADR-0007)
+|-- meson.build                      # alt build for distro packagers
+|-- Dockerfile                       # multi-stage: build -&gt; distroless runtime
+|-- docker-compose.yml               # harness + Prometheus scrape target
+|-- .dockerignore
+|-- .gitignore
+|-- .editorconfig
+|-- .clang-format
+|-- .clang-tidy</code></pre><pre class="diagram"><code>|-- include/
+|   |-- gc.h                        # public ABI (normative, §11)
+|   |-- gc_internal.h                # crate-internal types, header-bit accessors
+|   |-- gc_types.h                   # gc_header_t, gc_typeinfo_t, gc_color_t
+|   |-- gc_config.h                  # gc_config_t, tuning defaults
+|   |-- gc_arch.h                    # arch-specific intrinsics (x86-64/aarch64)
+|-- src/
+|   |-- core/
+|   |   |-- gc.c                     # lifecycle, collector_kind dispatch
+|   |   |-- header.c                 # header bit-layout accessors
+|   |   |-- typeinfo.c                # typeinfo validator (debug builds)
+|   |   |-- safepoint.c               # cooperative poll + trap-page support
+|   |   |-- handshake.c               # thread-suspension handshake protocol
+|   |-- alloc/
+|   |   |-- bump.c                   # nursery bump allocator (Phase 0/4)
+|   |   |-- freelist.c                # old-gen size-classed free list (Phase 2)
+|   |   |-- region.c                  # region-grain allocator (Phase 9)
+|   |   |-- los.c                     # large object space
+|   |   |-- arena.c                   # OS-page-backed arena substrate</code></pre><pre class="diagram"><code>|-- src/roots/
+|   |-- precise.c                    # stack-map-driven precise scan
+|   |-- conservative.c                # Boehm-style word scan
+|   |-- globals.c                     # global root table
+|   |-- registers.c                   # per-thread register/stack context
+|-- src/tracers/
+|   |-- mark_sweep.c                  # Phase 2
+|   |-- mark_compact.c                # Phase 3
+|   |-- copy.c                        # Phase 4 (Cheney)
+|   |-- generational.c                # Phase 5
+|   |-- incremental.c                 # Phase 6
+|   |-- concurrent.c                  # Phase 7 (tri-color, work-stealing)
+|-- src/barriers/
+|   |-- write_barrier.c               # Dijkstra incremental-update (Phase 6)
+|   |-- write_barrier_satb.c          # Yuasa SATB (Phase 7)
+|   |-- read_barrier.c                # concurrent compaction only (Phase 8)
+|   |-- card_table.c                  # generational card marking (Phase 5)
+|   |-- remembered_set.c              # per-region remembered sets (Phase 9)
+|-- src/compact/
+|   |-- slide.c                       # Lisp-2 / break-table (Phase 3)
+|   |-- relocation_set.c              # region eviction selection (Phase 8/9)
+|   |-- forwarding.c                  # forwarding-pointer bookkeeping</code></pre><pre class="diagram"><code>|-- src/concurrent/
+|   |-- worker.c                      # parallel mark/evacuation workers
+|   |-- coordinator.c                  # global marking-done handshake
+|   |-- pacer.c                        # allocation pacing (Go-style assist)
+|   |-- handshake.c                    # safepoint handshake for concurrent kinds
+|-- src/platform/
+|   |-- linux.c
+|   |-- darwin.c
+|   |-- bsd.c
+|   |-- arch_x86_64.c
+|   |-- arch_aarch64.c
+|-- src/diag/
+|   |-- trace.c                       # gc_event_t emission
+|   |-- stats.c
+|   |-- log.c
+|-- src/main_harness.c                # standalone synthetic workload driver
+|-- harness/                          # Rust correctness/differential driver
+|   |-- Cargo.toml
+|   |-- src/
+|   |   |-- main.rs
+|   |   |-- ffi.rs                    # bindings to libgc
+|   |   |-- model/                    # reference tracing-GC oracle
+|   |   |-- workloads/                # synthetic graph generators
+|   |   |-- proptests/                # randomized graph proptests
+|   |-- benches/
+|       |-- gcbench.rs
+|       |-- dacapo_subset.rs</code></pre><pre class="diagram"><code>|-- conformance/
+|   |-- positive/                     # per-kind fixture buckets (§27)
+|   |-- negative/                     # malformed/race fixtures
+|   |-- runner.c
+|   |-- spec.md
+|   |-- report.json
+|-- benchmarks/
+|   |-- gcbench/
+|   |-- synthetic_graphs/
+|   |-- dacapo_subset/
+|   |-- results/
+|-- examples/
+|   |-- 01_hello_alloc.c
+|   |-- 02_simple_graph.c
+|   |-- 03_vm_integration/
+|   |-- 04_compiler_integration/
+|-- docs/
+|   |-- abi.md
+|   |-- adr/                          # one file per ADR row, §9
+|   |-- algorithms/                   # one file per tracer kind
+|   |-- runbooks/                     # named operational runbooks, §25
+|   |-- threat-model/
+|   |-- performance/
+|   |-- failure-analysis/
+|   |-- tuning.md
+|   |-- glossary.md</code></pre><pre class="diagram"><code>|-- fuzz/
+|   |-- libfuzzer/
+|   |-- afl/
+|   |-- cargo-fuzz/
+|-- scripts/
+|   |-- run_conformance.sh
+|   |-- run_benchmarks.sh
+|-- tools/
+|   |-- report_diff.py
+|-- notes/
+|-- papers/
+|   |-- whitepaper/
+|-- legal/
+|   |-- ip_policy.md
+|-- brand/
+|   |-- voice.md
+|-- templates/
+|   |-- ADR.md
+|   |-- POSTMORTEM.md
+|   |-- RFC.md
+|-- .github/
+|   |-- workflows/
+|   |   |-- ci.yml
+|   |   |-- conformance.yml
+|   |   |-- security.yml
+|   |   |-- release.yml</code></pre> </section><section class="prose"><h2 id="sec-38">38. Appendix A — File Inventory</h2>
+<p>Every leaf file and directory from the Repository Layout (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/design/#sec-10">§10</a>), matching it exactly.</p>
+<p><strong>Root:</strong> <code>README.md</code> project overview/quickstart · <code>FINAL_BLUEPRINT.md</code> this document ·
+<code>BUILD_PLAN.md</code> session continuity tracker · <code>BLUEPRINT_LOG.md</code> spec change history ·
+<code>CHANGELOG.md</code> Keep-a-Changelog log · <code>CONTRIBUTING.md</code> contribution process ·
+<code>CODE_OF_CONDUCT.md</code> community standard · <code>SECURITY.md</code> disclosure policy ·
+<code>LICENSES/Apache-2.0.txt</code> core license (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/trade-offs/#adr-18">ADR-0018</a>) · <code>LICENSES/MIT.txt</code> harness license
+(<a class="cite" href="/system-design-blueprints/systems/garbage-collector/trade-offs/#adr-2">ADR-0002</a>) · <code>Makefile</code> build/test/lint/bench targets · <code>CMakeLists.txt</code> primary build
+(<a class="cite" href="/system-design-blueprints/systems/garbage-collector/trade-offs/#adr-7">ADR-0007</a>) · <code>meson.build</code> alt build for packagers · <code>Dockerfile</code> multi-stage build →
+distroless runtime · <code>docker-compose.yml</code> harness + Prometheus scrape · <code>.dockerignore</code>
+· <code>.gitignore</code> · <code>.editorconfig</code> · <code>.clang-format</code> · <code>.clang-tidy</code>.</p>
+<p><strong><code>include/</code>:</strong> <code>gc.h</code> normative public ABI (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/design/#sec-11">§11</a>) · <code>gc_internal.h</code> header-bit accessors
+· <code>gc_types.h</code> <code>gc_header_t</code>/<code>gc_typeinfo_t</code>/<code>gc_color_t</code> · <code>gc_config.h</code> <code>gc_config_t</code>
+and tuning defaults · <code>gc_arch.h</code> arch-specific intrinsics.</p>
+<p><strong><code>src/core/</code>:</strong> <code>gc.c</code> lifecycle + kind dispatch · <code>header.c</code> header-bit layout ·
+<code>typeinfo.c</code> debug-mode typeinfo validator · <code>safepoint.c</code> cooperative poll/trap-page ·
+<code>handshake.c</code> thread-suspension protocol.
+<strong><code>src/alloc/</code>:</strong> <code>bump.c</code> nursery allocator (Phase 0/4) · <code>freelist.c</code> old-gen size-
+classed free list (Phase 2) · <code>region.c</code> region-grain allocator (Phase 9) · <code>los.c</code>
+large object space · <code>arena.c</code> OS-page-backed arena substrate.
+<strong><code>src/roots/</code>:</strong> <code>precise.c</code> stack-map-driven scan · <code>conservative.c</code> Boehm-style word
+scan · <code>globals.c</code> global root table · <code>registers.c</code> per-thread register/stack context.
+<strong><code>src/tracers/</code>:</strong> <code>mark_sweep.c</code> (Phase 2) · <code>mark_compact.c</code> (Phase 3) · <code>copy.c</code>
+Cheney (Phase 4) · <code>generational.c</code> (Phase 5) · <code>incremental.c</code> (Phase 6) ·
+<code>concurrent.c</code> tri-color/work-stealing (Phase 7).
+<strong><code>src/barriers/</code>:</strong> <code>write_barrier.c</code> Dijkstra (Phase 6) · <code>write_barrier_satb.c</code>
+Yuasa (Phase 7) · <code>read_barrier.c</code> concurrent compaction (Phase 8) · <code>card_table.c</code>
+generational card marking (Phase 5) · <code>remembered_set.c</code> per-region remembered sets
+(Phase 9).
+<strong><code>src/compact/</code>:</strong> <code>slide.c</code> Lisp-2/break-table (Phase 3) · <code>relocation_set.c</code> region
+eviction selection (Phase 8/9) · <code>forwarding.c</code> forwarding-pointer bookkeeping.
+<strong><code>src/concurrent/</code>:</strong> <code>worker.c</code> mark/evacuation workers · <code>coordinator.c</code> marking-
+done handshake · <code>pacer.c</code> allocation pacing · <code>handshake.c</code> concurrent-kind safepoint
+handshake.
+<strong><code>src/platform/</code>:</strong> <code>linux.c</code> · <code>darwin.c</code> · <code>bsd.c</code> · <code>arch_x86_64.c</code> ·
+<code>arch_aarch64.c</code> — per-OS/arch substrate glue.
+<strong><code>src/diag/</code>:</strong> <code>trace.c</code> <code>gc_event_t</code> emission · <code>stats.c</code> aggregate counters ·
+<code>log.c</code> structured logging.
+<code>src/main_harness.c</code> standalone synthetic workload driver.</p>
+<p><strong><code>harness/</code></strong> (Rust): <code>Cargo.toml</code> · <code>src/main.rs</code> entry point · <code>src/ffi.rs</code> bindings
+to <code>libgc</code> · <code>src/model/</code> reference tracing-GC oracle · <code>src/workloads/</code> synthetic graph
+generators · <code>src/proptests/</code> randomized graph proptests · <code>benches/gcbench.rs</code> ·
+<code>benches/dacapo_subset.rs</code>.</p>
+<p><strong><code>conformance/</code>:</strong> <code>positive/</code> per-kind passing-fixture buckets (one subdirectory per
+<code>collector_kind</code>, <a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-12">§12</a>–<a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-22">§22</a> N.5) · <code>negative/</code> malformed/race fixtures · <code>runner.c</code>
+fixture executor · <code>spec.md</code> fixture-format specification · <code>report.json</code> CI-consumed
+output.
+<strong><code>benchmarks/</code>:</strong> <code>gcbench/</code> canonical synthetic benchmark · <code>synthetic_graphs/</code>
+project-specific graph generators · <code>dacapo_subset/</code> curated DaCapo port · <code>results/</code>
+recorded per-release numbers (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/numbers/#sec-29">§29</a>).
+<strong><code>examples/</code>:</strong> <code>01_hello_alloc.c</code> · <code>02_simple_graph.c</code> · <code>03_vm_integration/</code> <a class="cite" href="/system-design-blueprints/systems/tcp-ip-stack/" title="TCP/IP Stack">rank-33</a>
+VM host example · <code>04_compiler_integration/</code> Compiler-project host example.</p>
+<p><strong><code>docs/</code>:</strong> <code>abi.md</code> host-obligation contract · <code>adr/</code> one file per ADR row (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/trade-offs/#sec-9">§9</a>) ·
+<code>algorithms/</code> one file per tracer kind (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-12">§12</a>–<a class="cite" href="/system-design-blueprints/systems/garbage-collector/build/#sec-22">§22</a>) · <code>runbooks/</code> named operational
+runbooks (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/blueprint/#sec-25">§25</a>) · <code>threat-model/</code> expands <a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#sec-23">§23</a> · <code>performance/</code> expands <a class="cite" href="/system-design-blueprints/systems/garbage-collector/numbers/#sec-29">§29</a> ·
+<code>failure-analysis/</code> expands <a class="cite" href="/system-design-blueprints/systems/garbage-collector/reliability/#sec-24">§24</a> · <code>tuning.md</code> operator tuning guide (<a class="cite" href="/system-design-blueprints/systems/garbage-collector/blueprint/#sec-22-5">§22.5</a>) ·
+<code>glossary.md</code> mirrors <a class="cite" href="/system-design-blueprints/systems/garbage-collector/study/#sec-37">§37</a>.
+<strong><code>fuzz/</code>:</strong> <code>libfuzzer/</code> · <code>afl/</code> · <code>cargo-fuzz/</code> — one corpus directory per engine
+(<a class="cite" href="/system-design-blueprints/systems/garbage-collector/trade-offs/#adr-9">ADR-0009</a>).
+<strong><code>scripts/</code>:</strong> <code>run_conformance.sh</code> · <code>run_benchmarks.sh</code>.
+<strong><code>tools/</code>:</strong> <code>report_diff.py</code> conformance/benchmark diffing utility.
+<code>notes/</code> free-form engineering notes (no fixed schema).
+<strong><code>papers/whitepaper/</code></strong> long-form project writeup source.
+<strong><code>legal/</code>:</strong> <code>ip_policy.md</code>.
+<strong><code>brand/</code>:</strong> <code>voice.md</code>.
+<strong><code>templates/</code>:</strong> <code>ADR.md</code> · <code>POSTMORTEM.md</code> · <code>RFC.md</code>.
+<strong><code>.github/workflows/</code>:</strong> <code>ci.yml</code> · <code>conformance.yml</code> · <code>security.yml</code> · <code>release.yml</code>.</p>
+<hr>
+</section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

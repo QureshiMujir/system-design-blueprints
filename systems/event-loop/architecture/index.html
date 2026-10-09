@@ -1,0 +1,409 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Event Loop — Architecture · Engineering Blueprints</title><meta name="description" content="Event Loop, hld: §3 overview + §8 domain model. Event Loop (crate family elr-*, &#34;Event-Loop Runtime&#34;) is a production-grade asynchronous I/O runtime — the substrate between the operating system's poller and a user's async fn — in the lineage of…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <a href="/system-design-blueprints/systems/event-loop/">Event Loop</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Event Loop</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux</li> <li>13 phases</li> <li>~17 weeks</li> <li>3,028 lines</li> <li>blueprint #189</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/event-loop/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/event-loop/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/event-loop/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/event-loop/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/event-loop/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/event-loop/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/event-loop/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/event-loop/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/event-loop/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/event-loop/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Event Loop — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend side: user code and sibling projects
+%% legend rt: runtime core crates (net, runtime, reactor)
+%% legend ingest: peers of the executor and I/O backends
+%% legend store: C ABI boundary crate
+  U([&quot;&lt;b&gt;User code&lt;/b&gt;&lt;br/&gt;async fn / .await / spawn /&lt;br/&gt;TaskGroup / select!&lt;br/&gt;&lt;b&gt;Sibling projects&lt;/b&gt;&lt;br/&gt;TLS-SSL-Handshake(50) · HTTP2-HTTP3(64)&lt;br/&gt;WebSocket(81) · DNS-Resolver(65)&quot;])
+  NET[&quot;&lt;b&gt;elr-net&lt;/b&gt;&lt;br/&gt;TcpStream/TcpListener, UdpSocket,&lt;br/&gt;UnixStream, ChildStdin, StdinHandle,&lt;br/&gt;SignalSet, File (offload/uring),&lt;br/&gt;Resolver hook&quot;]
+  RT[&quot;&lt;b&gt;elr-runtime&lt;/b&gt;&lt;br/&gt;Executor (per-thread parker +&lt;br/&gt;Chase-Lev deque) . Spawner&lt;br/&gt;. TaskHandle (drop-cancel + JoinHandle)&lt;br/&gt;. TaskGroup . poll Budget&lt;br/&gt;. idle-detector hook&quot;]
+  CH[&quot;&lt;b&gt;elr-channel&lt;/b&gt;&lt;br/&gt;mpsc/bcast/oneshot&quot;]
+  TM[&quot;&lt;b&gt;elr-timer&lt;/b&gt;&lt;br/&gt;HHWheel&lt;br/&gt;O(1) ins/cancel,&lt;br/&gt;8 level ladd&quot;]
+  TR[&quot;&lt;b&gt;elr-trace&lt;/b&gt;&lt;br/&gt;console proto,&lt;br/&gt;idle-tracker&quot;]
+  BL[&quot;&lt;b&gt;elr-blocking&lt;/b&gt;&lt;br/&gt;thread pool&lt;br/&gt;DNS/file offload&quot;]
+  RE[&quot;&lt;b&gt;elr-reactor&lt;/b&gt;&lt;br/&gt;Source table (FD/HANDLE -&gt; Source)&lt;br/&gt;. Reactor::turn() parks in poller.poll,&lt;br/&gt;wakes matching tasks . self-pipe&quot;]
+  PO[&quot;&lt;b&gt;elr-poller&lt;/b&gt;&lt;br/&gt;trait Poller: epoll (Linux)&lt;br/&gt;kqueue (BSD) IOCP (Windows)&quot;]
+  UR[&quot;&lt;b&gt;elr-uring&lt;/b&gt; (completion fast path)&lt;br/&gt;SQE/CQE submitter, fixed bufs,&lt;br/&gt;multishot accept, falls back&lt;br/&gt;to elr-poller on old kernels&quot;]
+  CA[&quot;&lt;b&gt;elr-c-abi&lt;/b&gt;&lt;br/&gt;cdylib: elr_runtime_new / elr_spawn /&lt;br/&gt;elr_tcp_connect / ...&quot;]
+  U -- &quot;consumes the public API&lt;br/&gt;(elr-net, elr-runtime)&quot; --&gt; NET
+  NET --&gt; RT
+  RT --&gt; CH
+  RT --&gt; TM
+  RT --&gt; TR
+  RT --&gt; BL
+  BL --&gt; RE
+  RE --&gt; PO
+  RE --&gt; UR
+  PO --&gt; CA
+  UR --&gt; CA
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef side stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  class U side
+  class NET,RT,RE rt
+  class CH,TM,TR,BL,PO,UR ingest
+  class CA store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch side"></span>user code and sibling projects</li><li><span class="swatch rt"></span>runtime core crates (net, runtime, reactor)</li><li><span class="swatch ingest"></span>peers of the executor and I/O backends</li><li><span class="swatch store"></span>C ABI boundary crate</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code> User code: async fn / .await / spawn / TaskGroup / select!
+ Sibling projects: TLS-SSL-Handshake(50) · HTTP2-HTTP3(64) · WebSocket(81) · DNS-Resolver(65)
+                              |  consumes the public API (elr-net, elr-runtime)
+ +----------------------------v---------------------------------------------+
+ | elr-net   TcpStream/TcpListener, UdpSocket, UnixStream, ChildStdin,     |
+ |           StdinHandle, SignalSet, File (offload/uring), Resolver hook   |
+ +----------------------------+---------------------------------------------+
+                               |
+ +----------------------------v---------------------------------------------+
+ | elr-runtime  Executor(per-thread parker + Chase-Lev deque) . Spawner    |
+ |              . TaskHandle (drop-cancel + JoinHandle) . TaskGroup        |
+ |              . poll Budget . idle-detector hook                        |
+ +------+-----------+-------------+----------------+-----------------------+
+        |           |             |                |
+ +------v---+ +------v-----+ +----v------+ +-------v-------+
+ | elr-     | | elr-timer  | | elr-trace | | elr-blocking  |
+ | channel  | | HHWheel    | | console   | | thread pool   |
+ | mpsc/    | | O(1) ins/  | | proto,    | | DNS/file      |
+ | bcast/   | | cancel, 8  | | idle-     | | offload       |
+ | oneshot  | | level ladd | | tracker   | |               |
+ +----------+ +------------+ +-----------+ +-------+-------+
+                                                     |
+ +---------------------------------------------------v---------------------+
+ | elr-reactor   Source table (FD/HANDLE -&gt; Source) . Reactor::turn()      |
+ |               parks in poller.poll, wakes matching tasks . self-pipe    |
+ +------+-----------------------------------------+-------------------------+
+        |                                         |
+ +------v-------------+                 +----------v---------------------+
+ | elr-poller          |                 | elr-uring (completion fast path)|
+ | trait Poller: epoll  |                 | SQE/CQE submitter, fixed bufs,  |
+ | (Linux) kqueue (BSD) |                 | multishot accept, falls back   |
+ | IOCP (Windows)       |                 | to elr-poller on old kernels    |
+ +----------+-----------+                 +----------------+---------------+
+            |                                              |
+ +----------v----------------------------------------------v---------------+
+ | elr-c-abi   cdylib: elr_runtime_new / elr_spawn / elr_tcp_connect / ...  |
+ +----------------------------------------------------------------------- +</code></pre></details>
+<p><strong>Three properties, referenced throughout.</strong> First, <strong>the data path is one-way at every layer</strong>:
+the poller produces raw kernel events, the reactor translates them into wakeups, the executor
+consumes wakeups and polls futures, futures hand intent back down. The reactor never calls up into
+user code (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-3">I3</a>). Second, <strong>the four poller backends present one trait</strong> (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-11-3">§11.3</a>); the reactor never
+branches on backend type outside <code>Builder::build()</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-2">P2</a>, <a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-11">I11</a>). Third, <strong>the completion path is
+structurally distinct</strong>: <code>epoll</code>/<code>kqueue</code>/IOCP-readiness answer &quot;tell me when this is ready,&quot;
+<code>io_uring</code> answers &quot;do this, tell me when it is done.&quot; Conflating them produces a leaky
+abstraction that always favours one model (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-6">ADR-06</a>, <a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#sec-37">§37</a> Alt 2).</p>
+<p><strong>Per-box responsibility.</strong> <code>elr-net</code> is the user-facing async I/O surface; it registers with the
+reactor and dispatches to the readiness or completion path per <code>Builder</code> configuration (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-20-7">§20.7</a>).
+<code>elr-runtime</code> owns task lifecycle, scheduling, and the poll budget; it is the only crate that
+allocates a <code>RawTask</code>. <code>elr-channel</code>/<code>elr-timer</code>/<code>elr-trace</code>/<code>elr-blocking</code> are peer subsystems the
+executor drives every worker-park cycle. <code>elr-reactor</code> is the sole owner of the per-FD <code>Source</code>
+table and the only crate that calls into <code>elr-poller</code>. <code>elr-poller</code> is four independent, symmetric
+backend implementations behind one trait; <code>elr-uring</code> is a sibling, not a subtype, of that trait.
+<code>elr-c-abi</code> is the only crate exposed to non-Rust code; every other crate is an internal
+implementation detail from the embedder&#39;s point of view.</p>
+<p>The <code>elr-*</code> crate-name convention is normative (<a class="cite" href="/system-design-blueprints/systems/event-loop/design/#sec-10">§10</a>); do not re-imagine it.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-1">8.1 Task Lifecycle State Machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Next State</th>
+<th>Side Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Idle</code> (allocated, not yet scheduled)</td>
+<td><code>spawn()</code> returns</td>
+<td><code>Scheduled</code></td>
+<td>pushed to local deque or inject queue (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-18-5">§18.5</a>)</td>
+</tr>
+<tr>
+<td><code>Scheduled</code></td>
+<td>worker pops it</td>
+<td><code>Running</code></td>
+<td><code>Header::vtable.poll</code> invoked</td>
+</tr>
+<tr>
+<td><code>Running</code></td>
+<td><code>Poll::Pending</code> returned, waker registered</td>
+<td><code>Idle</code> (parked)</td>
+<td>waker stored on a <code>Source</code>/timer/channel slot</td>
+</tr>
+<tr>
+<td><code>Running</code></td>
+<td><code>Poll::Ready(out)</code> returned</td>
+<td><code>Completed</code></td>
+<td>output stored, <code>JoinHandle</code> waker fired</td>
+</tr>
+<tr>
+<td><code>Idle</code> (parked)</td>
+<td>matching waker fires</td>
+<td><code>Scheduled</code></td>
+<td>re-pushed to a deque or inject queue</td>
+</tr>
+<tr>
+<td>any non-<code>Completed</code> state</td>
+<td><code>JoinHandle</code>/<code>TaskGroup</code> dropped</td>
+<td><code>Cancelled</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-5">I5</a>)</td>
+<td>cancellation bit set, task woken to observe it at next poll</td>
+</tr>
+<tr>
+<td><code>Cancelled</code></td>
+<td>next poll observes the bit</td>
+<td><code>Completed</code> (aborted)</td>
+<td>future dropped in place, all its <code>Drop</code> impls run</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Source Readiness State Machine (per direction)</h3>
+<p><code>Unregistered -&gt; Registered -&gt; Ready -&gt; Draining -&gt; Registered</code> (loop) <code>-&gt; Deregistered</code>.
+<code>Registered -&gt; Ready</code> on a kernel event matching the interest mask; <code>Ready -&gt; Draining</code> when a
+future&#39;s <code>poll_read</code>/<code>poll_write</code> observes it; <code>Draining -&gt; Registered</code> when the read/write call
+returns <code>EAGAIN</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-1">I1</a>) — the future re-registers its waker and returns <code>Pending</code>; any state
+<code>-&gt; Deregistered</code> on <code>Source::drop</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-3">I3</a> governs safe waker teardown here).</p>
+<h3 id="sec-8-3">8.3 Timer Wheel Cascade (ASCII)</h3>
+<pre class="diagram"><code>level 0 (1ms/slot, 256 slots) --cascade at wrap--&gt; level 1 (256ms/slot)
+level 1                        --cascade at wrap--&gt; level 2 (65.5s/slot)
+level 2                        --cascade at wrap--&gt; level 3 (4.66h/slot)
+level 3..7                     --cascade---------&gt;  up to ~600y coverage
+insert(deadline): pick the lowest level where (deadline - cursor) fits 8 bits, push_front
+advance_to(now): drain level-0&#39;s current slot; entries due now fire; not-yet-due entries
+                 re-insert (cascade); cursor += 1ms; on cursor%256==0, cascade next level</code></pre>
+<p>Named states: <code>Pending</code> (linked into a slot) → <code>Cascading</code> (re-inserted one level down during a
+wrap) → <code>Fired</code> (waker invoked) or <code>Cancelled</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-4">I4</a>, unlinked before firing).</p>
+<h3 id="sec-8-4">8.4 io_uring SQE/CQE Lifecycle</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Next State</th>
+<th>Malformed-input handling</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Built</code></td>
+<td><code>opcode::*::new(...).build()</code></td>
+<td><code>Submitted</code></td>
+<td>n/a</td>
+</tr>
+<tr>
+<td><code>Submitted</code></td>
+<td><code>Submitter::submit</code> enqueues the SQE</td>
+<td><code>InFlight</code></td>
+<td>kernel rejects malformed SQE synchronously (<code>submit</code> returns <code>Err</code>)</td>
+</tr>
+<tr>
+<td><code>InFlight</code></td>
+<td>kernel completes the operation</td>
+<td><code>Completed</code></td>
+<td>CQE <code>res &lt; 0</code> maps to an <code>io::Error</code> from <code>-res</code> as <code>errno</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-10">I10</a> keeps the buffer alive throughout)</td>
+</tr>
+<tr>
+<td><code>InFlight</code></td>
+<td>the ring is torn down before completion</td>
+<td><code>Cancelled</code></td>
+<td><code>IORING_OP_ASYNC_CANCEL</code> or ring drop; buffer released only after <code>Cancelled</code> is observed</td>
+</tr>
+<tr>
+<td><code>Completed</code></td>
+<td>CQE drained and matched by <code>SubmissionToken</code></td>
+<td>terminal</td>
+<td>a CQE with no matching pending token (double-completion, <code>IORING_FEAT_NODROP</code> bug) is logged and dropped, never dereferenced (FM5)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Reactor Turn — Sequence Diagram</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">sequenceDiagram
+  autonumber
+  participant W as Worker
+  participant R as Reactor
+  participant P as Poller (epoll/kqueue/IOCP)
+  participant K as Kernel
+  Note over W: idle, deque empty
+  W-&gt;&gt;R: turn(deadline)
+  R-&gt;&gt;P: poll(events, timeout)
+  P-&gt;&gt;K: epoll_wait/kevent
+  K--&gt;&gt;P: events
+  P--&gt;&gt;R: events fill Vec
+  R-&gt;&gt;R: lookup Source by Token
+  R-&gt;&gt;R: extract waker (I3)
+  R--&gt;&gt;W: wake() outside lock
+  W-&gt;&gt;R: re-poll woken future
+  R-&gt;&gt;R: timer_wheel.advance_to()</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.5.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>Worker                    Reactor                  Poller (epoll/kqueue/IOCP)      Kernel
+  | idle, deque empty        |                              |                        |
+  |-- turn(deadline) -------&gt;|                              |                        |
+  |                          |-- poll(events, timeout) ----&gt;|                        |
+  |                          |                              |-- epoll_wait/kevent --&gt;|
+  |                          |                              |&lt;---- events -----------|
+  |                          |&lt;---- events fill Vec ---------|                        |
+  |                          |-- lookup Source by Token ---|                        |
+  |                          |-- extract waker (I3) --------|                        |
+  |&lt;-- wake() outside lock --|                              |                        |
+  |-- re-poll woken future -&gt;|                              |                        |
+  |                          |-- timer_wheel.advance_to() --|                        |</code></pre></details>
+<h3 id="sec-8-6">8.6 Worked Example — Echo Connection End to End</h3>
+<ol>
+<li><code>TcpListener::accept().await</code> registers <code>Source</code> (Read interest) with the reactor (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-15-1">§15.1</a>).</li>
+<li>Reactor <code>turn()</code> blocks in <code>poller.poll</code>; kernel reports the listener readable.</li>
+<li>Accept future wakes, <code>accept(2)</code> returns a connected fd; <code>TcpStream</code> registers its own <code>Source</code>.</li>
+<li><code>spawn(handler)</code> pushes a task onto the accepting worker&#39;s local deque (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-18-5">§18.5</a>, wait-free, <a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-7">I7</a>).</li>
+<li>Handler calls <code>stream.read(&amp;mut buf).await</code>; if <code>EAGAIN</code>, registers a read waker (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-2">I2</a>) and
+returns <code>Pending</code>; the task parks.</li>
+<li>Client sends bytes; kernel event delivered; reactor <code>turn()</code> finds the <code>Source</code>, wakes the
+handler&#39;s waker outside the source-table lock (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-3">I3</a>); task re-scheduled.</li>
+<li>Handler drains to <code>EAGAIN</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-1">I1</a>), calls <code>write_all().await</code>, same registration dance on the
+write direction, then loops to step 5 or completes and drops its <code>Source</code> (deregister).</li>
+</ol>
+<h3 id="sec-8-7">8.7 Malformed-Input / Failure-Path Examples</h3>
+<ul>
+<li><strong><code>kqueue</code> interleaved <code>EV_ERROR</code>.</strong> A single <code>kevent()</code> call can return error flags
+interleaved with real events; the consumer must check <code>flags &amp; EV_ERROR</code> per event and treat
+<code>data</code> as <code>errno</code> rather than assuming every returned <code>kevent</code> is a successful readiness
+signal (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-14-6">§14.6</a> pitfall).</li>
+<li><strong>A task holds <code>std::sync::Mutex</code> across <code>.await</code>.</strong> Worker A acquires the mutex, yields at an
+<code>.await</code>; a different task is scheduled onto the same worker and blocks trying to acquire the
+same mutex — a self-deadlock, because <code>std::sync::Mutex</code> is not async-aware and blocks the
+<em>thread</em>, not just the task (FM4-adjacent but distinct from a missed-wakeup bug — this is a
+genuine correctness bug in user code that the runtime cannot detect at compile time; the
+idle-detector, <a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-22-3">§22.3</a>, is the production-visible symptom).</li>
+</ul>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-1">P1</a> — Cooperative scheduling is the contract.</strong> A future that does not yield is an application-layer bug; the idle-detector (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-22-3">§22.3</a>) detects and surfaces it, never preempts it. <em>Tradeoff:</em> no fairness guarantee against a misbehaving task. <em>Operational implication:</em> one stuck task can starve a whole worker (FM1). <em>Violated:</em> the cost model in <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-35">§35</a> #2 collapses — throughput becomes a function of the worst task, not the aggregate.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-2">P2</a> — One reactor, four pollers.</strong> The reactor talks to <code>dyn Poller</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-11">I11</a>); the four backends live in <code>crates/elr-poller/src/{linux,bsd,windows}/</code>. <em>Tradeoff:</em> dynamic dispatch vs. monomorphisation (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-2">ADR-02</a>). <em>Operational implication:</em> one code path to debug per OS regardless of platform. <em>Violated:</em> platform-specific bugs multiply across the reactor instead of staying contained in one backend file.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-3">P3</a> — The completion-based path is structurally distinct.</strong> <code>io_uring</code> is <code>elr-uring</code>&#39;s <code>Submitter</code>, not a fifth <code>Poller</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-6">ADR-06</a>). <em>Tradeoff:</em> two trait surfaces instead of one. <em>Operational implication:</em> <code>TcpStream</code> dispatches at construction time, zero runtime branching cost. <em>Violated:</em> forcing completion semantics through a readiness facade caps every <code>io_uring</code>-only optimisation (multishot accept, fixed buffers) at the readiness model&#39;s ceiling.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-4">P4</a> — Wakers are reference-counted, not boxed trait objects.</strong> A <code>RawWaker</code> vtable (<code>clone</code>/<code>wake</code>/<code>wake_by_ref</code>/<code>drop</code>) over a <code>Header</code> pointer; zero heap allocation in the wakeup path (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-21">ADR-21</a>). <em>Tradeoff:</em> <code>unsafe</code> vtable plumbing vs. safe <code>Box&lt;dyn Wake&gt;</code>. <em>Operational implication:</em> directly gates <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-7">M7</a> (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#sec-35">§35</a> #7). <em>Violated:</em> every wakeup allocates and frees, and <a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-7">M7</a>&#39;s ≤1µs ceiling is unreachable.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-5">P5</a> — Cancellation is drop-cancellation.</strong> Dropping a <code>JoinHandle</code> (or its owning <code>TaskGroup</code>) is the only cancellation path (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-9">ADR-09</a>, <a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-5">I5</a>). <em>Tradeoff:</em> no synchronous &quot;cancel and wait&quot; primitive distinct from <code>drop</code>. <em>Operational implication:</em> leaks are structurally impossible inside a <code>TaskGroup</code> scope. <em>Violated:</em> two cancellation paths means two answers to &quot;did cancellation complete,&quot; and FM8 becomes unfixable.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-6">P6</a> — Backpressure is the user&#39;s responsibility, not the runtime&#39;s.</strong> Bounded channels only by default (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-10">ADR-10</a>, <a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-8">I8</a>); a full producer blocks, never drops silently. <em>Tradeoff:</em> the user must choose a capacity. <em>Operational implication:</em> memory growth is bounded and observable (<code>elr_channel_capacity_gauge</code>). <em>Violated:</em> an unbounded default turns every slow consumer into an unbounded-memory-growth incident (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#t-6">T6</a>).</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-7">P7</a> — Time is owned by the timer wheel, not the OS.</strong> The reactor&#39;s <code>poll</code> timeout is always <code>timer_wheel.next_deadline() - now</code>, never a caller-supplied raw duration (<a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-9">I9</a>). <em>Tradeoff:</em> an extra layer of indirection over &quot;just call <code>epoll_wait(timeout)</code>&quot;. <em>Operational implication:</em> O(1) insert/cancel for every timer regardless of count (<a class="cite" href="/system-design-blueprints/systems/event-loop/blueprint/#sec-17-1">§17.1</a>). <em>Violated:</em> the kernel&#39;s millisecond-rounding becomes the lower bound on timer accuracy and cancellation becomes O(n) (FM3).</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-8">P8</a> — Files are not async on Linux without <code>io_uring</code>.</strong> <code>epoll</code> does not deliver readiness on regular files; the offload thread pool is the honest default, <code>io_uring</code> is opt-in (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-11">ADR-11</a>). <em>Tradeoff:</em> a thread-pool hop costs latency the completion path avoids. <em>Operational implication:</em> <code>Builder::max_blocking_threads</code> is a real capacity knob (C11–C12). <em>Violated:</em> pretending file I/O is uniformly async is the lie that costs a production team a week debugging a blocked worker (FM1).</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-9">P9</a> — DNS is offloaded to a thread pool.</strong> <code>getaddrinfo</code> blocks; there is no portable async DNS in the OS. The offload pool is the default; c-ares is deferred (<code>PhaseDeferred(&quot;§21.2&quot;)</code>). <em>Tradeoff:</em> resolution latency tail under packet loss. <em>Operational implication:</em> the <code>DNS-Resolver-from-Scratch</code> project (rank 65) is the from-scratch consumer; this runtime ships only the glue. <em>Violated:</em> a from-scratch async DNS stack duplicates a sibling project&#39;s entire scope.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-10">P10</a> — Zero allocation on the hot path.</strong> Reactor turn, future poll, waker wake, channel <code>recv</code> must be allocation-free in steady state; each crate&#39;s CI gates this with <code>dhat</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/numbers/#m-8">M8</a>). <em>Tradeoff:</em> fixed-capacity data structures (ring buffers, inline task storage) over dynamic ones. <em>Operational implication:</em> the allocator is never a suspect in a latency-tail investigation. <em>Violated:</em> a hot-path regression fails CI, not a customer&#39;s SLO, by design.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-11">P11</a> — No global state.</strong> <code>Runtime</code> is a value from <code>Builder::new().build()</code> (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-15">ADR-15</a>, <a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#inv-13">I13</a>); multiple runtimes coexist in one process. <em>Tradeoff:</em> every API takes or captures a <code>Runtime</code> handle instead of using a global <code>spawn</code>. <em>Operational implication:</em> embeddable as a library, testable in isolation. <em>Violated:</em> &quot;which runtime does the C ABI use&quot; becomes unanswerable the moment two are constructed.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-12">P12</a> — Determinism is a stretch goal.</strong> <code>Builder::deterministic_test_runtime()</code> gives a single-threaded, deterministic-poll-order executor for property tests; work-stealing and OS scheduling defeat determinism everywhere else. <em>Tradeoff:</em> the deterministic mode cannot exercise multi-thread bugs. <em>Operational implication:</em> property tests are reproducible; soak tests are not. <em>Violated:</em> without it, every flaky property-test failure is unreproducible.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-13">P13</a> — Observability is built in, not bolted on.</strong> Spans, metrics, and the idle-detector are Phase 10 first-class citizens, not an optional feature flag (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-12">ADR-12</a>, <a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-18">ADR-18</a>, <a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-19">ADR-19</a>). <em>Tradeoff:</em> a small span-creation cost on every task/IO boundary in dev builds. <em>Operational implication:</em> <code>tokio-console</code> connects to any <code>Builder::trace_console</code>-enabled runtime with zero bespoke tooling. <em>Violated:</em> the first production incident becomes a redeploy-with-more- logging cycle instead of a live <code>tokio-console</code> session.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/event-loop/architecture/#p-14">P14</a> — Every <code>unsafe</code> block is paired with a proof obligation.</strong> A <code>// SAFETY:</code> comment plus a <code>miri</code> and/or <code>loom</code> CI gate (<a class="cite" href="/system-design-blueprints/systems/event-loop/trade-offs/#adr-17">ADR-17</a>). <em>Tradeoff:</em> CI time (<code>loom</code> is exponential in atomic count; tests must stay small). <em>Operational implication:</em> <a class="cite" href="/system-design-blueprints/systems/event-loop/reliability/#t-8">T8</a> (memory corruption via <code>unsafe</code>) is caught before merge, not in production. <em>Violated:</em> an unreviewed <code>unsafe</code> block is undetectable until a fuzz run or a customer finds the aliasing bug; the gate exists precisely to move that discovery left of merge.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

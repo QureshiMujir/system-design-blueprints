@@ -1,0 +1,406 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Tensor Runtime — Architecture · Engineering Blueprints</title><meta name="description" content="Distributed Tensor Runtime, hld: §3 overview + §8 domain model. - Build a from-scratch distributed tensor runtime: device mesh + sharding spec → SPMD partitioner (resharding via collective insertion) → from-scratch collective engine over a custom transport →…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/distributed-tensor-runtime/">Distributed Tensor Runtime</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>Distributed Tensor Runtime</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~57 weeks</li> <li>1,833 lines</li> <li>blueprint #351</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-tensor-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-tensor-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Tensor Runtime — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Diagram (one rank shown; replicated across the mesh)</h3>
+<pre class="diagram"><code>                       ┌──────────────────────────────────────────────────────────┐
+   #115 / #325 / C  ─► │  dtr (facade) :: shard · partition · run(graph)            │
+                       └───────────────┬──────────────────────────────────────────┘
+                                       ▼
+        ┌──────────────────────────────────────────────────────────────────────────┐
+        │                               tensor-core                                  │
+        │  Tensor&lt;T&gt; (ndim,dtype,layout) · DeviceMesh · ShardSpec · ShardedTensor     │
+        └───────┬───────────────────────────────────────────────┬────────────────────┘
+                ▼                                                 ▼
+        ┌──────────────────────────┐                   ┌────────────────────────────┐
+        │        partition         │                   │            exec            │
+        │ sharding inference        │                  │  op DAG · scheduler        │
+        │ resharding (insert        │◄── shardings ───►│  streams · overlap         │
+        │ collectives)              │                  │  executor (SPMD)           │
+        └───────────┬──────────────┘                   └─────────────┬──────────────┘
+                    │ emits collective ops + local ops               │ dispatches
+                    ▼                                                 ▼
+        ┌──────────────────────────┐                   ┌────────────────────────────┐
+        │       collectives        │                   │          kernels           │
+        │ allreduce(ring/tree/RHD) │                   │ elementwise · reduce        │
+        │ allgather reduce-scatter │                   │ matmul ── calls #349 ──►    │  GEMM
+        │ broadcast all-to-all     │                   └────────────────────────────┘
+        │ barrier · cost model     │
+        └───────────┬──────────────┘
+                    ▼
+        ┌──────────────────────────────────────────────────────────────────────────┐
+        │                                transport                                   │
+        │ reliable ordered msgs · framing · rendezvous · flow control · multi-stream  │
+        │ (TCP now; RDMA deferred)                                                    │
+        └───────────┬──────────────────────────────────────────────────────────────┘
+                    ▼  (network: other ranks)
+        ┌──────────────────────────────────────────────────────────────────────────┐
+        │                                 runtime                                    │
+        │ rank bootstrap · world/rank id · barrier · failure detector · coordinator   │
+        └────────────────────────────────────────────────────────────────────────────┘
+
+   side: cabi (C/Python ABI)  ·  bench (collective BW/latency, overlap)  ·  conformance (np=1 oracle, MPI-semantics diff, fault-injection)</code></pre>
+<h3 id="sec-3-2">3.2 Box Narratives</h3>
+<ul>
+<li><strong><code>dtr</code> facade.</strong> Entry points: declare a <code>DeviceMesh</code>, annotate tensors with <code>ShardSpec</code>, build/submit an op graph, run it SPMD. Validates mesh/shard consistency. Thin orchestration.</li>
+<li><strong><code>tensor-core</code>.</strong> <code>Tensor&lt;T&gt;</code> = dense n-dim array (shape, strides, dtype, device handle), local to a rank. <code>DeviceMesh</code> = an n-dim grid of ranks with <strong>named axes</strong> (e.g. <code>{&quot;data&quot;:4, &quot;model&quot;:2}</code>). <code>ShardSpec</code> maps each tensor dimension to a mesh axis or &quot;replicated&quot;/&quot;partial&quot;. <code>ShardedTensor</code> = a logical (global-shape) tensor + its <code>ShardSpec</code> + the local shard each rank holds. The vocabulary every other crate speaks.</li>
+<li><strong><code>partition</code>.</strong> The SPMD partitioner. Given an op graph with input shardings, it <strong>infers</strong> output shardings (propagation rules per op), detects <strong>mismatches</strong> (an op needs operands in a different sharding than they&#39;re in), and <strong>inserts collectives</strong> to reshard (e.g. a contraction over a sharded axis emits a reduce-scatter or allreduce; a sharded→replicated change emits allgather). This is the GSPMD/Mesh-TF heart — the hardest, most distinctive subsystem.</li>
+<li><strong><code>exec</code>.</strong> Builds the op DAG (local ops + inserted collectives), schedules it respecting dependencies, assigns ops to <strong>streams</strong> (independent ordered queues), and drives execution SPMD across ranks. The scheduler is where compute/comm <strong>overlap</strong> is realized.</li>
+<li><strong><code>collectives</code>.</strong> The from-scratch collective engine. Each collective has multiple algorithms: <strong>ring</strong> (bandwidth-optimal, large msgs), <strong>tree</strong> / <strong>recursive-halving-doubling</strong> (latency-optimal, small msgs), selected by a <strong>cost model</strong> (α latency + β/bandwidth × bytes). allreduce = reduce-scatter + allgather (the ring decomposition). All built on <code>transport</code> point-to-point.</li>
+<li><strong><code>kernels</code>.</strong> Per-rank local compute: elementwise (add/mul/activation), reductions (local part of a distributed reduce), and <strong>matmul → delegated to #349</strong>. The numeric substrate; collectives glue the local results.</li>
+<li><strong><code>transport</code>.</strong> Reliable, ordered, framed messaging between ranks: connection setup, a rendezvous protocol for buffer matching (sender/receiver agree on a transfer), flow control (bounded buffers, backpressure), and <strong>multiple independent streams</strong> (so a collective on one stream doesn&#39;t head-of-line-block another). TCP now; RDMA-like verbs deferred. The data plane.</li>
+<li><strong><code>runtime</code>.</strong> Process/rank lifecycle: bootstrap (every rank discovers the world via a coordinator/rendezvous address), assigns <code>rank</code>/<code>world_size</code>, provides a <strong>barrier</strong>, and runs a <strong>failure detector</strong> (heartbeat/SWIM-style). On a rank failure: fail-stop detection + a clean abort with diagnostics (in-job recovery deferred).</li>
+<li><strong><code>bench</code> / <code>conformance</code>.</strong> Collective bandwidth/latency harness (vs the cost model + the bandwidth-optimal bound); single-process oracle (run the same graph with <code>world_size=1</code> — the trusted result); MPI-semantics differential tests; fault-injection (kill a rank, drop messages, reorder, delay).</li>
+</ul>
+<h3 id="sec-3-3">3.3 Boundaries</h3>
+<ul>
+<li><strong>Trust boundary:</strong> the network (other ranks) and the C ABI. Messages are framed + length-checked; a peer can be slow, dead, or (in the threat model) send malformed frames. Within a job all ranks are trusted as cooperative but <em>not</em> as reliable.</li>
+<li><strong>Concurrency boundary:</strong> per rank — network I/O threads, compute threads (#349 pool), and the stream queues. Collectives and local compute overlap across streams.</li>
+<li><strong>Numerical boundary:</strong> collective reduction order. A tree/ring reduction sums in a topology-determined order → result depends on world size + algorithm → documented; a <strong>deterministic mode</strong> fixes a canonical order (I-class invariant) at a performance cost.</li>
+<li><strong>Coordination boundary:</strong> the rendezvous/coordinator (bootstrap + membership) is the one semi-central component; the data plane is fully peer-to-peer.</li>
+</ul>
+<h3 id="sec-3-4">3.4 Data-flow walk — one data-parallel training step (SPMD)</h3>
+<ol>
+<li>Bootstrap (once): every rank joins the world via the coordinator, gets <code>rank</code>/<code>world_size</code>, agrees on the mesh <code>{&quot;data&quot;:N}</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-13">I13</a>).</li>
+<li>Each rank holds replicated weights + a distinct batch shard (<code>ShardSpec</code>: weights <code>Replicated</code>, batch <code>Sharded(data)</code>).</li>
+<li>Forward + backward run as local ops (matmul → #349) on the rank&#39;s shard → produces local gradients in <code>Partial(sum)</code> state (each rank has a partial gradient).</li>
+<li>The partitioner inserted an <strong>allreduce</strong> over the <code>data</code> axis to turn <code>Partial(sum)</code> gradients into <code>Replicated</code> averaged gradients (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#sec-8-3">§8.3</a>).</li>
+<li><code>collectives::allreduce_ring</code> runs (cost-model may pick RHD for small tensors); result bit-identical on all ranks (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-5">I5</a>); bytes/rank = <code>2(N−1)/N·D</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-4">I4</a>).</li>
+<li>The scheduler <strong>overlapped</strong> the allreduce of earlier-computed gradients with the still-running backward of later layers (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#p-9">P9</a>) → comm hidden behind compute.</li>
+<li>Each rank applies the (identical) averaged gradient → weights stay replicated/consistent.</li>
+<li>The failure detector ran throughout; a dead rank would fail-stop the step (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-12">I12</a>). <code>CollTrace</code> recorded each allreduce&#39;s algorithm/bytes/bandwidth/overlap.</li>
+</ol>
+<h3 id="sec-3-5">3.5 Per-rank concurrency model (threads, streams, pools)</h3>
+<ul>
+<li><strong>Network I/O threads</strong> (a small pool) drive the transport: send/recv, framing, acks, flow control — async, never blocking compute.</li>
+<li><strong>Compute threads</strong> = #349&#39;s pool, running local kernels; coordinated with the network pool so factorization-style nested parallelism does not oversubscribe cores (ADR-25).</li>
+<li><strong>Streams</strong> are logical ordered queues (comm streams + compute streams); the scheduler maps independent ops to different streams to realize overlap (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-10">I10</a>).</li>
+<li><strong>The executor thread</strong> walks the DAG, posts ready ops to streams, and tracks completion (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-11">I11</a>).</li>
+<li><strong>The failure-detector thread</strong> sends/receives heartbeats out-of-band (its own control stream) so a busy data plane never delays detection (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-12">I12</a>).</li>
+<li>Synchronization: per-stream order is implicit; cross-stream order is <em>only</em> via explicit DAG dependencies (<code>CollHandle::wait</code>) — no hidden global locks on the data path (principle 9).</li>
+<li>This separation (I/O ≠ compute ≠ scheduling ≠ detection) is what lets communication and computation truly overlap.</li>
+</ul>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Mesh, Sharding, Collectives, Execution</h2>
+<h3 id="sec-8-1">8.1 Device mesh</h3>
+<ul>
+<li>A <code>DeviceMesh</code> is an n-dimensional grid of ranks with <strong>named axes</strong>, e.g. <code>{&quot;data&quot;:4, &quot;model&quot;:2}</code> over 8 ranks.</li>
+<li>Rank <code>r</code> has mesh coordinates <code>(r // 2, r % 2)</code> (row-major over axes).</li>
+<li>Named axes let a <code>ShardSpec</code> say &quot;shard tensor dim 0 over the <code>data</code> axis&quot; without hardcoding rank arithmetic (Mesh-TF model).</li>
+<li>A collective runs over a <strong>subset of axes</strong> (a &quot;process group&quot; = the ranks sharing all <em>other</em> coordinates), e.g. allreduce over <code>model</code> = each <code>data</code>-row reduces independently.</li>
+</ul>
+<h3 id="sec-8-2">8.2 Sharding spec (the type)</h3>
+<ul>
+<li><code>ShardSpec</code> maps each tensor dimension to one of: a <strong>mesh axis</strong> (sharded — the dim is split across those ranks), <strong>Replicated</strong> (every rank has the full dim), or <strong>Partial(op)</strong> (each rank holds a partial reduction-pending value, e.g. after a local contraction, awaiting allreduce).</li>
+<li>Example: tensor <code>[1024, 512]</code>, mesh <code>{&quot;data&quot;:4,&quot;model&quot;:2}</code>, spec <code>[data, Replicated]</code> → each rank holds <code>[256, 512]</code>.</li>
+<li>Validity (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-2">I2</a>): a sharded dim&#39;s size must be divisible by the mesh-axis size; each dim maps to ≤ 1 axis.</li>
+<li><code>Partial</code> is the key insight: distributed contraction produces partial sums that <em>must</em> be resolved by a collective before the value is &quot;real&quot; replicated/sharded data.</li>
+</ul>
+<h3 id="sec-8-3">8.3 Resharding (the partitioner&#39;s job)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From → To</th>
+<th>Collective inserted</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Sharded(axis) → Replicated</td>
+<td><strong>allgather</strong> over axis</td>
+</tr>
+<tr>
+<td>Replicated → Sharded(axis)</td>
+<td>local <strong>slice</strong> (no comm)</td>
+</tr>
+<tr>
+<td>Partial(sum) → Replicated</td>
+<td><strong>allreduce</strong> over axis</td>
+</tr>
+<tr>
+<td>Partial(sum) → Sharded(axis)</td>
+<td><strong>reduce-scatter</strong> over axis</td>
+</tr>
+<tr>
+<td>Sharded(axis A) → Sharded(axis B)</td>
+<td><strong>all-to-all</strong> (axis swap)</td>
+</tr>
+<tr>
+<td>Replicated → Partial</td>
+<td>(illegal; partial only arises from compute)</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>The partitioner walks the op graph, infers each op&#39;s output sharding from its inputs (propagation rules), and where an op needs an operand in a different spec than it currently has, <strong>inserts the resharding collective</strong> (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-3">I3</a>). This is GSPMD&#39;s core loop.</li>
+</ul>
+<h3 id="sec-8-4">8.4 Collective algorithms + cost model</h3>
+<ul>
+<li><strong>α–β (Hockney) model:</strong> a message of <code>n</code> bytes costs <code>α + β·n</code> (α = latency, β = 1/bandwidth). Reductions add <code>γ·n</code> compute.</li>
+<li><strong>Ring allreduce:</strong> reduce-scatter (N−1 steps, each sends <code>D/N</code>) + allgather (N−1 steps) → moves <code>2(N−1)/N·D</code> bytes/rank, time ≈ <code>2(N−1)·α + 2(N−1)/N·D·β</code>. <strong>Bandwidth-optimal</strong> (Patarasuk–Yuan); latency grows with N → bad for small D.</li>
+<li><strong>Recursive halving-doubling (RHD) allreduce:</strong> <code>log₂N</code> steps → latency <code>≈ 2·log₂N·α + 2(N−1)/N·D·β</code>. <strong>Latency-optimal</strong>; best for small D, power-of-two N.</li>
+<li><strong>Tree broadcast/reduce:</strong> <code>log₂N</code> latency.</li>
+<li><strong>Bruck / all-to-all:</strong> <code>log₂N</code> steps (small) or direct (large).</li>
+<li><strong>Selection:</strong> crossover where <code>ring_time = rhd_time</code> → small msgs RHD/tree, large msgs ring (the cost model computes it, ADR-driven).</li>
+</ul>
+<h3 id="sec-8-5">8.5 Worked allreduce (ring, N=4, D=4 chunks)</h3>
+<pre class="diagram"><code>Each rank splits its buffer into N=4 chunks. Reduce-scatter phase (3 steps): rank r sends chunk
+(r−step) to (r+1), adds received chunk → after 3 steps each rank owns the full sum of one chunk.
+Allgather phase (3 steps): circulate the completed chunks → all ranks have all reduced chunks.
+Bytes/rank moved = 2·(3/4)·D = 1.5D. Result identical on every rank (I5).</code></pre>
+<h3 id="sec-8-6">8.6 Execution: op DAG, streams, overlap</h3>
+<ul>
+<li>A program is an <strong>op DAG</strong>: local ops (<code>matmul</code>, <code>add</code>, …) + inserted collectives, with data dependencies.</li>
+<li>The scheduler assigns ops to <strong>streams</strong> (independent ordered queues); ops on different streams run concurrently if no dependency links them.</li>
+<li><strong>Overlap:</strong> issue a collective on a comm stream, then run independent compute on a compute stream while it&#39;s in flight; the dependency edge forces the consumer to wait for both. Hides comm behind compute (principle 4).</li>
+<li>Determinism (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-6">I6</a>): the DAG topological order + fixed reduction order make execution reproducible in deterministic mode.</li>
+</ul>
+<h3 id="sec-8-7">8.7 Wire protocol (transport)</h3>
+<ul>
+<li>Frame: <code>[magic | version | type | stream_id | seq | length | checksum | payload]</code>.</li>
+<li>Types: <code>Rendezvous</code> (sender/receiver match a transfer), <code>DataChunk</code>, <code>Ack</code>, <code>Credit</code> (flow control), <code>Control</code> (barrier, heartbeat), <code>Bye</code>.</li>
+<li>Reliability: per-stream sequence numbers + acks; checksum detects corruption (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-7">I7</a>); retransmit on loss (over TCP, mostly for completeness/RDMA-future).</li>
+<li>Flow control: credit-based; in-flight bytes ≤ window (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-8">I8</a>) → backpressure.</li>
+</ul>
+<h3 id="sec-8-8">8.8 State machines</h3>
+<ul>
+<li><strong>Rank lifecycle:</strong> <code>Bootstrapping → Joined(rank,world) → Running → {Draining → Exited | Failed}</code>.</li>
+<li><strong>Collective:</strong> <code>Posted → (algorithm steps) → Complete</code>; on peer failure → <code>Aborted</code>.</li>
+<li><strong>Connection:</strong> <code>Connecting → Established → {Closing → Closed | Broken}</code>; broken → failure detector.</li>
+</ul>
+<h3 id="sec-8-9">8.9 Edge / failure-path examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Expected</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ranks disagree on collective args</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-1">I1</a> mismatch → abort with diagnostic (not deadlock)</td>
+</tr>
+<tr>
+<td>sharded dim not divisible by axis</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-2">I2</a> → reject at <code>ShardSpec::validate</code></td>
+</tr>
+<tr>
+<td>a rank dies mid-allreduce</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-12">I12</a> detect within <code>k·heartbeat</code> → fail-stop, clean abort</td>
+</tr>
+<tr>
+<td>slow receiver</td>
+<td>flow control backpressures sender (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-8">I8</a>), no OOM</td>
+</tr>
+<tr>
+<td>message corruption</td>
+<td>checksum catch (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-7">I7</a>) → retransmit</td>
+</tr>
+<tr>
+<td>world_size=1</td>
+<td>every collective is a no-op; result == oracle (principle 14)</td>
+</tr>
+<tr>
+<td>non-power-of-2 N with RHD</td>
+<td>fall back to ring or a 3-2 elimination step</td>
+</tr>
+<tr>
+<td>NaN in reduction</td>
+<td>propagates per IEEE; deterministic mode still reproducible</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-10">8.10 Worked example — tensor (model) parallelism via SUMMA</h3>
+<ul>
+<li>Goal: <code>Y = X · W</code> where <code>W [K,M]</code> is too big for one rank; shard <code>W</code> over the <code>model</code> mesh axis.</li>
+<li>Mesh <code>{&quot;model&quot;:P}</code>; <code>W</code> spec <code>[Replicated, Sharded(model)]</code> → rank <code>p</code> holds <code>W[:, p·M/P : (p+1)·M/P]</code>.</li>
+<li><code>X</code> is <code>Replicated</code>; each rank computes <code>Y_p = X · W_p</code> (local #349 GEMM) → <code>Y</code> is <code>[Replicated, Sharded(model)]</code> (no comm for the forward column-parallel matmul).</li>
+<li>The <em>next</em> layer&#39;s row-parallel matmul produces <code>Partial(sum)</code> → the partitioner inserts an <strong>allreduce</strong> over <code>model</code> (the Megatron pattern: one allreduce per transformer block in forward, one in backward).</li>
+<li>Contrast with <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#sec-3-4">§3.4</a> data parallelism: data-parallel shards the <em>batch</em> and allreduces <em>gradients</em>; model-parallel shards the <em>weights</em> and allreduces <em>activations</em> — both are <code>ShardSpec</code> + inserted collectives over different mesh axes.</li>
+<li>Combined (2-D mesh <code>{&quot;data&quot;:N,&quot;model&quot;:P}</code>): both patterns compose — the partitioner handles each axis independently. This is how #115 would express 3-D parallelism on top of this runtime.</li>
+</ul>
+<h3 id="sec-8-11">8.11 Collective lifecycle sequence (ring allreduce, async)</h3>
+<pre class="diagram"><code>rank r                          transport                       peer (r±1)
+  │ post_all_reduce(buf) ──────►│                                  │
+  │   arg-hash exchange (I1) ──►│ ── control ──────────────────►   │  (mismatch → abort, not deadlock)
+  │ ◄─ CollHandle{id,stream}    │                                  │
+  │ … independent compute …     │   reduce-scatter: N−1 steps      │
+  │                             │   send chunk(r-step)/recv ◄────► │  (flow-controlled, I8; checksummed, I7)
+  │                             │   local reduce (fixed order I6)  │
+  │                             │   allgather: N−1 steps ◄───────► │
+  │ wait(handle) ──────────────►│   (blocks until last step acked) │
+  │ ◄─ Ok (buf now reduced) ────│   cross-rank hash == (I5)        │</code></pre>
+<ul>
+<li>Steps pipeline (step k+1 overlaps k&#39;s reduce); the failure detector (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-12">I12</a>) bounds any stalled step; <code>CollTrace</code> records bytes/bandwidth/overlap on completion.</li>
+</ul>
+<h3 id="sec-8-12">8.12 Determinism — what is reproducible, and what is not</h3>
+<ul>
+<li><strong>Floating-point reduction is not associative</strong>, so a sum&#39;s result depends on the <em>order</em> of addition. Ring and RHD sum in different topology-determined orders → results differ at the last bits (within the error bound, principle 7).</li>
+<li><strong>Default mode:</strong> results are within the documented numeric bound but <strong>not bit-identical across world sizes / algorithms</strong> — honest, and matches #349&#39;s contract (assert bounds, not bits).</li>
+<li><strong>Deterministic mode (<code>JobConfig.deterministic</code>):</strong> the runtime reduces in a single <strong>canonical order</strong> (e.g. always rank-ascending tree) regardless of the chosen transport algorithm → <strong>bit-identical across runs and world sizes</strong> (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-6">I6</a>), at a measured performance cost (less overlap/pipelining freedom).</li>
+<li><strong>Cross-rank identity is always required</strong> (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-5">I5</a>): within a single run, every rank must end a collective with the <em>same bits</em> — this is enforced by algorithm symmetry + a cross-rank hash check, independent of det-mode.</li>
+<li><strong>NaN/Inf</strong> propagate per IEEE in both modes; det-mode keeps even NaN-position reproducible.</li>
+<li><strong>Use cases:</strong> det-mode for debugging, regression golden hashes, and reproducible research; default mode for production throughput.</li>
+</ul>
+<h3 id="sec-8-13">8.13 Bootstrap &amp; rendezvous protocol</h3>
+<ul>
+<li>Every rank starts with the <strong>coordinator address</strong> + the expected <code>world_size</code> + the <code>mesh</code> shape (from <code>JobConfig</code>/env, set by the launcher).</li>
+<li><strong>Phase 1 (register):</strong> each rank connects to the coordinator and registers <code>(host, listen_port)</code>; the coordinator assigns a unique <code>rank ∈ [0,world_size)</code> once all have arrived (or a timeout fires → fail).</li>
+<li><strong>Phase 2 (exchange):</strong> the coordinator broadcasts the full <code>rank → (host,port)</code> table; ranks open peer connections lazily (on first communication) or eagerly per a ring/mesh neighbor set.</li>
+<li><strong>Phase 3 (agree):</strong> an all-agree check confirms every rank sees the same <code>world_size</code>/mesh/version (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-13">I13</a>/<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/reliability/#inv-14">I14</a>); any disagreement → abort (no split-brain start).</li>
+<li><strong>Scaling:</strong> all-to-coordinator is O(N); for large N the table broadcast uses a tree, targeting &lt; 5 s at N ≤ 1024.</li>
+<li>After bootstrap the coordinator leaves the data path entirely (it only participates again in failure notification, <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#p-10">P10</a>) — the data plane is pure peer-to-peer (principle 9).</li>
+</ul>
+<h3 id="sec-8-14">8.14 All-to-all and the MoE dispatch pattern (a key consumer)</h3>
+<ul>
+<li><strong>All-to-all</strong> is the collective where each rank sends a <em>distinct</em> chunk to every other rank — the inverse of allgather (which sends the <em>same</em> data to all).</li>
+<li>It implements <strong>resharding across axes</strong> (<code>Sharded(A) → Sharded(B)</code>, <a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#sec-8-3">§8.3</a>): re-laying-out a tensor so a different dimension is the sharded one.</li>
+<li>The motivating consumer is <strong>#325 Mixture-of-Experts</strong>: tokens are routed to experts that live on different ranks. The dispatch is an all-to-all (send each token to its expert&#39;s rank), expert compute is local (#349), then a second all-to-all combines results back.</li>
+<li>Algorithm choice (<a class="cite" href="/system-design-blueprints/systems/distributed-tensor-runtime/architecture/#p-4">P4</a>): <strong>Bruck</strong> (<code>log₂N</code> steps, more bytes) for small per-rank chunks; <strong>direct</strong> (N−1 sends, minimal bytes) for large chunks — selected by the cost model.</li>
+<li>Imbalance hazard: MoE routing is data-dependent → some experts (ranks) receive far more tokens (load imbalance) → the all-to-all becomes straggler-bound. The runtime exposes per-rank byte counts so the consumer can detect and rebalance (capacity factor) — but the <em>policy</em> lives in #325, not here.</li>
+<li>This is why all-to-all is a first-class collective (not an afterthought): an entire class of models depends on it, and it stresses the transport (N² communication pattern) and the failure/straggler paths harder than allreduce.</li>
+</ul>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>SPMD: one program, explicit data placement.</strong> Every rank runs the same graph; the runtime makes &quot;which rank holds which shard&quot; explicit via <code>ShardSpec</code>. <em>Violation:</em> implicit/rank-conditional logic → unscalable, undebuggable code.</li><li id="p-2"><strong>Collectives compose from point-to-point; allreduce = reduce-scatter + allgather.</strong> Build the zoo from a small primitive set. <em>Violation:</em> monolithic per-collective code → no reuse, no algorithm-swapping.</li><li id="p-3"><strong>Algorithm selection is cost-model-driven, never hardcoded.</strong> Ring for bandwidth (large msgs), tree/RHD for latency (small msgs); pick via α–β. <em>Violation:</em> one algorithm always → 10× slow on the wrong message size.</li><li id="p-4"><strong>Overlap communication with computation by default.</strong> Streams + dependency scheduling hide comm behind compute. <em>Violation:</em> serial compute-then-communicate → ~2× slowdown on comm-bound workloads.</li><li id="p-5"><strong>Backpressure everywhere in the transport.</strong> Bounded buffers, flow control, credit-based sends. <em>Violation:</em> unbounded send queues → OOM under a slow receiver; latency collapse.</li><li id="p-6"><strong>Sharding is a type; the partitioner reasons about it.</strong> Mismatches are <em>resolved by inserting collectives</em>, never by silent gathers. <em>Violation:</em> hidden full-replication → memory blowup, accidental O(N) traffic.</li><li id="p-7"><strong>Determinism on demand: reductions have a fixed canonical order in deterministic mode.</strong> <em>Violation:</em> topology-dependent reduction order presented as reproducible → unrepeatable training, untestable.</li><li id="p-8"><strong>Fail-stop with bounded detection; never hang silently.</strong> A dead/slow rank is detected within a bound and the job aborts cleanly with diagnostics. <em>Violation:</em> unbounded waits → a job hung for hours on one dead rank.</li><li id="p-9"><strong>The data plane is peer-to-peer; coordination is minimal and explicit.</strong> Only bootstrap/membership touches the coordinator; data never routes through a central node. <em>Violation:</em> central data routing → bottleneck, single point of failure.</li><li id="p-10"><strong>Delegate local compute to #349; the runtime owns placement and movement, not arithmetic.</strong> <em>Violation:</em> re-implementing GEMM → drift, wasted effort, worse numerics.</li><li id="p-11"><strong>Observability of every byte moved and every collective.</strong> Emit per-collective algorithm, bytes, duration, achieved bandwidth, overlap %. <em>Violation:</em> opaque collectives → can&#39;t diagnose comm-bound jobs.</li><li id="p-12"><strong>Stable wire compatibility.</strong> The frame/protocol format is versioned; mixed-version ranks negotiate or refuse. <em>Violation:</em> silent protocol drift → corruption across a rolling upgrade.</li><li id="p-13"><strong>Bounded memory: stream collectives in chunks.</strong> Ring buffers sized O(chunk), not O(message). <em>Violation:</em> materializing full buffers → OOM on large tensors.</li><li id="p-14"><strong>Correctness anchored to the single-process oracle.</strong> <code>world_size=1</code> must produce the reference result (within numeric bounds) for every program. <em>Violation:</em> no oracle → distributed bugs are undebuggable.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

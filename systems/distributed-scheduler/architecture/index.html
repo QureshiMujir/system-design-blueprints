@@ -1,0 +1,483 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Scheduler (Kubernetes Scheduler-like) — Architecture · Engineering Blueprints</title><meta name="description" content="Distributed Scheduler (Kubernetes Scheduler-like), hld: §3 overview + §8 domain model. Build, from scratch in Python, a cluster scheduler in the tradition of the Kubernetes scheduler: a control-plane process that watches a stream of pending workloads (pods/tasks carrying resource…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/distributed-scheduler/">Distributed Scheduler (Kubernetes Scheduler-like)</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Distributed Scheduler (Kubernetes Scheduler-like)</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Python</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~28 weeks</li> <li>2,423 lines</li> <li>blueprint #200</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-scheduler/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-scheduler/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-scheduler/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-scheduler/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-scheduler/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-scheduler/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-scheduler/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-scheduler/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-scheduler/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-scheduler/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Scheduler (Kubernetes Scheduler-like) — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                        +---------------------------+
+                        |   Pending Workload Queue    |
+                        |  (priority + backoff, I6)   |
+                        +--------------+--------------+
+                                       |
+                                       v
+      +--------------------------------------------------------------+
+      |                    Scheduling Cycle (per pod)                  |
+      |  PreFilter -&gt; Filter -&gt; PostFilter -&gt; PreScore -&gt; Score -&gt;     |
+      |  NormalizeScore -&gt; Reserve -&gt; Permit -&gt; PreBind                |
+      +----------------+---------------------------+-------------------+
+                        |                           |
+                        v                           v
+      +----------------------------+   +--------------------------------+
+      | Constraint Evaluators       |   | Priority / Preemption Engine   |
+      | affinity, anti-affinity,    |   | victim selection (I4)          |
+      | taints/tolerations,         |   +--------------------------------+
+      | topology spread             |
+      +----------------------------+
+                        |
+                        v
+      +----------------------------+   +--------------------------------+
+      | Gang Scheduler               |   | Fairness / Quota Manager (DRF) |
+      | all-or-nothing admit (I5)    |   +--------------------------------+
+      +----------------------------+
+                        |
+                        v
+      +--------------------------------------------------------------+
+      |               Cluster-State Cache / Snapshot                   |
+      |         node inventory, allocatable, reservations               |
+      +--------------------------------+-------------------------------+
+                                       | watch
+= = = = = = = = = = = = = = = = = = = | = = = = = = = = = = = = = = = =  &lt;-- watch/bind boundary
+                                       | bind (CAS)
+                        +--------------v--------------+
+                        |     Bind Executor             |
+                        |  optimistic concurrency (I3)  |
+                        +--------------+----------------+
+                                       v
+                        +-------------------------------+
+                        |   Cluster State Store (shared)  |
+                        +-------------------------------+
+                                       ^
+                                       | reads/heartbeats
+                        +--------------+----------------+
+                        |         Descheduler            |
+                        +--------------------------------+</code></pre>
+<p>Pending Workload Queue: holds every unscheduled workload ordered by QueueSort priority;
+backoff on failed attempts prevents hot-looping on an unschedulable pod (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-6">I6</a>). Scheduling
+Cycle: the framework&#39;s extension-point pipeline (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/architecture/#sec-8">§8</a>) — filters are hard gates, scores are
+summed soft preferences, only Bind mutates shared state (P1). Constraint Evaluators:
+implement the predicate catalogue — node/pod affinity, anti-affinity, taints/tolerations,
+topology spread — each a boolean satisfaction check against the snapshot. Priority /
+Preemption Engine: activates on PostFilter failure when no node fits; searches for lower-
+priority victims whose eviction would admit the pending pod without violating a
+disruption-budget-style constraint (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-4">I4</a>). Gang Scheduler: holds partial admissions for a
+multi-member workload group until all members can be placed simultaneously, or releases
+all reservations (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-5">I5</a>). Fairness / Quota Manager: tracks each tenant&#39;s dominant resource
+share and blocks scheduling that would violate max-min fairness or a hard quota. Cluster-
+State Cache / Snapshot: a point-in-time, possibly-stale materialized view of node
+inventory and reservations that the cycle reads from — the watch/bind boundary (marked
+above) is the line the framework crosses to become authoritative: reads happen against the
+stale snapshot, writes happen only through the Bind Executor&#39;s CAS path (Omega). Bind
+Executor: commits a <code>Binding</code> to the state store using optimistic concurrency — commit or
+fail-and-requeue, never partial (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-3">I3</a>). Cluster State Store: the shared, externally-
+replicated source of truth for nodes and bindings. Descheduler: an out-of-cycle process
+that identifies already-bound pods worth relocating (e.g., for fragmentation cleanup) and
+re-queues them; it never bypasses the same filter/score/bind pipeline.</p>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<p>Extension points (the Kubernetes Scheduling Framework KEP):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Extension Point</th>
+<th>Purpose</th>
+<th>Hard/Soft</th>
+<th>Mutates State</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>QueueSort</td>
+<td>orders the pending queue</td>
+<td>ordering</td>
+<td>no</td>
+</tr>
+<tr>
+<td>PreFilter</td>
+<td>precompute/reject cheap-checkable pods</td>
+<td>hard (may abort)</td>
+<td>no</td>
+</tr>
+<tr>
+<td>Filter</td>
+<td>per-node hard predicate</td>
+<td>hard</td>
+<td>no</td>
+</tr>
+<tr>
+<td>PostFilter</td>
+<td>runs when no node passes Filter (e.g., trigger preemption)</td>
+<td>hard</td>
+<td>no (may propose)</td>
+</tr>
+<tr>
+<td>PreScore</td>
+<td>precompute shared scoring inputs</td>
+<td>soft</td>
+<td>no</td>
+</tr>
+<tr>
+<td>Score</td>
+<td>per-node soft preference, 0-100</td>
+<td>soft</td>
+<td>no</td>
+</tr>
+<tr>
+<td>NormalizeScore</td>
+<td>rescale/combine scores across plugins</td>
+<td>soft</td>
+<td>no</td>
+</tr>
+<tr>
+<td>Reserve</td>
+<td>tentatively hold resources for the chosen node</td>
+<td>hard</td>
+<td>yes (reservation only)</td>
+</tr>
+<tr>
+<td>Permit</td>
+<td>allow/hold/deny before bind (e.g., gang wait)</td>
+<td>hard</td>
+<td>no</td>
+</tr>
+<tr>
+<td>PreBind</td>
+<td>last checks/setup before commit</td>
+<td>hard</td>
+<td>no</td>
+</tr>
+<tr>
+<td>Bind</td>
+<td>commit the binding to the state store</td>
+<td>hard</td>
+<td>yes (authoritative)</td>
+</tr>
+<tr>
+<td>PostBind</td>
+<td>telemetry/cleanup after commit</td>
+<td>none</td>
+<td>no</td>
+</tr>
+</tbody></table></div>
+<p>Resource model:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Definition</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Request</td>
+<td>minimum resource a pod is guaranteed</td>
+</tr>
+<tr>
+<td>Limit</td>
+<td>maximum resource a pod may consume (may exceed request; overcommit)</td>
+</tr>
+<tr>
+<td>Allocatable</td>
+<td>node capacity minus reserved-for-system overhead</td>
+</tr>
+<tr>
+<td>Extended resource</td>
+<td>non-CPU/memory countable resource (e.g., GPU) tracked identically to CPU/memory</td>
+</tr>
+<tr>
+<td>Overcommit ratio</td>
+<td>sum(limits)/allocatable; greater than 1.0 is permitted, sum(requests)/allocatable must stay less or equal to 1.0 (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-2">I2</a>)</td>
+</tr>
+</tbody></table></div>
+<p>Constraint catalogue (each a predicate over <code>(pod, node, snapshot)</code>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Constraint</th>
+<th>Predicate</th>
+<th>Worked Example</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Node selector/affinity</td>
+<td>pod&#39;s required node-label expression matches node labels</td>
+<td>pod requires <code>zone=us-east-1a</code>; node labeled <code>zone=us-east-1a</code> -&gt; pass</td>
+</tr>
+<tr>
+<td>Pod affinity</td>
+<td>pod must co-locate with pods matching a label selector within a topology domain</td>
+<td>pod requires affinity to <code>app=cache</code> within <code>zone</code>; node&#39;s zone already hosts <code>app=cache</code> -&gt; pass</td>
+</tr>
+<tr>
+<td>Pod anti-affinity</td>
+<td>pod must not co-locate with matching pods within a topology domain</td>
+<td>pod requires anti-affinity to <code>app=web</code> within <code>hostname</code>; node already hosts <code>app=web</code> -&gt; fail</td>
+</tr>
+<tr>
+<td>Taints/tolerations</td>
+<td>node taint excludes pod unless pod tolerates it</td>
+<td>node tainted <code>dedicated=gpu:NoSchedule</code>; pod lacks matching toleration -&gt; fail (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-10">I10</a>)</td>
+</tr>
+<tr>
+<td>Topology spread</td>
+<td>max skew of matching-pod count across a topology domain bounded by <code>maxSkew</code></td>
+<td>3 zones, 6 replicas, <code>maxSkew=1</code> -&gt; each zone gets 2, a 4th placement into an already-2-zone would violate skew -&gt; fail</td>
+</tr>
+</tbody></table></div>
+<p>Scoring/priority functions (0-100 per node, summed per plugin weight):</p>
+<ul>
+<li>Least-requested: <code>score = 100 * (1 - sum(requested)/allocatable)</code>; favors emptier nodes.</li>
+<li>Most-requested: <code>score = 100 * (sum(requested)/allocatable)</code>; favors fuller nodes (bin-
+packing for consolidation).</li>
+<li>Balanced-allocation: <code>score = 100 * (1 - stddev(cpu_frac, mem_frac))</code>; favors nodes whose
+CPU and memory fractional usage are close, avoiding one-resource fragmentation.</li>
+<li>Inter-pod-affinity score: sums a weight for each already-scheduled pod on the node that
+matches a soft (preferred) affinity term.</li>
+</ul>
+<p>Worked node-scoring example: node A allocatable 8 CPU, requested 2 CPU (least-requested
+score = 100*(1-0.25) = 75); node B allocatable 8 CPU, requested 6 CPU (least-requested
+score = 100*(1-0.75) = 25); with weight 1.0 on least-requested, node A wins the score
+stage (before affinity plugins add their weighted contributions).</p>
+<p>Dominant Resource Fairness equation: for tenant <code>t</code> with total demand vector <code>d_t</code> and
+cluster capacity vector <code>C</code>, the dominant share is <code>s_t = max_r(d_t[r] / C[r])</code>; DRF
+allocates so that all tenants converge to equal dominant share. Worked example: cluster
+capacity <code>&lt;CPU:9, MEM:18&gt;</code>; tenant A&#39;s tasks each need <code>&lt;1 CPU, 4 MEM&gt;</code> (dominant resource
+MEM, share per task = 4/18 = 0.222); tenant B&#39;s tasks each need <code>&lt;3 CPU, 1 MEM&gt;</code> (dominant
+resource CPU, share per task = 3/9 = 0.333); DRF equalizes dominant shares by granting
+tenant A 3 tasks (share 0.667 of MEM... normalized per DRF&#39;s iterative water-filling) and
+tenant B 2 tasks, converging both dominant shares near 0.667 within the multi-resource
+constraint set — the mechanism is iterative allocation of the next unit to whichever
+tenant currently has the lowest dominant share.</p>
+<p>Priority-and-preemption model, victim-selection algorithm (named steps):</p>
+<ol>
+<li>PostFilter triggers when Filter finds zero feasible nodes for a pod above priority
+threshold <code>P_min</code>.</li>
+<li>For each node, compute the candidate victim set: pods with priority strictly less than
+the pending pod&#39;s priority.</li>
+<li>Simulate removal of victims in ascending-priority order until the pending pod would fit
+(<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-2">I2</a> satisfied); reject any victim set that would violate a disruption-budget-style
+constraint (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-4">I4</a>).</li>
+<li>Choose the node minimizing total victim &quot;cost&quot; (fewest evictions, then lowest summed
+victim priority).</li>
+<li>Emit eviction signals for the chosen victim set; do not bind the pending pod until
+victims&#39; resources are confirmed released.</li>
+</ol>
+<p>Worked preemption: pending pod priority 100 needs 4 CPU; node has pods at priority 50 (2
+CPU) and priority 20 (2 CPU) and no free capacity; removing both frees 4 CPU and neither
+violates the disruption budget -&gt; victims = {priority-50 pod, priority-20 pod}; a
+neighboring node with a single priority-90 pod using 4 CPU is rejected as a candidate
+because priority 90 is not strictly less than nothing-fits-without-eviction-of-a-near-peer
+consideration is moot — priority 90 &lt; 100 so it is a legal victim candidate too, but the
+victim-cost comparison (fewer evictions: 1 vs 2) selects the second node instead.</p>
+<p>Gang/batch scheduling: a <code>Gang</code> groups <code>N</code> pods; the Permit extension point holds each
+member in &quot;Wait&quot; until all <code>N</code> have passed Reserve, then releases all to Bind together; if
+the gang-scheduling wait (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/numbers/#sec-4">§4</a>) elapses first, all holds release and all members requeue
+(<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-5">I5</a>).</p>
+<p>Optimistic-concurrency bind sequence (Omega-style):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Scheduler</td>
+<td>reads <code>ClusterSnapshot</code> at epoch E</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Scheduler</td>
+<td>computes decision: pod P -&gt; node N</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Bind Executor</td>
+<td>issues CAS(node N, expected_epoch=E, new_binding=P) to state store</td>
+</tr>
+<tr>
+<td>4a</td>
+<td>State store</td>
+<td>epoch still E -&gt; commit, epoch advances to E+1</td>
+</tr>
+<tr>
+<td>4b</td>
+<td>State store</td>
+<td>epoch already E+1 (another bind landed first) -&gt; reject</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Bind Executor</td>
+<td>on reject, requeue P with backoff (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-6">I6</a>), re-read snapshot next cycle</td>
+</tr>
+</tbody></table></div>
+<p>Worked bind-conflict-and-retry: two scheduler replicas both decide to bind pod P1 and P2
+onto node N at epoch E using its last 2 free CPUs; P1&#39;s CAS lands first, epoch -&gt; E+1; P2&#39;s
+CAS is rejected (stale epoch); P2 requeues, re-snapshots at E+1, finds N full, filters to a
+different node, binds successfully at epoch E+2.</p>
+<p>Scheduling-cycle state machine:</p>
+<pre class="diagram"><code>Pending --QueueSort--&gt; Filtering --all pass--&gt; Scoring --&gt; Reserved --Permit ok--&gt;
+  PreBind --&gt; Bound
+Filtering --none pass--&gt; PostFilter --victims found--&gt; Preempting --&gt; requeued (backoff)
+Filtering --none pass--&gt; PostFilter --no victims--&gt; Unschedulable --&gt; requeued (backoff)
+Reserved --Permit deny/timeout (gang)--&gt; requeued (backoff), reservation released
+PreBind --bind CAS reject--&gt; requeued (backoff)
+Bound --descheduler flags--&gt; requeued (voluntary, low priority)</code></pre>
+<p>Malformed/hard examples: (1) an unschedulable pod — zero nodes pass Filter, no preemption
+candidate exists, reason recorded and requeued (<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-6">I6</a>); (2) a preemption that would violate a
+disruption-budget-style constraint — victim search step 3 rejects the node, tries the next;
+(3) a bind conflict — see worked example above; (4) a gang that cannot fit — <a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-5">I5</a> releases
+all holds; (5) resource-fragmentation deadlock — many nodes each have some but not enough
+of every resource type a pod needs (classic multi-resource fragmentation; Tetris/DRF
+motivate multi-resource-aware scoring to reduce this); (6) an affinity cycle — pod A
+requires affinity to pod B, pod B requires affinity to pod A, neither yet scheduled -&gt;
+both remain Pending until an operator breaks the cycle or one is scheduled without the
+constraint satisfied on first pass (documented as an unschedulable reason, not a deadlock,
+because <a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-6">I6</a> guarantees requeue rather than a stuck lock).</p>
+<p>Failure-path example: scheduler crashes between Reserve and Bind; on restart the new
+leader rebuilds its snapshot from the state store, finds no committed binding for the
+reserved pod, and the reservation&#39;s TTL expiration (tied to backoff, <a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-6">I6</a>) releases it back
+to Pending — no resource is permanently leaked because the store, not the scheduler
+process, is authoritative (P9/<a class="cite" href="/system-design-blueprints/systems/distributed-scheduler/reliability/#inv-3">I3</a>).</p>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

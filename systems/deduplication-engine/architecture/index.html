@@ -1,0 +1,307 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Deduplication Engine — Architecture · Engineering Blueprints</title><meta name="description" content="Deduplication Engine, hld: §3 overview + §8 domain model. The Deduplication Engine is a content-addressed storage layer that sits between a producer (a backup client, a primary file system, an object-store ingest path) and a chunk store. It splits an input…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/deduplication-engine/">Deduplication Engine</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Deduplication Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~28 weeks</li> <li>2,658 lines</li> <li>blueprint #109</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/deduplication-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/deduplication-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/deduplication-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/deduplication-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/deduplication-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/deduplication-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/deduplication-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/deduplication-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/deduplication-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/deduplication-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Deduplication Engine — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                 producer (backup tool / FS / object store)
+                                  |
+                            stream bytes
+                                  |
+                   +--------------v--------------+
+                   |  dedup-chunker (dispatch)   |  FastCDC (default, §13)
+                   |  variable-size chunks       |  Rabin (alt, §20)
+                   |  min 16 KiB / avg 64 KiB    |
+                   |  max 256 KiB                |
+                   +--------------+--------------+
+                                  |
+                   +--------------v--------------+
+                   |  dedup-hash (SHA-256)       |
+                   |  fingerprint = address (I1) |
+                   +--------------+--------------+
+                                  |
+         +------------------------+------------------------+
+         |                                                  |
+   dedup-index (B-tree, rank-67 + WAL rank-71)   dedup-store (append-only, §15)
+   fingerprint -&gt; (container, offset)             16 MiB sealed containers
+         |                                                  |
+         +------------------------+------------------------+
+                                  |
+                   +--------------v--------------+
+                   |  dedup-manifest              |  ordered FP list per stream
+                   |  reconstructs the stream     |  sole GC reference set (I5/I6)
+                   +--------------+--------------+
+                                  |
+         +------------------------+------------------------+------------------+
+         |              |               |                  |                  |
+   dedup-gc       dedup-scrub    dedup-compress     dedup-encrypt      dedup-distributed
+   (mark+sweep,   (re-fp every  (zstd, per-chunk,  (chacha20poly1305,  (shard router,
+   ADR-04)        live chunk)   ADR-03/ADR-12)     HKDF, ADR-06/23)    DFS/S3, §23)</code></pre>
+<p>Six boxes, one paragraph each.</p>
+<p><strong>dedup-chunker.</strong> Dispatches to FastCDC (default) or Rabin (alternative, LBFS-faithful);
+both implement the <code>Chunker</code> trait (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-11-6">§11.6</a>) and both must satisfy the edit-invariance
+conformance property (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-13-5">§13.5</a>, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-20-4">§20.4</a>). The chunker choice is a pool-wide, not per-stream,
+decision (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-20-3">§20.3</a>) — its output is not dedup-compatible across chunkers.</p>
+<p><strong>dedup-hash.</strong> Wraps <code>sha2::Sha256</code>; a fingerprint is the chunk&#39;s address (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-1">P1</a>, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-1">I1</a>). This
+box is the system&#39;s entire correctness anchor: every later box assumes fingerprint
+equality implies byte equality (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-2">I2</a> is the fallback for the day that assumption is
+violated).</p>
+<p><strong>dedup-index + dedup-store.</strong> The index maps fingerprint → <code>(container, offset)</code>;
+persisted via the rank-67 B-tree with rank-71 WAL durability (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-8">ADR-08</a>/09, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-7">I7</a>). The store
+holds chunk bytes in append-only, 16 MiB sealed containers (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-4">P4</a>, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-4">I4</a>) — new writes always
+append; nothing is mutated in place.</p>
+<p><strong>dedup-manifest.</strong> An ordered list of fingerprints reconstructing one producer stream.
+It is itself stored as a chunk (recursive addressing, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#sec-8-3">§8.3</a>) and is the <em>sole</em> reference
+set the GC traces from (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-6">P6</a>, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-5">I5</a>).</p>
+<p><strong>dedup-gc / dedup-scrub / dedup-compress / dedup-encrypt.</strong> Four independent, composable
+layers: GC reclaims unreferenced chunks (mark-and-sweep, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-4">ADR-04</a>); the scrubber re-verifies
+every stored chunk&#39;s fingerprint on a schedule to catch bit-rot (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/build/#sec-19">§19</a>); compression (zstd,
+default) and encryption (ChaCha20-Poly1305, opt-in) stack on the chunk write/read path in
+a fixed order (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-9">P9</a>, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-9">I9</a>, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-3">ADR-03</a>).</p>
+<p><strong>dedup-distributed.</strong> From Phase 11 (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/build/#sec-23">§23</a>) onward, shards the index by fingerprint prefix
+across ingest hosts and layers chunk storage on a DFS (rank 86) or S3-compatible backend;
+absent until then, the system is single-host.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 The chunk/fingerprint/manifest model</h3>
+<p>A <strong>stream</strong> (a file, a backup set, a snapshot) is cut into an ordered sequence of
+<strong>chunks</strong> by content-defined chunking. Each chunk&#39;s <strong>fingerprint</strong> (SHA-256) is its
+address (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-1">P1</a>). The stream is represented by a <strong>manifest</strong>: an ordered list of
+fingerprints plus stream metadata (name, length, parent lineage). A manifest is itself
+stored as a chunk under its own fingerprint — the manifest layer is recursive: a
+&quot;manifest of manifests&quot; (a backup catalog referencing per-file manifests) is a first-
+class object with no separate storage mechanism.</p>
+<h3 id="sec-8-2">8.2 Content-defined chunking</h3>
+<p><strong>FastCDC (default, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/build/#sec-13">§13</a>).</strong> A gear hash <code>h</code> accumulates per byte: <code>h = (h &lt;&lt; 1) + gear[byte]</code>, where <code>gear</code> is a fixed 256-entry table (Xia et al. 2016, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/study/#sec-5">§5</a>). A cut point
+is declared when <code>h &amp; mask == 0</code>; <code>mask</code> narrows below the target average size (biasing
+toward a cut) and widens above it (biasing away from the max) — this is &quot;normalized
+chunking&quot; (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-13-3">§13.3</a>). A forced cut at <code>CHUNK_MAX</code> bounds worst-case chunk size (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-11">I11</a>).</p>
+<p><strong>Rabin (alternative, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/build/#sec-20">§20</a>).</strong> The fingerprint is the input, viewed as a polynomial over
+GF(2), reduced modulo a fixed irreducible degree-64 polynomial (Rabin 1981, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/study/#sec-5">§5</a>). A 48-byte
+rolling window updates the fingerprint by one shift, one XOR, and one table lookup per
+byte (Muthitacharoen et al. 2001). A cut point is declared when the low 13 bits match a
+fixed pattern.</p>
+<p><strong>Chunker state-transition table</strong> (both chunkers share this shape):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>On Event</th>
+<th>Next State</th>
+<th>Emits</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>SCANNING (pos &lt; min)</td>
+<td>byte consumed</td>
+<td>SCANNING</td>
+<td>— (gear/Rabin update skipped, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-13-6">§13.6</a>)</td>
+</tr>
+<tr>
+<td>SCANNING (min ≤ pos &lt; max)</td>
+<td><code>h &amp; mask == 0</code></td>
+<td>CUT</td>
+<td>chunk slice <code>[last_cut, pos]</code></td>
+</tr>
+<tr>
+<td>SCANNING (min ≤ pos &lt; max)</td>
+<td>mask test fails</td>
+<td>SCANNING</td>
+<td>—</td>
+</tr>
+<tr>
+<td>SCANNING (pos == max)</td>
+<td>forced cut</td>
+<td>CUT</td>
+<td>chunk slice <code>[last_cut, max]</code></td>
+</tr>
+<tr>
+<td>CUT</td>
+<td>slice emitted</td>
+<td>SCANNING</td>
+<td>reset <code>h = 0</code>, <code>last_cut = pos</code></td>
+</tr>
+<tr>
+<td>SCANNING</td>
+<td>stream ends, pos &gt; last_cut</td>
+<td>FINAL</td>
+<td>trailing partial chunk</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 The index and manifest recursion — worked example</h3>
+<p>Ingest stream <code>S = &quot;backup/2026-07-24/db.tar&quot;</code>, 200 MiB. FastCDC emits chunks
+<code>c1..c400</code> (~64 KiB average). For each <code>ci</code>: compute <code>fp_i = SHA256(ci)</code>; look up <code>fp_i</code>
+in the index. Suppose <code>c1..c380</code> are new (first-ever bytes) and <code>c381..c400</code> are
+byte-identical to chunks from yesterday&#39;s backup (unchanged tail of the file). The
+engine writes <code>c1..c380</code> to the store and inserts 380 new <code>IndexEntry</code> rows; for
+<code>c381..c400</code> it performs zero writes, only 20 index lookups. The manifest
+<code>M = [fp_1, ..., fp_400]</code> is built, serialized (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-15">ADR-15</a>: length-prefixed fingerprint
+array), and stored as chunk <code>fp_M = SHA256(serialize(M))</code>. <code>IngestReport.dedup_ratio = bytes_in / bytes_stored = 200 MiB / (bytes of c1..c380) ≈ 5.26</code> for this stream in
+isolation (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-10">I10</a>).</p>
+<p>A <strong>backup catalog</strong> referencing 30 such per-file manifests is itself a manifest whose
+&quot;chunks&quot; are <code>[fp_M1, ..., fp_M30]</code> — the recursive case of <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#sec-8-1">§8.1</a>. Dereferencing the
+catalog to reconstruct any file requires: catalog lookup → per-file manifest lookup →
+per-chunk lookups, at most 3 index hops.</p>
+<h3 id="sec-8-4">8.4 Malformed-input example</h3>
+<p>A corrupted container footer (single bit flipped in the CRC32C field, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-15-1">§15.1</a>) is detected
+at container-open time: the footer CRC32C recomputed over the container body will not
+equal the stored value. The container is marked <code>suspect</code>; reads against chunks inside it
+are refused (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-4">I4</a>) until <code>dedup fsck --repair</code> (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-25-1">§25.1</a>) either recovers the container from a
+replica (Phase 11) or the operator accepts the chunk range as lost. A <strong>dangling
+manifest</strong> — one whose fingerprint list contains an <code>fp</code> absent from the index (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-3">I3</a>
+violation, caused by an interrupted ingest, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#t-9">T9</a>/<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#fm-3">FM-3</a>) — is detected by <code>fsck</code>&#39;s manifest-
+dereference scan and quarantined; the manifest is not silently served with holes.</p>
+<h3 id="sec-8-5">8.5 Failure-path example</h3>
+<p>Mid-ingest of <code>S</code> above, the process is killed after chunk <code>c250</code> is <code>fsync</code>&#39;d to the
+active container and its <code>IndexEntry</code> WAL-appended, but before the in-memory manifest
+builder (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-16-2">§16.2</a>) flushes <code>c251</code>. On restart: the store&#39;s forward-scan recovery (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-15-4">§15.4</a>)
+finds the container intact through <code>c250</code>&#39;s bytes (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-4">I4</a> holds); the index WAL replays
+cleanly through <code>c250</code>&#39;s insert (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-7">I7</a>); no manifest for <code>S</code> was ever committed (the
+ingest pipeline commits the manifest strictly after all its chunks, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-16-6">§16.6</a>), so <code>S</code> simply
+does not exist yet — the producer re-ingests <code>S</code> from the start, and <code>c1..c250</code>&#39;s
+identical bytes dedup for free (dedup ratio absorbs the retry cost, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-10">I10</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-1">P1</a> — Fingerprint is identity.</strong> A SHA-256 over a chunk&#39;s bytes is its address, not its location. Tradeoff: collision resistance is assumed, not proven; <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-2">I2</a> is the escape hatch. Operational implication: moving a chunk between containers never changes its identity, only its index entry. Violating it (e.g. trusting a producer-supplied fingerprint) reopens chunk-poisoning (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#t-2">T2</a>).</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-2">P2</a> — Content-defined chunk boundaries.</strong> Boundaries are chosen by a rolling/gear hash hitting a cut-point pattern, not by fixed offsets. Tradeoff: variable chunk sizes complicate container packing. Operational implication: dedup survives inserts/deletes mid-stream. Violating it (fixed-size chunking) collapses dedup ratio on any edited file (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-7">ADR-07</a>).</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-3">P3</a> — Variable chunk sizes within hard bounds.</strong> Min 16 KiB, average 64 KiB, max 256 KiB (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-11">I11</a>). Tradeoff: the min bounds worst-case index growth on a degenerate input; the max bounds worst-case cache-eviction cost. Violating the max (no force-cut) risks an unbounded chunk that overflows the on-disk length field.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-4">P4</a> — The chunk store is append-only.</strong> New chunks append to the active container; sealed containers never mutate (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-4">I4</a>). Tradeoff: reclaiming space requires an explicit compaction pass (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/build/#sec-22">§22</a>), not in-place overwrite. Operational implication: crash recovery is a bounded forward scan, not a whole-structure fsck. Violating it (in-place mutation) destroys the sequential-write property that makes recovery cheap.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-5">P5</a> — The index is on-disk and crash-safe.</strong> Backed by a WAL (rank 71) ahead of a B-tree (rank 67, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-7">I7</a>). Tradeoff: every insert pays one WAL append before the tree mutation. Operational implication: recovery is deterministic replay. Violating it (batched, unsynced writes) breaks the &quot;we never re-store a chunk&quot; guarantee (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-1">I1</a>) on crash.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-6">P6</a> — The manifest is the only reference set.</strong> A chunk is alive iff some manifest reaches it (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-5">I5</a>). Tradeoff: GC must walk the full manifest graph, not consult a cheap counter. Operational implication: deleting a manifest is O(1); reclaiming its exclusive chunks is deferred to the next GC cycle. Violating it (a secondary, independently-mutated liveness table) reintroduces the ref-count drift problem <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-7">P7</a> exists to avoid.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-7">P7</a> — GC is mark-and-sweep, not reference-counted.</strong> Trace from live manifests; sweep the unreached (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-4">ADR-04</a>). Tradeoff: GC pause/cycle cost vs. a ref-count&#39;s O(1) update but corruption-prone concurrent maintenance. Operational implication: GC is a schedulable batch job, not an inline cost on every delete. Violating it under high manifest churn is itself documented as the regime where <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-4">ADR-04</a>&#39;s rejected alternative wins.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-8">P8</a> — Inline vs. post-process is a mode, not a forked code path.</strong> Same chunker, hasher, index, store back both (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-10">ADR-10</a>). Tradeoff: the shared abstraction must express both &quot;dedup before write&quot; and &quot;dedup after write&quot; without branching in the hot loop. Operational implication: one codebase, one conformance suite, two configurations. Violating it (forking) doubles the maintenance and bug surface.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-9">P9</a> — Compression is applied before encryption, never the reverse.</strong> Fixed pipeline order (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-3">ADR-03</a>, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-9">I9</a>). Tradeoff: an untrusted-compressor threat model (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#sec-38">§38</a> Alt 3) cannot use this ordering. Operational implication: the compression-ratio dashboard is meaningful only under this order. Violating it silently collapses the compression ratio to ~1.0 (ciphertext is incompressible).</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-10">P10</a> — Per-chunk AEAD keys derived by HKDF preserve cross-tenant dedup.</strong> Key = <code>HKDF(pool_key, fp)</code> (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-6">ADR-06</a>, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-8">I8</a>). Tradeoff: one HKDF-Expand per chunk vs. a single pool-wide key&#39;s zero marginal cost. Operational implication: tenants sharing a pool key can dedup against each other transparently. Violating it (pool-wide raw key) removes the per-chunk domain separation this design relies on for <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-8">I8</a>.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-11">P11</a> — Failures are first-class.</strong> Every failure path (torn append, dangling manifest, index desync) has a named recovery procedure, a conformance fixture, and a runbook entry. Tradeoff: more upfront design work per subsystem. Operational implication: on-call engineers have a documented procedure, not an ad hoc one. Violating it produces the exact &quot;vendor support ticket&quot; failure mode this project exists to avoid (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-2">§2</a>).</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-12">P12</a> — Delegate the index substrate; do not reinvent it.</strong> The B-tree (rank 67) is instantiated, not re-implemented (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/trade-offs/#adr-8">ADR-08</a>). Tradeoff: this project inherits rank 67&#39;s API surface and any of its limitations. Operational implication: bug fixes and performance work in rank 67 benefit this project without a merge. Violating it (a bespoke B-tree) is scope creep this blueprint explicitly rejects.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-13">P13</a> — Fingerprint-index RAM is the primary bottleneck to design around.</strong> Every scaling lever (locality-preserving caching, sparse indexing, Bloom prefilters, sharding) exists because of this (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/study/#sec-34">MM2</a>, <a class="cite" href="/system-design-blueprints/systems/deduplication-engine/numbers/#sec-36">§36</a>). Tradeoff: RAM-saving techniques trade away exactness or add latency (a Bloom-filter prefilter risks false positives). Operational implication: capacity planning is index-RAM planning, not disk planning. Violating it (assuming disk is the bottleneck) leads to an OOM wall at scale (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-33">§33</a>).</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/deduplication-engine/architecture/#p-14">P14</a> — Dedup ratio is a measured, reported, first-class metric.</strong> Not an incidental byproduct of storage savings (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/reliability/#inv-10">I10</a>). Tradeoff: computing and exposing it costs a counter update per chunk. Operational implication: it is the operator&#39;s primary KPI and appears in every ingest report and dashboard. Violating it (no metric, just &quot;storage looks smaller&quot;) reopens the &quot;where did my storage go&quot; investigation this project exists to close (<a class="cite" href="/system-design-blueprints/systems/deduplication-engine/blueprint/#sec-2">§2</a>).</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

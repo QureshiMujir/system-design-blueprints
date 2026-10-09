@@ -1,0 +1,424 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>WebRTC Stack — Architecture · Engineering Blueprints</title><meta name="description" content="WebRTC Stack, hld: §3 overview + §8 domain model. Build a from-scratch, memory-safe WebRTC peer-connection stack in Rust that establishes NAT-traversed, encrypted, real-time audio/video/data sessions between two or more endpoints: SDP offer/answer…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/networking-protocols/">Networking &amp; Protocols</a> </li><li> <a href="/system-design-blueprints/systems/webrtc-stack/">WebRTC Stack</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:13"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/networking-protocols/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Networking &amp; Protocols</span></a> </p> <h1>WebRTC Stack</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~22 weeks</li> <li>2,249 lines</li> <li>blueprint #161</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/webrtc-stack/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/webrtc-stack/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/webrtc-stack/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/webrtc-stack/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/webrtc-stack/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/webrtc-stack/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/webrtc-stack/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/webrtc-stack/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/webrtc-stack/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/webrtc-stack/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:WebRTC Stack — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌──────────────────────────────────────────────────────────────────────┐
+│ Application (native app / SFU / test harness)                        │
+└───────────────────────────┬────────────────────────────────────────-─┘
+                            │ MediaStream / DataChannel / SignalingChannel
+┌───────────────────────────▼────────────────────────────────────────-─┐
+│ PeerConnection FSM  (rtc-core, §8.1, §21)                            │
+│  createOffer/Answer(SDP) · setLocal/RemoteDescription · addIceCand   │
+└───────────────────────────┬────────────────────────────────────────-─┘
+                            │ canonical SDP (rtc-sdp)
+┌───────────────────────────▼────────────────────────────────────────-─┐
+│ ICE Agent  (rtc-ice, Phase 2/4, §8.2)                                │
+│  gather host/srflx(STUN)/relay(TURN) → pair → check → nominate       │
+└───────────────────────────┬────────────────────────────────────────-─┘
+                            │ selected (local,remote) candidate pair
+┌───────────────────────────▼────────────────────────────────────────-─┐
+│ UDP mux  (rtc-mux, Phase 0, RFC 7983 first-byte demux)               │
+└──────────┬───────────────────────────────────────────────┬───────────┘
+           │ DTLS bytes (20-63)                             │ STUN/TURN (0-19,64-79)
+┌──────────▼──────────────────────┐            (feeds back into ICE Agent above)
+│ DTLS layer  (rtc-dtls, Phase 5) │
+│  handshake · record encrypt     │
+└──────────┬───────────────────────┘
+           │ exporter output (RFC 5764)
+┌──────────▼──────────────────────┐
+│ SRTP/SRTCP  (rtc-srtp, Phase 6) │◄────────────┐
+└──────────┬───────────────────────┘             │ TWCC/NACK/PLI feedback
+           │ RTP packets                          │
+┌──────────▼──────────────────────┐   ┌──────────┴───────────┐
+│ RTP/RTCP + jitter buf (Phase 7) │──►│ GCC BWE (Phase 8)     │
+└──────────┬───────────────────────┘   └──────────┬───────────┘
+           │ media frames                          │ target bitrate
+┌──────────▼──────────────────────┐   ┌───────────▼───────────┐
+│ Codecs (Opus/VP8/H.264 wrap)    │◄──┤ Bitrate allocator      │
+└──────────────────────────────────┘   └────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│ SCTP-over-DTLS (rtc-sctp, Phase 9) — DataChannel multiplexed  │
+│ onto the same DTLS connection as media                       │
+└──────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>Per-box description.</strong> <em>PeerConnection FSM</em>: the only component the application
+touches; owns SDP negotiation and exposes the W3C-enumerated connection states (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#sec-8-1">§8.1</a>,
+<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-12">I12</a>). <em>ICE Agent</em>: gathers three candidate kinds, exchanges them (Trickle, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-3">P3</a>), runs
+priority-ordered connectivity checks, nominates one pair (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#sec-8-2">§8.2</a>, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-9">I9</a>). <em>UDP mux</em>:
+one socket per PeerConnection; demuxes by first byte per RFC 7983 so ICE/DTLS/RTP share
+one 5-tuple (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-2">P2</a>, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/trade-offs/#adr-4">ADR-04</a>). <em>DTLS layer</em>: one handshake establishes a session; framing,
+fragmentation, and retransmission are implemented on top of <code>rustls</code>&#39;s record layer
+(<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/trade-offs/#adr-6">ADR-06</a>). <em>SRTP/SRTCP</em>: every media packet is authenticated-encrypted; keys come from
+the DTLS exporter, never renegotiated per-packet (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-8">I8</a>). <em>RTP/RTCP + jitter buffer</em>:
+packetizes codec output, reassembles on receive, reorders into presentation order
+(<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-10">I10</a>). <em>GCC BWE</em>: sender-side estimator consuming TWCC arrival-time feedback, producing
+a target bitrate consumed by the bitrate allocator (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-8">P8</a>, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-6">I6</a>). <em>Codecs</em>: pluggable
+encode/decode behind a uniform trait; the rest of the stack is codec-agnostic (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-1">P1</a>).
+<em>SCTP-over-DTLS</em>: an independent reliable/partial-reliable multiplexed channel riding
+the same DTLS connection as media, never blocking it (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-7">I7</a>).</p>
+<h3 id="sec-3-1">3.1 Concurrency &amp; trust boundaries</h3>
+<p>Each <code>PeerConnection</code> owns one <code>tokio</code> task per socket; the ICE/DTLS/SRTP/RTP layers are
+<strong>sans-IO</strong> state machines (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-4">P4</a>, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/trade-offs/#adr-3">ADR-03</a>) driven by that task — they receive <code>&amp;[u8]</code> and
+emit <code>&amp;[u8]</code>/events, never touching the socket directly, which is what makes them
+independently fuzzable (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-13">P13</a>) and embeddable in any executor. The trust boundary sits at
+the UDP socket: everything past it is untrusted bytes until STUN MESSAGE-INTEGRITY, the
+DTLS handshake, or the SRTP auth tag validates it (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#sec-8-6">§8.6</a> malformed-input walkthrough).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-1">8.1 SDP Offer/Answer Model</h3>
+<p>SDP (RFC 4566) under the JSEP profile (RFC 8829) is the negotiation envelope. Grammar
+sketch (session-level + one media-level fragment):</p>
+<pre class="diagram"><code>session-description = proto-version origin-field session-name-field
+                       time-field *media-description
+media-description   = media-field connection-field *attribute-field
+attribute-field      = &quot;a=&quot; (att-fingerprint / att-ice-ufrag / att-ice-pwd /
+                        att-setup / att-mid / att-rtpmap / att-fmtp /
+                        att-rtcp-fb / att-extmap / att-sctp-port)</code></pre>
+<p><strong>Worked example — minimal audio+data offer/answer:</strong></p>
+<pre class="diagram"><code>v=0
+o=- 4611731400430051336 2 IN IP4 0.0.0.0
+s=-
+t=0 0
+a=group:BUNDLE 0 1
+m=audio 9 UDP/TLS/RTP/SAVPF 111
+c=IN IP4 0.0.0.0
+a=ice-ufrag:F7gI  a=ice-pwd:x9K3...  a=fingerprint:sha-256 AB:CD:...
+a=setup:actpass   a=mid:0            a=rtpmap:111 opus/48000/2
+a=rtcp-fb:111 transport-cc
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 0.0.0.0
+a=mid:1  a=sctp-port:5000  a=max-message-size:262144</code></pre>
+<p>The answerer echoes m-line <strong>count and order</strong> (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-14">I14</a>), flips <code>a=setup:actpass</code> to
+<code>active</code>/<code>passive</code> per RFC 8829 5.5, and answers with its own ICE credentials and
+fingerprint. Renegotiation (adding a video m-line) appends without reordering existing
+m-lines.</p>
+<h3 id="sec-8-2">8.2 ICE Connectivity State Machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entry Condition</th>
+<th>Exit Condition</th>
+<th>Next State(s)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>New</td>
+<td>agent created</td>
+<td>gathering starts</td>
+<td>Gathering</td>
+</tr>
+<tr>
+<td>Gathering</td>
+<td>host/srflx/relay collection begins</td>
+<td>gathering-complete event or timeout (10 s)</td>
+<td>Checking</td>
+</tr>
+<tr>
+<td>Checking</td>
+<td>≥1 candidate pair formed</td>
+<td>≥1 pair Succeeded</td>
+<td>Connected</td>
+</tr>
+<tr>
+<td>Connected</td>
+<td>first valid pair (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-1">I1</a>)</td>
+<td>nomination complete</td>
+<td>Completed</td>
+</tr>
+<tr>
+<td>Completed</td>
+<td>controlling agent sets USE-CANDIDATE (RFC 8445 8)</td>
+<td>—</td>
+<td>terminal (until Disconnected)</td>
+</tr>
+<tr>
+<td>Disconnected</td>
+<td>all pairs stop responding</td>
+<td>a pair recovers, or timeout</td>
+<td>Checking / Failed</td>
+</tr>
+<tr>
+<td>Failed</td>
+<td>no valid pair within overall timeout</td>
+<td>—</td>
+<td>terminal</td>
+</tr>
+<tr>
+<td>Closed</td>
+<td>application teardown</td>
+<td>—</td>
+<td>terminal</td>
+</tr>
+</tbody></table></div>
+<p><strong>STUN Binding Request/Response wire schema (RFC 8489 5):</strong></p>
+<pre class="diagram"><code> 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|0 0|     STUN Message Type     |         Message Length        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Magic Cookie (0x2112A442)                  |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
+|                Transaction ID (96 bits)                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|            Attributes (TLV, 4-byte aligned)...                |</code></pre>
+<p><strong>Pair priority (RFC 8445 5.1.2, referenced by <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-9">I9</a>):</strong>
+<code>priority = 2^32·MIN(G,D) + 2·MAX(G,D) + (G&gt;D ? 1 : 0)</code> where G/D are the controlling
+and controlled agents&#39; candidate priorities. Deterministic on both sides without
+coordination.</p>
+<p><strong>Malformed-input example.</strong> A STUN packet with <code>Message Length</code> exceeding the actual
+UDP datagram size is rejected at decode with <code>StunDecodeError::TruncatedAttribute</code>
+before any attribute is interpreted — <code>rtc-fuzz</code> corpus fixture <code>stun_truncated_len.bin</code>
+(<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/blueprint/#sec-13-5">§13.5</a>) asserts zero panics, zero out-of-bounds reads.</p>
+<p><strong>Failure-path example.</strong> Both peers gather only host candidates behind symmetric NATs,
+no TURN server configured: every check-list entry reaches <code>PairState::Failed</code>; the
+agent transitions to <code>IceState::Failed</code> at the 10 s timeout (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/numbers/#sec-4">§4</a>); <code>rtc-core</code> surfaces
+<code>ConnectionState::Failed</code> to the application with the check-list snapshot attached for
+diagnostics (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#sec-23">§23</a> <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#fm-1">FM-1</a>).</p>
+<h3 id="sec-8-3">8.3 DTLS-SRTP Key Derivation Pipeline</h3>
+<pre class="diagram"><code>DTLS ClientHello ──► DTLS ServerHello,Cert,CertVerify,Finished
+     │                                    │
+     └──── use_srtp ext negotiates SRTP profile (e.g. AEAD_AES_128_GCM)
+                                          │
+                        both sides: DTLS Finished verified (I2)
+                                          │
+              exporter(&quot;EXTRACTOR-dtls_srtp&quot;, &quot;&quot;, 2·(key_len+salt_len))
+                                          │
+        split → client_write_{key,salt} | server_write_{key,salt}
+                                          │
+              rtc-srtp derives per-direction session keys (RFC 3711 4.3.1)</code></pre>
+<p>The label <code>&quot;EXTRACTOR-dtls_srtp&quot;</code> is exact (RFC 5764 4.2); any deviation silently
+produces divergent keys, and every subsequent SRTP packet fails its auth tag (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-3">I3</a>
+triggers, packets dropped, no crash — <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-5">P5</a>).</p>
+<h3 id="sec-8-4">8.4 RTP/RTCP Wire Model &amp; Congestion-Control Feedback Loop</h3>
+<p><strong>RTP header (RFC 3550 5.1), 12-byte fixed portion:</strong></p>
+<pre class="diagram"><code> 0                   1                   2                   3
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|V=2|P|X|  CC   |M|     PT      |       sequence number        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                           timestamp                           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                 synchronization source (SSRC)                 |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</code></pre>
+<p><strong>GCC feedback loop (Pa1, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/trade-offs/#adr-9">ADR-09</a>):</strong> sender tags outgoing packets with a transport-wide
+sequence number (RFC 8285 extension); receiver batches arrival timestamps into
+RTCP-TWCC feedback; sender&#39;s trendline filter (Pa2) classifies inter-arrival delay
+gradient as Normal/Overusing/Underusing; the loss-based estimator (Pa1 §III) combines
+with the delay-based signal; the lower of the two becomes the target bitrate (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-6">I6</a>),
+consumed by the bitrate allocator feeding the codec (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-8">P8</a>).</p>
+<p><strong>Malformed-input example.</strong> An RTP packet with <code>CC</code> (CSRC count) claiming 15 sources
+but a payload shorter than <code>12 + 4·CC</code> bytes is rejected at header-parse with
+<code>RtpDecodeError::TruncatedCsrc</code> — fixture <code>rtp_csrc_overrun.bin</code> (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/blueprint/#sec-19-5">§19.5</a>).</p>
+<p><strong>Failure-path example.</strong> TWCC feedback stops arriving (receiver crashed or link down):
+GCC&#39;s trendline filter has no new samples; after <code>feedback_timeout</code> (2× RTCP interval)
+the estimator falls back to the loss-based estimate only, and after a second timeout
+freezes the bitrate at its last-known-good value rather than ramping to zero (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#sec-23">§23</a> <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#fm-6">FM-6</a>).</p>
+<h3 id="sec-8-5">8.5 SCTP-over-DTLS Data Channel Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Association State</th>
+<th>Entry</th>
+<th>Exit</th>
+<th>Next</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Closed</td>
+<td>initial</td>
+<td>INIT sent</td>
+<td>CookieWait</td>
+</tr>
+<tr>
+<td>CookieWait</td>
+<td>INIT sent</td>
+<td>INIT-ACK received</td>
+<td>CookieEchoed</td>
+</tr>
+<tr>
+<td>CookieEchoed</td>
+<td>COOKIE ECHO sent</td>
+<td>COOKIE ACK received</td>
+<td>Established</td>
+</tr>
+<tr>
+<td>Established</td>
+<td>four-way handshake done</td>
+<td>SHUTDOWN sent/received</td>
+<td>ShutdownPending/Sent</td>
+</tr>
+<tr>
+<td>ShutdownPending/Sent</td>
+<td>graceful close begins</td>
+<td>SHUTDOWN ACK exchanged</td>
+<td>Closed</td>
+</tr>
+</tbody></table></div>
+<p>DCEP (RFC 8832) opens a channel: an <code>DATA_CHANNEL_OPEN</code> message on a fresh stream
+negotiates label, reliability (reliable / partial-reliable-rtx / partial-reliable-timed),
+and ordering; the peer replies <code>DATA_CHANNEL_ACK</code>. Each <code>DataChannel</code> maps 1:1 to one
+SCTP stream (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-5">I5</a> governs per-stream TSN ordering).</p>
+<p><strong>Malformed-input example.</strong> A DCEP <code>DATA_CHANNEL_OPEN</code> message with an unrecognized
+channel-type byte is rejected with <code>DcepError::UnknownChannelType</code>, the stream is reset
+(RFC 6525) rather than the association torn down — fixture <code>dcep_bad_type.bin</code> (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/blueprint/#sec-21-5">§21.5</a>).</p>
+<p><strong>Failure-path example.</strong> A network MTU drop mid-association causes SCTP fragmentation
+retries; if the SCTP RTO (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/numbers/#sec-4">§4</a>, 1,000 ms initial) expires 5 consecutive times the
+association aborts and <code>rtc-core</code> surfaces <code>DataChannel::onclose</code> with an
+<code>SctpAbortReason::PathFailure</code> — the media path is unaffected (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-6">P6</a>, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-5">I5</a> isolation).</p>
+<h3 id="sec-8-6">8.6 Cross-Layer Worked Example</h3>
+<p>Alice → Bob, audio-only call, Alice behind a symmetric NAT (TURN required), Bob on a
+public IP (ICE-Lite): (1) SDP offer/answer exchanges ICE credentials + DTLS fingerprint
+(<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#sec-8-1">§8.1</a>); (2) Alice gathers host+srflx+relay, Bob gathers host-only, ICE-Lite (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/build/#sec-14">§14</a>); (3)
+connectivity checks find only the TURN-relayed pair reachable, it nominates (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#sec-8-2">§8.2</a>, <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#inv-1">I1</a>);
+(4) DTLS handshake over the relayed path exports SRTP keys (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#sec-8-3">§8.3</a>); (5) Opus-encoded RTP
+flows encrypted through the TURN relay with GCC adapting to the relay&#39;s added latency
+(<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#sec-8-4">§8.4</a>); (6) a DataChannel opens on the same DTLS connection for chat (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#sec-8-5">§8.5</a>) without
+affecting the audio jitter buffer (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-6">P6</a>).</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-1">P1</a> — Layered protocol independence.</strong> ICE ⊥ DTLS ⊥ SRTP ⊥ RTP ⊥ codec; each testable and fuzzable in isolation. Tradeoff: more crate-boundary glue code. Operationally: a codec bug can never corrupt ICE state. Violate it and a congestion controller cannot be swapped without touching the RTP layer.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-2">P2</a> — Single-port first-byte demux (RFC 7983).</strong> One UDP 5-tuple serves STUN/TURN/DTLS/RTP/RTCP. Tradeoff: the mux is a single point of dispatch bugs. Operationally: simplifies firewall/NAT config to one port. Violating it breaks BUNDLE (RFC 8843) compatibility with every modern browser.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-3">P3</a> — Trickle ICE by default.</strong> Never block signaling on full candidate gathering. Tradeoff: more asynchronous signaling-channel traffic. Violating it adds seconds to connect time (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/numbers/#m-1">M1</a>).</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-4">P4</a> — Sans-IO core (str0m-inspired).</strong> Protocol state machines take bytes/events in, emit bytes/events out; no socket ownership in <code>rtc-ice</code>/<code>rtc-dtls</code>/<code>rtc-srtp</code>/<code>rtc-rtp</code>. Tradeoff: callers must drive an event loop correctly. Operationally: enables independent fuzzing (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-13">P13</a>) and embedding in any async runtime. Violating it couples protocol correctness to I/O timing, making bugs non-reproducible.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-5">P5</a> — Fail-closed cryptography.</strong> A DTLS or SRTP verification failure drops the packet; there is no plaintext fallback path. Violating it is a silent MITM (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#sec-22">§22</a> <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#t-3">T3</a>).</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-6">P6</a> — Asymmetric backpressure.</strong> Media drops under backpressure (loss-tolerant); the data channel blocks with SCTP flow control (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/trade-offs/#adr-24">ADR-24</a>). Violating it either stalls video indefinitely or silently drops a file-transfer chunk.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-7">P7</a> — Deterministic, fixed-memory replay windows.</strong> SRTP/SCTP anti-replay uses a fixed-size sliding bitmask, never an unbounded set. Violating it is an unbounded memory-growth DoS vector (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#sec-22">§22</a> <a class="cite" href="/system-design-blueprints/systems/webrtc-stack/reliability/#t-4">T4</a>).</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-8">P8</a> — Congestion control ⊥ codec.</strong> GCC computes a target bitrate; the encoder adapts to it; neither owns the other&#39;s internal state. Violating it recreates the libwebrtc anti-pattern where BWE changes require touching every codec wrapper.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-9">P9</a> — Explicit table-driven state machines.</strong> <code>PeerConnection</code>, <code>IceAgent</code>, <code>DtlsConnection</code>, <code>SctpAssociation</code> are each an enumerated transition table, never ad hoc branching. Violating it is the #1 root cause of &quot;call state got stuck&quot; bugs.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-10">P10</a> — No global mutable state.</strong> Every session&#39;s state lives in that session&#39;s struct; no process-wide singletons. Enables multi-tenant SFU embedding. Violating it makes 500-connection concurrency (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/numbers/#m-11">M11</a>) impossible without lock contention.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-11">P11</a> — Zero-copy media hot path.</strong> RTP encode/decode operate on <code>Bytes</code>/<code>BytesMut</code>; no packet copied more than once between socket and cipher. Violating it blows the 2 µs SRTP budget (<a class="cite" href="/system-design-blueprints/systems/webrtc-stack/numbers/#m-3">M3</a>) at scale.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-12">P12</a> — Observable by default.</strong> Every state transition emits a tracing span and a metric. Violating it means &quot;why did the call fail&quot; is unanswerable in production.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-13">P13</a> — Fuzz every parser from Phase 0.</strong> STUN/DTLS/RTP/SCTP/SDP parsers are fuzz targets from the first commit, not appended later. Violating it defers discovery of memory-safety bugs to production traffic.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/webrtc-stack/architecture/#p-14">P14</a> — Conformance before optimization.</strong> A phase&#39;s conformance bucket (N.5) must be green before its performance budget (N.7) is tuned. Violating it optimizes code that is still incorrect.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

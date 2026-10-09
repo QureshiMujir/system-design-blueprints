@@ -1,0 +1,334 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Network Switch / Router Dataplane from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Network Switch / Router Dataplane from Scratch, hld: §3 overview + §8 domain model. Build a userspace, poll-mode network dataplane — L2 Ethernet switching, VLAN-aware forwarding, L3 IPv4 routing, ARP resolution, ACL enforcement, ECMP-ready ECMP forwarding, multi-queue scheduling …"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/networking-protocols/">Networking &amp; Protocols</a> </li><li> <a href="/system-design-blueprints/systems/network-switch-router-dataplane/">Network Switch / Router Dataplane from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:13"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/networking-protocols/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Networking &amp; Protocols</span></a> </p> <h1>Network Switch / Router Dataplane from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux (qemu-mentioned)</li> <li>10 phases</li> <li>~19 weeks</li> <li>2,355 lines</li> <li>blueprint #216</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/network-switch-router-dataplane/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/network-switch-router-dataplane/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/network-switch-router-dataplane/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/network-switch-router-dataplane/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/network-switch-router-dataplane/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/network-switch-router-dataplane/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/network-switch-router-dataplane/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/network-switch-router-dataplane/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/network-switch-router-dataplane/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/network-switch-router-dataplane/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Network Switch / Router Dataplane from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>              +----------------------------+
+              |  Control-Plane API / CLI    |  (cli_runtime)
+              +--------------+-------------+
+                             | txn config, route/ACL objects
+                             v
+              +--------------+-------------+
+              |  Configuration Runtime      |  (config_store, WAL + snapshots)
+              +--------------+-------------+
+                             | committed generation N
+              +--------------+-------------+
+              |                            |
+              v                            v
+   +----------+---------+       +----------+----------+
+   |  FIB Compiler       |       |  ACL Compiler        |
+   |  (ipv4_fib, l2_fib) |       |  (acl_engine)        |
+   +----------+---------+       +----------+----------+
+              |                            |
+              +--------------+-------------+
+                             | generation-N read model
+                             v
+              +--------------+-------------+
+              |  Shared Dataplane State (RCU) | &lt;- trust/persistence boundary
+              |  immutable, generation-published |
+              +--------------+-------------+
+                             |
+   +-------------------------+-------------------------+
+   |                          |                          |
+   v                          v                          v
++--+-------+ DPDK/AF_XDP  +---+--------+  queue     +----+-----+
+| RX Poller | syscall/PCI  | Worker      |  handoff   | TX Pipe  |
+| (dpdk_hal, | boundary     | Pipeline    |-----------&gt;| (scheduler,|
+|  afxdp_hal)|&lt;-------------| parse/vlan/  |            | tx_pipeline)|
+| pktbuf,    | RX ring,     | acl/route/   |            +----+-----+
+| mempool)   | NUMA-local   | adjacency    |                 |
++--+-------+ pool          +---+--------+                 |
+   |                            |                          |
+   +----------------------------+--------------------------+
+                             | async, off hot path
+                             v
+              +--------------+-------------+
+              |  Telemetry / Trace Runtime   |  (telemetry_runtime, packet_trace)
+              +--------------+-------------+
+                             | async, batched
+                             v
+              +--------------+-------------+
+              |  Persistent State / WAL      |  (config_store, replay_harness)
+              +----------------------------+</code></pre>
+<p><strong>Control-Plane API / CLI (<code>cli_runtime</code>).</strong> Owns configuration ingestion, transactional
+validation, route/ACL injection, operator interaction, runtime observability queries. Isolated on
+its own thread pool from forwarding cores to prevent allocator contention and lock amplification
+(P2) from reaching the hot path. Trust boundary: authenticated operator/orchestrator input only.</p>
+<p><strong>Configuration Runtime (<code>config_store</code>).</strong> Append-only configuration revisions; every commit gets
+a monotonic generation id. Rollback is snapshot activation, never in-place mutation (P4).
+Persistence is WAL-backed for crash-consistent restart (<a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/build/#sec-21">§21</a>). Persistence boundary: this is the
+only subsystem allowed to <code>fsync</code>.</p>
+<p><strong>FIB / ACL Compilers (<code>ipv4_fib</code>, <code>l2_fib</code>, <code>acl_engine</code>).</strong> Transform route/rule objects into
+cache-local, branch-predictable lookup structures — DIR24-8 for L3 (<a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/trade-offs/#adr-23">ADR-23</a>), hash table for L2,
+decision DAG for ACLs (<a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/trade-offs/#adr-24">ADR-24</a>). Compilation is off the hot path; only the compiled artifact
+crosses the RCU boundary.</p>
+<p><strong>Shared Dataplane State (RCU boundary).</strong> Immutable, generation-published read models (P4, <a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/reliability/#inv-2">I2</a>). No
+dataplane thread performs allocator-backed mutation while forwarding (P2). This is the
+concurrency boundary between control-plane writers (one at a time, serialized by <code>config_store</code>)
+and dataplane readers (64 cores, lock-free).</p>
+<p><strong>RX Pollers / Worker Pipelines / TX Pipelines.</strong> RX pollers (<code>dpdk_hal</code>/<code>afxdp_hal</code>) own NIC queue
+consumption in poll mode — no interrupt storms, no context-switch jitter — pinned one core per RX
+queue, one NUMA-local mempool per queue (P6). Worker pipelines run the staged graph: Ethernet parse
+→ VLAN validate → ACL classify → route lookup → neighbor resolve → rewrite → queue assign; the
+pipeline is branch-stable and allocation-free in steady state (P2). TX pipelines batch to amortize
+PCIe doorbell cost and propagate backpressure (P3) back to the scheduler under queue pressure. The
+PCI/syscall boundary sits between <code>dpdk_hal</code>/<code>afxdp_hal</code> and the kernel/NIC firmware.</p>
+<p><strong>Telemetry / Trace Runtime.</strong> Exports counters, histograms, flow samples, PCAP-NG replay captures,
+structured traces (OpenTelemetry spans), allocator-pressure and queue-occupancy metrics. Emission
+is async and batched — it must never block a forwarding core (P9).</p>
+<p><strong>Persistent State / WAL.</strong> Stores forwarding metadata, route snapshots, replay checkpoints, crash
+recovery journals. WAL replay reconstructs deterministic forwarding state on restart (<a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/build/#sec-21">§21</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Packet &amp; Protocol Model</h2>
+<p><strong>Ethernet frame layout</strong> (802.3, VLAN tag per 802.1Q):</p>
+<pre class="diagram"><code>+-------------------+
+| Destination MAC   |  6 B
++-------------------+
+| Source MAC        |  6 B
++-------------------+
+| EtherType/TPID     |  2 B  (0x8100 =&gt; VLAN tag follows)
++-------------------+
+| VLAN Tag(s)        |  4 B each, 0..2 tags (QinQ)
++-------------------+
+| Payload            |  46..1500 B (or jumbo, if negotiated)
++-------------------+
+| FCS                 |  4 B
++-------------------+</code></pre>
+<p><strong>Packet processing state machine</strong> (one packet, one pass, no backtracking):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>On Success →</th>
+<th>On Failure →</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>RX</td>
+<td>Parse Ethernet</td>
+<td>(n/a — RX is the entry state)</td>
+</tr>
+<tr>
+<td>Parse Ethernet</td>
+<td>Validate VLAN</td>
+<td>drop, <code>malformed_ethernet</code> counter</td>
+</tr>
+<tr>
+<td>Validate VLAN</td>
+<td>ACL Precheck</td>
+<td>drop, <code>malformed_vlan</code> counter, trace event</td>
+</tr>
+<tr>
+<td>ACL Precheck</td>
+<td>Route Lookup</td>
+<td>drop or mirror per DAG terminal (<a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/build/#sec-18">§18</a>)</td>
+</tr>
+<tr>
+<td>Route Lookup</td>
+<td>Neighbor Resolution</td>
+<td>ICMP unreachable (RFC 792), drop</td>
+</tr>
+<tr>
+<td>Neighbor Resolution</td>
+<td>Rewrite Headers</td>
+<td>queue for ARP retry (<a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/reliability/#inv-10">I10</a>) or drop if exhausted</td>
+</tr>
+<tr>
+<td>Rewrite Headers</td>
+<td>Queue Selection</td>
+<td>drop, <code>rewrite_failure</code> counter (P10 — never emit malformed)</td>
+</tr>
+<tr>
+<td>Queue Selection</td>
+<td>TX</td>
+<td>drop, <code>queue_full</code> counter (<a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/reliability/#inv-3">I3</a>)</td>
+</tr>
+</tbody></table></div>
+<p><strong>Route entry model (<code>FibEntry</code>):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>prefix</code></td>
+<td>CIDR route</td>
+</tr>
+<tr>
+<td><code>adjacency</code></td>
+<td>next-hop action reference</td>
+</tr>
+<tr>
+<td><code>metric</code></td>
+<td>route preference</td>
+</tr>
+<tr>
+<td><code>generation</code></td>
+<td>immutable snapshot generation (<a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/reliability/#inv-11">I11</a>)</td>
+</tr>
+<tr>
+<td><code>flags</code></td>
+<td>local / blackhole / ecmp-member</td>
+</tr>
+</tbody></table></div>
+<p><strong>ACL evaluation model.</strong> Rules compile into DAG nodes: match node, branch node, terminal permit,
+terminal deny, telemetry-mirror node (<a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/reliability/#inv-7">I7</a> bounds the node set).</p>
+<p><strong>Replay artifact format</strong> (one record per forwarded or dropped packet):</p>
+<pre class="diagram"><code>record_header        # magic, version, length
+packet_metadata       # ingress port, VLAN, queue_id
+rx_timestamp           # TSC-calibrated (ADR-20)
+queue_id
+packet_bytes            # raw frame, PCAP-NG compatible (ADR-26)
+forwarding_decision      # permit/deny/drop + reason code
+worker_id</code></pre>
+<p><strong>Failure example — malformed VLAN tag.</strong> Frame carries <code>EtherType = 0x8100</code> but truncates before
+the 4-byte tag payload completes. Expected behavior: increment <code>malformed_vlan</code> counter, emit a
+trace event carrying the truncated bytes, drop the packet, and — critically — never let the parser
+panic (P10, <a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/reliability/#inv-1">I1</a>). This is the canonical fixture family exercised by <code>fixtures/parser/*</code> in <a class="cite" href="/system-design-blueprints/systems/network-switch-router-dataplane/blueprint/#sec-15-5">§15.5</a>.</p>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

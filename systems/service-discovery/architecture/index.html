@@ -1,0 +1,397 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Service Discovery — Architecture · Engineering Blueprints</title><meta name="description" content="Service Discovery, hld: §3 overview + §8 domain model. Service Discovery (project 181) is a Consul-class distributed service-registry and discovery system: a per-node agent (discoveryd) through which workloads register and deregister; a health-check…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/service-discovery/">Service Discovery</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Service Discovery</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Go</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~16 weeks</li> <li>2,944 lines</li> <li>blueprint #181</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/service-discovery/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/service-discovery/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/service-discovery/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/service-discovery/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/service-discovery/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/service-discovery/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/service-discovery/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/service-discovery/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/service-discovery/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/service-discovery/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Service Discovery — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                     ┌───────────────────────────────────────────┐
+                     │           Operators / Clients               │
+                     │  (CLI, sidecar libs, Kubernetes, web UI)    │
+                     └───────────────┬──────────────┬─────────────┘
+                                     │ HTTP API      │ DNS (UDP/TCP)
+                                     │ + blocking    │ A/AAAA/SRV
+                                     ▼               ▼
+   ┌───────────────────────────────────────────────────────────────┐
+   │                     discoveryd  (per node)                     │
+   │ ┌──────────┐ ┌────────────┐ ┌──────────┐ ┌──────────────────┐ │
+   │ │ HTTP API │ │ DNS Server │ │ KV Front │ │  Sidecar Bridge   │ │
+   │ └────┬─────┘ └─────┬──────┘ └────┬─────┘ └─────────┬─────────┘ │
+   │      │             │             │                 │           │
+   │      ▼             ▼             ▼                 ▼           │
+   │ ┌───────────────────────────────────────────────────────────┐ │
+   │ │                 Catalog / Registry (§13)                   │ │
+   │ │  nodes, services, instances, checks, monotonic index,      │ │
+   │ │  watch waiters (§20), ACL token cache (§19)                 │ │
+   │ └───────────────┬───────────────────┬─────────────────────────┘ │
+   │                 │                   │                            │
+   │                 ▼                   ▼                            │
+   │  ┌───────────────────────┐ ┌────────────────────────────────┐  │
+   │  │ Health Check Engine    │ │     Gossip / Membership        │  │
+   │  │ (§16) TTL/HTTP/TCP/gRPC│ │  (§18) SWIM + Lifeguard,        │  │
+   │  │                        │ │  Gossip-Protocol rank 74        │  │
+   │  └───────────┬────────────┘ └────────────────┬───────────────┘  │
+   │              │                                │                   │
+   │              ▼                                ▼                   │
+   │  ┌───────────────────────────────────────────────────────────┐  │
+   │  │      Replicated Log (Raft, Raft project rank 39, §8.6)      │  │
+   │  └───────────────────────────────────────────────────────────┘  │
+   │                                                                   │
+   │  ┌───────────────────────────────────────────────────────────┐  │
+   │  │  Embedded KV (Distributed-KV-Store rank 38, shares the log)  │  │
+   │  └───────────────────────────────────────────────────────────┘  │
+   └───────────────────────────────────────────────────────────────────┘
+                                  ▲
+                                  │ WAN gossip + cross-DC forwarding (§21)
+                                  ▼
+                   ┌──────────────────────────────────┐
+                   │   Other datacenters (federated)  │
+                   └──────────────────────────────────┘</code></pre>
+<ul>
+<li><strong>Operators/Clients:</strong> CLI (<code>discoveryctl</code>), sidecar libraries, Kubernetes controllers, an
+optional web UI (deferred, <a class="cite" href="/system-design-blueprints/systems/service-discovery/blueprint/#sec-26">§26</a>) — never talk to the cluster directly, always through a
+local agent (<a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-1">P1</a>).</li>
+<li><strong>HTTP API:</strong> register/deregister/list/health/KV/blocking-query surface; the only write
+path into the catalog (<a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-5">P5</a>); <a class="cite" href="/system-design-blueprints/systems/service-discovery/build/#sec-14">§14</a>.</li>
+<li><strong>DNS Server:</strong> read-only resolver over the catalog; UDP+TCP on port 8600; <a class="cite" href="/system-design-blueprints/systems/service-discovery/build/#sec-15">§15</a>.</li>
+<li><strong>KV Front:</strong> HTTP surface over the embedded KV; shares the catalog&#39;s Raft log (<a class="cite" href="/system-design-blueprints/systems/service-discovery/trade-offs/#adr-8">ADR-08</a>);
+<a class="cite" href="/system-design-blueprints/systems/service-discovery/build/#sec-17">§17</a>.</li>
+<li><strong>Sidecar Bridge:</strong> Unix-socket local registration path, filesystem-permission auth
+boundary; <a class="cite" href="/system-design-blueprints/systems/service-discovery/build/#sec-22">§22</a>.</li>
+<li><strong>Catalog/Registry:</strong> the single source of truth — nodes, services, instances, checks,
+the global monotonic index (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-1">I1</a>), watch waiters (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-7">I7</a>); <a class="cite" href="/system-design-blueprints/systems/service-discovery/build/#sec-13">§13</a>.</li>
+<li><strong>Health Check Engine:</strong> one goroutine per check; asynchronous, never blocks the apply
+path (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-5">I5</a>); <a class="cite" href="/system-design-blueprints/systems/service-discovery/build/#sec-16">§16</a>.</li>
+<li><strong>Gossip/Membership:</strong> SWIM+Lifeguard failure detection and membership dissemination,
+eventually consistent (<a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-2">P2</a>); <a class="cite" href="/system-design-blueprints/systems/service-discovery/build/#sec-18">§18</a>.</li>
+<li><strong>Replicated Log (Raft):</strong> linearizable catalog and KV writes; leader-serialized apply
+path; <a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#sec-8-6">§8.6</a>, <a class="cite" href="/system-design-blueprints/systems/service-discovery/build/#sec-13">§13</a>.</li>
+<li><strong>Embedded KV:</strong> flat key-value namespace for operator/application configuration,
+replicated through the same log as the catalog (<a class="cite" href="/system-design-blueprints/systems/service-discovery/trade-offs/#adr-8">ADR-08</a>); <a class="cite" href="/system-design-blueprints/systems/service-discovery/build/#sec-17">§17</a>.</li>
+<li><strong>Federation:</strong> WAN gossip pool tracking remote datacenters&#39; server addresses, plus a
+thin cross-DC forwarding RPC; reads only, never replicates state; <a class="cite" href="/system-design-blueprints/systems/service-discovery/build/#sec-21">§21</a>.</li>
+</ul>
+<p>The agent is one binary; role (<code>-server</code>/<code>-client</code>) is chosen at startup. A client-role
+node registers local workloads with its own agent over the HTTP API or the sidecar socket;
+the local agent forwards register/deregister/health updates into the cluster.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<h3 id="sec-8-1">8.1 Catalog Entity Model</h3>
+<p>Entities (types defined in full in <a class="cite" href="/system-design-blueprints/systems/service-discovery/blueprint/#sec-11-1">§11.1</a>): <code>Node</code> 1—N <code>Instance</code> (a node hosts many service
+instances); <code>Service</code> 1—N <code>Instance</code> (a service name has many instances across nodes);
+<code>Instance</code> 1—N <code>Check</code> (an instance carries zero or more checks); <code>Check</code> has exactly one
+<code>CheckStatus</code>. Every entity carries <code>CreateIndex</code>/<code>ModifyIndex</code> (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-1">I1</a>) and is addressed by a
+stable ID, never a mutable name, to keep DNS names decoupled from primary keys.</p>
+<h3 id="sec-8-2">8.2 Check Status State Machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Event</th>
+<th>Next State</th>
+<th>Condition</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>(none)</td>
+<td>register with check</td>
+<td><code>critical</code> (or <code>passing</code> if <code>SuccessBeforePassing=0</code>)</td>
+<td>initial grace applies (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-9">I9</a>)</td>
+</tr>
+<tr>
+<td><code>passing</code></td>
+<td>N consecutive failures</td>
+<td><code>critical</code></td>
+<td><code>N ≥ FailuresBeforeCritical</code></td>
+</tr>
+<tr>
+<td><code>passing</code></td>
+<td>1 warning-class probe result</td>
+<td><code>warning</code></td>
+<td>HTTP 429/503 only (<a class="cite" href="/system-design-blueprints/systems/service-discovery/blueprint/#sec-16-3">§16.3</a>)</td>
+</tr>
+<tr>
+<td><code>warning</code></td>
+<td>N consecutive successes</td>
+<td><code>passing</code></td>
+<td><code>N ≥ SuccessBeforePassing</code></td>
+</tr>
+<tr>
+<td><code>warning</code></td>
+<td>N consecutive failures</td>
+<td><code>critical</code></td>
+<td><code>N ≥ FailuresBeforeCritical</code></td>
+</tr>
+<tr>
+<td><code>critical</code></td>
+<td>N consecutive successes</td>
+<td><code>passing</code></td>
+<td><code>N ≥ SuccessBeforePassing</code></td>
+</tr>
+<tr>
+<td><code>critical</code></td>
+<td>continuous critical ≥ <code>DeregisterCriticalServiceAfter</code></td>
+<td>(deregistered)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-13">I13</a>; counter resets on any success</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 DNS Query Grammar (EBNF)</h3>
+<pre class="code language-ebnf" data-lang="ebnf"><code>question    = service-q | node-q | prepared-q ;
+service-q   = [ tag &quot;.&quot; ] service &quot;.&quot; &quot;service&quot; &quot;.&quot; [ dc &quot;.&quot; ] domain ;
+node-q      = node &quot;.&quot; &quot;node&quot; &quot;.&quot; [ dc &quot;.&quot; ] domain ;
+prepared-q  = query-name &quot;.&quot; &quot;query&quot; &quot;.&quot; [ dc &quot;.&quot; ] domain ;  (* deferred, §15 *)
+dc          = label ;
+domain      = label , { &quot;.&quot; , label } ;
+label       = ALPHA , { ALPHA | DIGIT | &quot;-&quot; } ;</code></pre>
+<p><code>dc</code> defaults to the agent&#39;s local datacenter; <code>domain</code> defaults to <code>discovery.</code> and is
+never hard-coded (<a class="cite" href="/system-design-blueprints/systems/service-discovery/blueprint/#sec-16-6">§16.6</a> Pitfalls references this same rule for the check-domain string).</p>
+<h3 id="sec-8-4">8.4 DNS Response Composition</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Record</th>
+<th>Source field</th>
+<th>Filter applied</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>A / AAAA</td>
+<td><code>Instance.Address</code> (or <code>Node.Address</code> if unset)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-3">I3</a></td>
+</tr>
+<tr>
+<td>SRV</td>
+<td>priority=0, weight from <code>Weights.{Passing,Warning}</code>, port=<code>Instance.Port</code>, target=<code>Node.Node</code></td>
+<td><a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-3">I3</a></td>
+</tr>
+<tr>
+<td>TXT (metadata, opt-in)</td>
+<td><code>Instance.Meta</code></td>
+<td><a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-3">I3</a></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 HTTP Blocking-Query Protocol (sequence)</h3>
+<ol>
+<li>Client issues <code>GET .../health/service/web?index=41&amp;wait=5m</code>.</li>
+<li>Handler snapshots current index; if <code>current &gt; 41</code>, responds immediately (<a class="cite" href="/system-design-blueprints/systems/service-discovery/blueprint/#sec-14-2">§14.2</a>).</li>
+<li>Else the handler registers a waiter on the service&#39;s notification channel (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-7">I7</a>) and
+blocks on <code>min(wait, 10m)</code>, floored at 100 ms to coalesce bursts (<a class="cite" href="/system-design-blueprints/systems/service-discovery/blueprint/#sec-20-2">§20.2</a>).</li>
+<li>On notify (after <a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-2">I2</a>&#39;s ordering) or timeout, the handler re-snapshots under the lock and
+returns <code>(index, data)</code>; a timeout returns the same index unchanged.</li>
+<li><code>X-Consul-Index</code>, <code>X-Consul-LastContact</code>, <code>X-Consul-KnownLeader</code> are set on every
+response, blocking or not (<a class="cite" href="/system-design-blueprints/systems/service-discovery/blueprint/#sec-14-2">§14.2</a>).</li>
+</ol>
+<h3 id="sec-8-6">8.6 Raft Log Entry Wire Layout</h3>
+<pre class="diagram"><code>RaftLogEntry {
+  term        uint64          // Raft term (opaque to the catalog, ADR-07)
+  index       uint64          // Raft log index (distinct from catalog.Index, I1)
+  kind        uint8           // 0=RegisterNode 1=DeregisterNode 2=RegisterService
+                               // 3=DeregisterService 4=RegisterCheck 5=UpdateCheck
+                               // 6=KVPut 7=KVDelete 8=ACLTokenRevoke
+  request_id  [16]byte        // UUID, dedup key (I6, P12)
+  payload     []byte          // kind-specific, protobuf-encoded (ADR-04 serialization)
+  crc32       uint32          // corruption check on read
+}</code></pre>
+<h3 id="sec-8-7">8.7 Gossip Message Envelope (SWIM, LAN pool)</h3>
+<pre class="diagram"><code>GossipEnvelope {
+  msg_type    uint8   // 0=Ping 1=IndirectPing 2=Ack 3=Suspect 4=Alive 5=Dead 6=UserMsg
+  seq         uint32  // per-sender sequence, dup suppression
+  from        NodeID  // gossip-layer identity, NOT the catalog Node.ID
+  piggyback   []byte  // infection-style disseminated updates (Das/Gupta/Motivala §2)
+}</code></pre>
+<p><code>NodeID</code> is a gossip-layer identity distinct from <code>catalog.Node.ID</code>; the adapter
+(<code>internal/gossip/adapter.go</code>, <a class="cite" href="/system-design-blueprints/systems/service-discovery/blueprint/#sec-18-1">§18.1</a>) is the only code that maps between the two.</p>
+<h3 id="sec-8-8">8.8 Worked Example: Service Registration End to End</h3>
+<p><code>PUT /v1/agent/service/register {&quot;Name&quot;:&quot;web&quot;,&quot;Port&quot;:8080}</code> → HTTP handler validates ACL
+token (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-4">I4</a>) → builds a <code>RegisterRequest</code> (<a class="cite" href="/system-design-blueprints/systems/service-discovery/blueprint/#sec-11-2">§11.2</a>) → catalog <code>ApplyRegisterService</code> upserts
+<code>Node</code>, <code>Service</code>, <code>Instance</code> under one lock acquisition, assigns index 42 (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-1">I1</a>) → notifies
+the <code>web</code> service channel (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-2">I2</a> ordering) → a blocking <code>GET .../health/service/web?index=41</code>
+wakes within the coalescing window (<a class="cite" href="/system-design-blueprints/systems/service-discovery/blueprint/#sec-20-2">§20.2</a>) and returns index 42 with the new instance →
+<code>dig web.service.dc1.discovery. SRV</code> returns the instance once its first check reaches
+<code>passing</code> (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-3">I3</a>).</p>
+<h3 id="sec-8-9">8.9 Malformed Input Examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Issue</th>
+<th>Expected Handling</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DNS question <code>..service.dc1.discovery</code></td>
+<td>empty label</td>
+<td><code>FORMERR</code>, no panic</td>
+</tr>
+<tr>
+<td><code>PUT /v1/agent/service/register {&quot;Port&quot;:&quot;abc&quot;}</code></td>
+<td>non-numeric port</td>
+<td><code>400</code> with error code <code>EINVALIDPORT</code></td>
+</tr>
+<tr>
+<td>Raft entry with wrong <code>crc32</code></td>
+<td>corruption</td>
+<td>reject at apply, alert <code>catalog_corrupt_entry_total</code></td>
+</tr>
+<tr>
+<td>DNS query with EDNS0 buffer=0</td>
+<td>degenerate buffer</td>
+<td>fallback to 512-byte legacy limit, set <code>TC</code> if needed</td>
+</tr>
+<tr>
+<td>KV <code>PUT</code> with <code>cas=</code> non-numeric</td>
+<td>malformed CAS token</td>
+<td><code>400 EINVALIDCAS</code>, no mutation</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-10">8.10 Failure-Path Example: Leader Loss Mid-Blocking-Query</h3>
+<p>A blocking query is parked on index 100 when the Raft leader crashes. The waiter&#39;s
+context is not canceled (it is agent-local, not leader-bound). A new leader is elected
+within the RTO (<a class="cite" href="/system-design-blueprints/systems/service-discovery/numbers/#sec-4">§4</a>); the next write on the new leader bumps the index past 100 and the
+local catalog (now following the new leader&#39;s replicated stream) notifies the parked
+waiter normally. If no write occurs before <code>wait</code> expires, the client receives the
+unchanged index 100 — never an error — matching <a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-5">P5</a>&#39;s &quot;lossy but never wrong&quot; contract.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-1">P1</a> — Local agent first.</strong> The data path is workload → local agent → cluster; workloads never speak to the cluster directly. Tradeoff: one extra local hop. Operational implication: agent must be as available as the workload itself. Violating it: bypassing to the cluster removes the ACL/queueing boundary and reintroduces thundering-herd polling.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-2">P2</a> — Strong consistency for the catalog, eventual for membership.</strong> Catalog writes go through Raft; membership rides gossip. Tradeoff: two different staleness models in one system. Operational implication: never treat a gossip-suspected node as catalog-authoritative without a confirming health check. Violating it: blurs CP and AP guarantees, breaking <a class="cite" href="/system-design-blueprints/systems/service-discovery/study/#sec-35">§35</a>&#39;s consistency answers.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-3">P3</a> — Blocking queries are the watch primitive.</strong> No callbacks, no push, no WebSocket; a monotonic index plus long polling. Tradeoff: higher per-connection FD cost than push. Operational implication: coalescing (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-7">I7</a>) is mandatory, not optional. Violating it: reintroduces client-side polling and its thundering herd.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-4">P4</a> — Health is opinionated.</strong> A service is <code>passing</code>, <code>warning</code>, or <code>critical</code>; no &quot;unknown&quot; outside an explicit registration grace period. Tradeoff: less expressive than free-form status strings. Operational implication: DNS/HTTP consumers get a closed enum to switch on. Violating it: ambiguous states leak into client logic.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-5">P5</a> — DNS is read-only and lossy.</strong> Writes go through the HTTP API only; DNS returns the freshest local snapshot, not a consensus-confirmed read. Tradeoff: DNS answers can be microseconds stale. Operational implication: never build a write path on top of DNS. Violating it: breaks <a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-3">I3</a> and confuses operators about durability.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-6">P6</a> — ACLs are not an afterthought.</strong> Every read and write path takes a token, validated against a cluster-replicated cache. Tradeoff: a cache-invalidation problem on every write path. Operational implication: token revocation must be a first-class Raft-replicated event (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-4">I4</a>). Violating it: creates an unauditable write path.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-7">P7</a> — Federation is a first-class operating mode.</strong> Cross-DC forwarding is a property of the agent, not a bolt-on sidecar. Tradeoff: every server must carry WAN gossip state. Operational implication: an unreachable DC is a hard error, never a silent fallback (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-12">I12</a>). Violating it: hides partitions as data-loss-shaped bugs.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-8">P8</a> — The agent must run forever.</strong> No allocations on hot paths after warmup; no blocking I/O in the gossip loop; watch coalescing prevents fan-out storms. Tradeoff: more upfront design work per hot path. Operational implication: profile every phase (<a class="cite" href="/system-design-blueprints/systems/service-discovery/numbers/#sec-30">§30</a>). Violating it: GC pressure turns into missed gossip deadlines and false suspicions.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-9">P9</a> — Determinism for the catalog log.</strong> Every state transition is reproducible from the log; no clocks in the apply path (<a class="cite" href="/system-design-blueprints/systems/service-discovery/reliability/#inv-11">I11</a>). Tradeoff: harder to express TTL-style logic (must be driven by an external timer feeding a deterministic event, not a clock read inside <code>apply</code>). Operational implication: replay-based debugging works. Violating it: two replicas can diverge on replay.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-10">P10</a> — Operator empathy.</strong> Every error carries a code, a one-line cause, and a runbook pointer; <code>discoveryctl validate</code> checks config without starting the agent. Tradeoff: more error-taxonomy upkeep. Operational implication: incident triage time drops. Violating it: on-call debugging degrades to log-archaeology.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-11">P11</a> — Failure detection is probabilistic, not binary.</strong> A suspicion state exists (Das/Gupta/Motivala 2002) between &quot;alive&quot; and &quot;dead&quot; to bound false-positive rate. Tradeoff: slower worst-case detection than an instant binary flip. Operational implication: convergence-time SLOs (<a class="cite" href="/system-design-blueprints/systems/service-discovery/numbers/#sec-4">§4</a>) are a function of the suspicion timeout, not just RTT. Violating it (removing suspicion) inflates false-positive churn under GC pauses or transient packet loss.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-12">P12</a> — Every write path is idempotent.</strong> The catalog treats a duplicate apply (retried register, replayed Raft entry) as a no-op keyed by request UUID. Tradeoff: an extra dedup-key column per mutation. Operational implication: safe client-side retry without double-registration. Violating it: retries after a timeout silently duplicate state.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-13">P13</a> — Backpressure over unbounded queues.</strong> Check-engine goroutines, watch fan-out buffers, and the HTTP accept queue are all explicitly bounded. Tradeoff: a saturated agent starts rejecting instead of queueing forever. Operational implication: a predictable memory ceiling under load spikes (<a class="cite" href="/system-design-blueprints/systems/service-discovery/numbers/#sec-4">§4</a>). Violating it: unbounded goroutines convert a load spike into an OOM kill.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/service-discovery/architecture/#p-14">P14</a> — One numbering authority for the log.</strong> The catalog and the KV are one Raft log with one monotonic index (<a class="cite" href="/system-design-blueprints/systems/service-discovery/trade-offs/#adr-8">ADR-08</a>); there is no second index counter anywhere in the system. Tradeoff: KV and catalog throughput compete for the same leader. Violating it (a second index) breaks blocking-query coalescing across catalog and KV reads.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

@@ -1,0 +1,916 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>TLS/SSL Handshake — Architecture · Engineering Blueprints</title><meta name="description" content="TLS/SSL Handshake, hld: §3 overview + §8 domain model. Build, from scratch in Rust, a from-scratch TLS 1.3 (RFC 8446) handshake engine and record layer: the full client and server handshake state machines (ClientHello through Finished, HelloRetryRequest…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/security-cryptography/">Security &amp; Cryptography</a> </li><li> <a href="/system-design-blueprints/systems/tls-handshake/">TLS/SSL Handshake</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:118"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/security-cryptography/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Security &amp; Cryptography</span></a> </p> <h1>TLS/SSL Handshake</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~19 weeks</li> <li>3,229 lines</li> <li>blueprint #48</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/tls-handshake/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/tls-handshake/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/tls-handshake/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/tls-handshake/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/tls-handshake/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/tls-handshake/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/tls-handshake/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/tls-handshake/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/tls-handshake/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/tls-handshake/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:TLS/SSL Handshake — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                          UNTRUSTED PEER INPUT BOUNDARY
+                          ============================
+  network bytes --&gt;  ||  Byte-Stream Transport Adapter (tls-net)      ||
+                      ||        (owns no crypto state)                 ||
+                      ============================
+                                     |
+                      +--------------v---------------+
+                      |   Record Layer (tls-record)   |  &lt;-- SECRET-MATERIAL
+                      |  fragment / defragment        |      BOUNDARY: holds
+                      |  AEAD protect / unprotect      |      TrafficKeys, seq#
+                      |  nonce = static_iv XOR seq#    |
+                      +--------------+----------------+
+                                     |  decrypted handshake bytes
+                      +--------------v----------------+
+                      |  Message Parser / Encoder      |  &lt;-- BUFFER BOUNDARY:
+                      |  (tls-handshake::codec)        |      length-prefixed,
+                      +--------------+----------------+       bounds-checked
+                                     |
+        +----------------------------+-----------------------------+
+        |                            |                             |
++-------v--------+       +-----------v-----------+       +---------v---------+
+| Handshake State |&lt;-----&gt;| Transcript-Hash        |       | Alert Subsystem   |
+| Machine          |       | Accumulator            |       | (tls-handshake)   |
+| ClientState /    |       | (running SHA-256/384)  |       | fatal / warning   |
+| ServerState      |       +-----------+-----------+       +-------------------+
++---+----+----+---+                   |
+    |    |    |                       |
+    |    |    +-----------------------+
+    |    |
+    |    +----------------+
+    |                     |
++---v-----------+   +-----v------------+   +--------------------+
+| ECDHE Key      |   | Key Schedule     |   | Certificate Parser  |
+| Exchange       |   | Engine (tls-core)|   | &amp; Path Validator    |
+| X25519 / P-256 |   | HKDF-Extract /   |   | (tls-cert)          |
+| (tls-crypto)   |   | Expand-Label     |   | reads UNTRUSTED DER |
++----------------+   +---+---+----------+   +---+-----------------+
+                          |   |                 |
+                +---------+   +---------+   +---v----------------+
+                |                       |   | Signature Verifier  |
+        +-------v-------+       +------v---+ RSA-PSS/ECDSA/Ed25519|
+        | TrafficKeys    |       | PSK / Ticket Store  |----------+
+        | (SECRET, feeds |       | (tls-core)          |
+        | back to record |       +---------------------+
+        | layer above)   |
+        +----------------+</code></pre>
+<p><strong>Byte-stream transport adapter.</strong> Owns the socket or loopback pipe; performs no
+parsing or crypto; the untrusted-peer-input boundary begins the instant a byte crosses
+this adapter into the record layer.</p>
+<p><strong>Record layer.</strong> Fragments outbound records to the max size, reassembles inbound
+fragments, and is the sole owner of <code>TrafficKeys</code> and sequence numbers — the
+secret-material boundary starts here and everything below in the diagram may hold live
+key material.</p>
+<p><strong>Message parser/encoder.</strong> Bounds-checked length-prefixed decode of handshake messages
+from decrypted record-layer bytes; the buffer boundary — every length field is
+validated against remaining buffer length before a single byte is trusted.</p>
+<p><strong>Handshake state machine.</strong> <code>ClientState</code>/<code>ServerState</code> enums; the sole authority on
+which message is legal next; drives the transcript hash, key schedule, and alert
+subsystem.</p>
+<p><strong>Transcript-hash accumulator.</strong> Running hash over every handshake message in wire
+order; consumed by the key schedule&#39;s Derive-Secret calls and by Finished/
+CertificateVerify.</p>
+<p><strong>Key schedule engine.</strong> Implements the HKDF-Extract/Expand-Label/Derive-Secret chain
+of RFC 8446 section 7.1, producing early, handshake and application secrets and,
+downstream, <code>TrafficKeys</code>.</p>
+<p><strong>ECDHE key-exchange module.</strong> Wraps <code>tls-crypto</code>&#39;s X25519/P-256 traits; produces the
+shared secret consumed once by the key schedule and then dropped.</p>
+<p><strong>Certificate parser and path validator.</strong> Reads untrusted DER from the peer; the
+second major untrusted-input boundary; never trusted until the full RFC 5280 chain
+validates to a trust anchor.</p>
+<p><strong>Signature verifier.</strong> Verifies RSA-PSS/ECDSA/Ed25519 signatures over the exact
+TLS 1.3 CertificateVerify signed-content construction (RFC 8446 section 4.4.3).</p>
+<p><strong>PSK/ticket store.</strong> Holds resumption secrets and session tickets; ticket keys are
+themselves secret material and covered by the same zeroization discipline.</p>
+<p><strong>Alert subsystem.</strong> The only path by which any component reports a fatal condition;
+every fatal alert aborts the connection — never a silent accept (<a class="cite" href="/system-design-blueprints/systems/tls-handshake/reliability/#inv-6">I6</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Client Handshake State-Transition Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Accepted Message(s)</th>
+<th>On Success -&gt;</th>
+<th>On Failure</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Start</td>
+<td>(send ClientHello)</td>
+<td>WaitServerHello</td>
+<td>n/a (initiator)</td>
+</tr>
+<tr>
+<td>WaitServerHello</td>
+<td>ServerHello (full)</td>
+<td>WaitEncryptedExtensions</td>
+<td><code>handshake_failure</code></td>
+</tr>
+<tr>
+<td>WaitServerHello</td>
+<td>ServerHello (HelloRetryRequest form)</td>
+<td>Start (retry, transcript reset per P13)</td>
+<td><code>illegal_parameter</code> if second HRR</td>
+</tr>
+<tr>
+<td>WaitEncryptedExtensions</td>
+<td>EncryptedExtensions</td>
+<td>WaitCertOrCertRequest</td>
+<td><code>unexpected_message</code></td>
+</tr>
+<tr>
+<td>WaitCertOrCertRequest</td>
+<td>CertificateRequest (optional)</td>
+<td>WaitCertificate</td>
+<td>—</td>
+</tr>
+<tr>
+<td>WaitCertOrCertRequest</td>
+<td>Certificate (PSK-only mode skips this)</td>
+<td>WaitCertVerify</td>
+<td><code>unexpected_message</code></td>
+</tr>
+<tr>
+<td>WaitCertificate</td>
+<td>Certificate</td>
+<td>WaitCertVerify</td>
+<td><code>decode_error</code> on malformed chain</td>
+</tr>
+<tr>
+<td>WaitCertVerify</td>
+<td>CertificateVerify</td>
+<td>WaitFinished</td>
+<td><code>decrypt_error</code> on bad signature</td>
+</tr>
+<tr>
+<td>WaitFinished</td>
+<td>Finished (server)</td>
+<td>SendFinished</td>
+<td><code>bad_record_mac</code> on MAC mismatch</td>
+</tr>
+<tr>
+<td>SendFinished</td>
+<td>(send client Finished)</td>
+<td>Connected</td>
+<td>n/a</td>
+</tr>
+<tr>
+<td>Connected</td>
+<td>NewSessionTicket, application_data, KeyUpdate</td>
+<td>Connected</td>
+<td><code>unexpected_message</code> on handshake msg</td>
+</tr>
+<tr>
+<td>Any</td>
+<td>Alert (fatal)</td>
+<td>Closed</td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Server Handshake State-Transition Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Accepted Message(s)</th>
+<th>On Success -&gt;</th>
+<th>On Failure</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Start</td>
+<td>ClientHello</td>
+<td>ChooseParameters</td>
+<td><code>decode_error</code></td>
+</tr>
+<tr>
+<td>ChooseParameters</td>
+<td>(no key share match)</td>
+<td>SendHelloRetryRequest</td>
+<td>—</td>
+</tr>
+<tr>
+<td>ChooseParameters</td>
+<td>(key share matches)</td>
+<td>SendServerHello</td>
+<td>—</td>
+</tr>
+<tr>
+<td>SendHelloRetryRequest</td>
+<td>(send HRR, await 2nd ClientHello)</td>
+<td>Start (retry)</td>
+<td><code>illegal_parameter</code> on 2nd mismatch</td>
+</tr>
+<tr>
+<td>SendServerHello</td>
+<td>(send ServerHello, derive handshake secret)</td>
+<td>SendEncryptedExtensions</td>
+<td>—</td>
+</tr>
+<tr>
+<td>SendEncryptedExtensions</td>
+<td>(send EncryptedExtensions)</td>
+<td>SendCertRequestOrCert</td>
+<td>—</td>
+</tr>
+<tr>
+<td>SendCertRequestOrCert</td>
+<td>(send optional CertificateRequest)</td>
+<td>SendCertificate</td>
+<td>—</td>
+</tr>
+<tr>
+<td>SendCertificate</td>
+<td>(send Certificate, PSK-only mode skips)</td>
+<td>SendCertVerify</td>
+<td>—</td>
+</tr>
+<tr>
+<td>SendCertVerify</td>
+<td>(send CertificateVerify)</td>
+<td>SendFinished</td>
+<td>—</td>
+</tr>
+<tr>
+<td>SendFinished</td>
+<td>(send Finished, derive app secrets)</td>
+<td>WaitClientFinished</td>
+<td>—</td>
+</tr>
+<tr>
+<td>WaitClientFinished</td>
+<td>Finished (client)</td>
+<td>Connected</td>
+<td><code>bad_record_mac</code> on MAC mismatch</td>
+</tr>
+<tr>
+<td>WaitClientFinished</td>
+<td>(early data present, pre-Finished)</td>
+<td>Connected (early data consumed per <a class="cite" href="/system-design-blueprints/systems/tls-handshake/reliability/#inv-10">I10</a>)</td>
+<td><code>unexpected_message</code> if replay detected</td>
+</tr>
+<tr>
+<td>Connected</td>
+<td>application_data, KeyUpdate</td>
+<td>Connected</td>
+<td><code>unexpected_message</code> on handshake msg</td>
+</tr>
+<tr>
+<td>Any</td>
+<td>Alert (fatal)</td>
+<td>Closed</td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Record Layer Wire Format</h3>
+<p>TLSPlaintext / TLSCiphertext outer header (RFC 8446 section 5.1):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Size</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ContentType type</td>
+<td>1 byte</td>
+<td>20=alert, 21=change_cipher_spec (compat only), 22=handshake, 23=application_data</td>
+</tr>
+<tr>
+<td>legacy_record_version</td>
+<td>2 bytes</td>
+<td>always <code>0x0303</code> (TLS 1.2, frozen for middlebox compatibility)</td>
+</tr>
+<tr>
+<td>length</td>
+<td>2 bytes</td>
+<td>length of the following opaque payload, ≤ 2^14+256</td>
+</tr>
+<tr>
+<td>fragment / encrypted_record</td>
+<td>variable</td>
+<td>plaintext (pre-encryption) or AEAD ciphertext</td>
+</tr>
+</tbody></table></div>
+<p>TLSInnerPlaintext (the AEAD plaintext, before encryption — RFC 8446 section 5.2):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Size</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>content</td>
+<td>variable</td>
+<td>the real handshake/application/alert bytes</td>
+</tr>
+<tr>
+<td>type</td>
+<td>1 byte</td>
+<td>the real ContentType, hidden inside encryption</td>
+</tr>
+<tr>
+<td>zeros</td>
+<td>0+ bytes</td>
+<td>padding, length is a policy choice, not protocol-fixed</td>
+</tr>
+</tbody></table></div>
+<p><strong>Per-record nonce construction</strong> (RFC 8446 section 5.3):</p>
+<pre class="diagram"><code>nonce = static_iv  XOR  ( 0*(iv_len - 8) || seq_number_as_64bit_big_endian )</code></pre>
+<p><code>static_iv</code> is the per-direction IV from the key schedule; <code>seq_number</code> starts at 0 for
+the first record protected under a given traffic secret and increments by 1 per record,
+never resetting except on an explicit key update (RFC 8446 section 4.6.3), which
+derives fresh traffic secrets and resets the sequence number to 0 under the new key.</p>
+<h3 id="sec-8-4">8.4 Handshake Message Formats (byte layout)</h3>
+<p>ClientHello:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Size</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>legacy_version</td>
+<td>2 bytes, <code>0x0303</code></td>
+</tr>
+<tr>
+<td>random</td>
+<td>32 bytes</td>
+</tr>
+<tr>
+<td>legacy_session_id</td>
+<td>0-32 bytes, length-prefixed</td>
+</tr>
+<tr>
+<td>cipher_suites</td>
+<td>2+ bytes each, length-prefixed vector</td>
+</tr>
+<tr>
+<td>legacy_compression_methods</td>
+<td>1 byte, must be <code>[0x00]</code></td>
+</tr>
+<tr>
+<td>extensions</td>
+<td>length-prefixed vector of <code>Extension</code></td>
+</tr>
+</tbody></table></div>
+<p>Extension (generic):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Size</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>extension_type</td>
+<td>2 bytes</td>
+</tr>
+<tr>
+<td>extension_data</td>
+<td>length-prefixed opaque</td>
+</tr>
+</tbody></table></div>
+<p>Extensions relevant to Phase 0: <code>supported_versions</code> (list of 2-byte versions),
+<code>supported_groups</code> (list of <code>NamedGroup</code>), <code>key_share</code> (vector of <code>KeyShareEntry</code>:
+<code>NamedGroup</code> + length-prefixed public key bytes), <code>signature_algorithms</code> (list of
+<code>SignatureScheme</code>), <code>pre_shared_key</code> (list of <code>PskIdentity</code> + binder list),
+<code>psk_key_exchange_modes</code> (list of 1-byte mode: <code>psk_ke</code>=0, <code>psk_dhe_ke</code>=1).</p>
+<p>ServerHello:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Size</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>legacy_version</td>
+<td>2 bytes, <code>0x0303</code></td>
+</tr>
+<tr>
+<td>random</td>
+<td>32 bytes (HelloRetryRequest sentinel or downgrade sentinel may live here)</td>
+</tr>
+<tr>
+<td>legacy_session_id_echo</td>
+<td>0-32 bytes</td>
+</tr>
+<tr>
+<td>cipher_suite</td>
+<td>2 bytes</td>
+</tr>
+<tr>
+<td>legacy_compression_method</td>
+<td>1 byte, <code>0x00</code></td>
+</tr>
+<tr>
+<td>extensions</td>
+<td>length-prefixed vector (must include <code>supported_versions</code>=0x0304, <code>key_share</code>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Key Schedule — Derivation Chain (RFC 8446 section 7.1)</h3>
+<pre class="diagram"><code>              0
+              |
+      HKDF-Extract(salt=0, PSK or 0)                =  Early Secret
+              |
+              +--&gt; Derive-Secret(., &quot;ext binder&quot; | &quot;res binder&quot;, &quot;&quot;)     = binder_key
+              +--&gt; Derive-Secret(., &quot;c e traffic&quot;, ClientHello)          = client_early_traffic_secret
+              +--&gt; Derive-Secret(., &quot;e exp master&quot;, ClientHello)         = early_exporter_master_secret
+              |
+      Derive-Secret(Early Secret, &quot;derived&quot;, &quot;&quot;)     =  salt for next Extract
+              |
+      HKDF-Extract(salt=above, IKM=(EC)DHE secret)   =  Handshake Secret
+              |
+              +--&gt; Derive-Secret(., &quot;c hs traffic&quot;, CH..SH)   = client_handshake_traffic_secret
+              +--&gt; Derive-Secret(., &quot;s hs traffic&quot;, CH..SH)   = server_handshake_traffic_secret
+              |
+      Derive-Secret(Handshake Secret, &quot;derived&quot;, &quot;&quot;) =  salt for next Extract
+              |
+      HKDF-Extract(salt=above, IKM=0)                =  Master Secret
+              |
+              +--&gt; Derive-Secret(., &quot;c ap traffic&quot;, CH..server Finished) = client_application_traffic_secret_0
+              +--&gt; Derive-Secret(., &quot;s ap traffic&quot;, CH..server Finished) = server_application_traffic_secret_0
+              +--&gt; Derive-Secret(., &quot;exp master&quot;,   CH..server Finished) = exporter_master_secret
+              +--&gt; Derive-Secret(., &quot;res master&quot;,   CH..client Finished) = resumption_master_secret</code></pre>
+<p>Where <code>HKDF-Expand-Label(Secret, Label, Context, Length)</code> expands to
+<code>HKDF-Expand(Secret, HkdfLabel, Length)</code> with <code>HkdfLabel</code> encoding <code>Length</code>, the
+ASCII string <code>&quot;tls13 &quot; || Label</code>, and <code>Context</code>; and <code>Derive-Secret(Secret, Label, Messages) = HKDF-Expand-Label(Secret, Label, Transcript-Hash(Messages), Hash.length)</code>.
+Each traffic secret is expanded once more into <code>(write_key, write_iv)</code> via
+<code>HKDF-Expand-Label(secret, &quot;key&quot;, &quot;&quot;, key_length)</code> and
+<code>HKDF-Expand-Label(secret, &quot;iv&quot;, &quot;&quot;, 12)</code>.</p>
+<p><strong>Worked derivation, abridged (X25519, AES-128-GCM, SHA-256, no PSK):</strong> Early Secret =
+<code>HKDF-Extract(salt=0x00*32, ikm=0x00*32)</code>. Handshake Secret =
+<code>HKDF-Extract(salt=Derive-Secret(EarlySecret,&quot;derived&quot;,&quot;&quot;), ikm=ECDHE_shared_secret)</code>.
+<code>client_handshake_traffic_secret = Derive-Secret(HandshakeSecret, &quot;c hs traffic&quot;, Transcript(ClientHello..ServerHello))</code>. This exact chain, with concrete byte values, is
+matched bit-for-bit against RFC 8448 section 3&#39;s published test vectors in Phase 1&#39;s
+N.5 fixtures.</p>
+<h3 id="sec-8-6">8.6 ECDHE Computation (X25519, named steps)</h3>
+<ol>
+<li>Generate 32 random bytes as the private scalar; clamp per RFC 7748 section 5
+(clear bits 0-2 and bit 255, set bit 254) — delegated to <code>x25519-dalek</code>.</li>
+<li>Compute the public key as <code>scalar * base_point(9)</code>.</li>
+<li>Place the public key bytes in the <code>key_share</code> extension&#39;s <code>KeyShareEntry</code>.</li>
+<li>On receipt of the peer&#39;s <code>KeyShareEntry</code>, compute <code>shared_secret = scalar * peer_public_key</code> (Montgomery ladder, constant-time, delegated).</li>
+<li>Reject an all-zero output (a low-order-point attack indicator) before use.</li>
+<li>Feed <code>shared_secret</code> into the key schedule&#39;s Handshake Secret extract and then
+drop it (zeroize) — it is never needed again.</li>
+</ol>
+<h3 id="sec-8-7">8.7 Transcript-Hash Accumulation Rule</h3>
+<p>The transcript hash is the running output of the negotiated hash function (SHA-256 or
+SHA-384) over the concatenation, in wire order, of every <code>HandshakeMessage</code>&#39;s
+type+length+body bytes (never the record-layer framing). On HelloRetryRequest, the
+first ClientHello is replaced with a synthetic single record:
+<code>message_hash(1) || len(32 or 48) || Hash(first ClientHello)</code> before HelloRetryRequest
+and the second ClientHello are appended (P13, RFC 8446 section 4.4.1).</p>
+<h3 id="sec-8-8">8.8 Certificate Path-Validation Algorithm (named steps, RFC 5280 section 6)</h3>
+<ol>
+<li>Build the candidate chain from the leaf certificate to a self-signed root, using
+<code>Authority Key Identifier</code>/<code>Subject Key Identifier</code> matching where present.</li>
+<li>For each certificate, verify the issuer&#39;s signature over the subject certificate
+using the algorithm named in <code>signatureAlgorithm</code>.</li>
+<li>Check the validity period (<code>notBefore</code>/<code>notAfter</code>) against the current time for
+every certificate in the chain.</li>
+<li>Check <code>basicConstraints</code>: every non-leaf certificate must have <code>CA:TRUE</code> and, if
+<code>pathLenConstraint</code> is present, the remaining chain length must not exceed it.</li>
+<li>Check <code>keyUsage</code>: the leaf&#39;s key usage must permit <code>digitalSignature</code> (or
+<code>keyEncipherment</code> for RSA key-exchange fallback, out of Phase 0 scope).</li>
+<li>Check <code>nameConstraints</code> on every intermediate against the leaf&#39;s subject/SAN.</li>
+<li>Check the leaf&#39;s Subject Alternative Name against the expected peer hostname.</li>
+<li>Check the root against the configured <code>TrustAnchor</code> set.</li>
+<li>Revocation posture (decision table below) is applied last, after structural
+validation succeeds.</li>
+</ol>
+<p>Decision table:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Check</th>
+<th>Pass Condition</th>
+<th>Failure Alert</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Signature</td>
+<td>issuer key verifies subject signature</td>
+<td><code>bad_certificate</code></td>
+</tr>
+<tr>
+<td>Validity period</td>
+<td>now within [notBefore, notAfter] for every cert</td>
+<td><code>certificate_expired</code></td>
+</tr>
+<tr>
+<td>Name constraints</td>
+<td>leaf name permitted by every intermediate&#39;s constraint</td>
+<td><code>bad_certificate</code></td>
+</tr>
+<tr>
+<td>Basic constraints</td>
+<td>every non-leaf has CA:TRUE, path length respected</td>
+<td><code>bad_certificate</code></td>
+</tr>
+<tr>
+<td>Key usage</td>
+<td>leaf permits digitalSignature</td>
+<td><code>bad_certificate</code></td>
+</tr>
+<tr>
+<td>Revocation</td>
+<td>OCSP-stapled response fresh and Good, or policy allows <code>unknown</code></td>
+<td><code>certificate_revoked</code></td>
+</tr>
+<tr>
+<td>Trust anchor</td>
+<td>root matches configured <code>TrustAnchor</code></td>
+<td><code>unknown_ca</code></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-9">8.9 Signature Schemes — Signed-Content Construction</h3>
+<p>TLS 1.3 CertificateVerify (RFC 8446 section 4.4.3) signs, not the transcript hash
+directly, but:</p>
+<pre class="diagram"><code>signed_content = 0x20 * 64  ||  context_string  ||  0x00  ||  Transcript-Hash
+context_string  = &quot;TLS 1.3, server CertificateVerify&quot;   (or &quot;client CertificateVerify&quot;)</code></pre>
+<p>The 64 space (0x20) bytes and null separator exist specifically to prevent
+cross-protocol signature-reuse attacks (a signature valid under this construction
+cannot be replayed as a valid signature under an unrelated protocol&#39;s format).</p>
+<h3 id="sec-8-10">8.10 Alert Protocol Catalogue</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Alert</th>
+<th>Level</th>
+<th>When Raised</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>close_notify</td>
+<td>warning</td>
+<td>graceful connection shutdown</td>
+</tr>
+<tr>
+<td>unexpected_message</td>
+<td>fatal</td>
+<td>message received out of state-machine order (<a class="cite" href="/system-design-blueprints/systems/tls-handshake/reliability/#inv-6">I6</a>)</td>
+</tr>
+<tr>
+<td>bad_record_mac</td>
+<td>fatal</td>
+<td>AEAD open failed / Finished MAC mismatch</td>
+</tr>
+<tr>
+<td>record_overflow</td>
+<td>fatal</td>
+<td>record exceeds max size</td>
+</tr>
+<tr>
+<td>handshake_failure</td>
+<td>fatal</td>
+<td>no mutually acceptable parameters</td>
+</tr>
+<tr>
+<td>bad_certificate</td>
+<td>fatal</td>
+<td>certificate structurally invalid or signature fails</td>
+</tr>
+<tr>
+<td>unsupported_certificate</td>
+<td>fatal</td>
+<td>certificate type/algorithm not supported</td>
+</tr>
+<tr>
+<td>certificate_expired</td>
+<td>fatal</td>
+<td>validity-period check fails</td>
+</tr>
+<tr>
+<td>certificate_unknown</td>
+<td>fatal</td>
+<td>other certificate processing error</td>
+</tr>
+<tr>
+<td>illegal_parameter</td>
+<td>fatal</td>
+<td>a field takes a value inconsistent with the spec (incl. downgrade sentinel, <a class="cite" href="/system-design-blueprints/systems/tls-handshake/reliability/#inv-7">I7</a>)</td>
+</tr>
+<tr>
+<td>unknown_ca</td>
+<td>fatal</td>
+<td>trust anchor not found</td>
+</tr>
+<tr>
+<td>certificate_revoked</td>
+<td>fatal</td>
+<td>revocation check indicates revoked</td>
+</tr>
+<tr>
+<td>decode_error</td>
+<td>fatal</td>
+<td>message cannot be parsed per its wire format</td>
+</tr>
+<tr>
+<td>decrypt_error</td>
+<td>fatal</td>
+<td>signature verification fails</td>
+</tr>
+<tr>
+<td>protocol_version</td>
+<td>fatal</td>
+<td>no mutually supported version</td>
+</tr>
+<tr>
+<td>missing_extension</td>
+<td>fatal</td>
+<td>a mandatory extension absent</td>
+</tr>
+<tr>
+<td>unsupported_extension</td>
+<td>fatal</td>
+<td>extension sent when not permitted</td>
+</tr>
+<tr>
+<td>no_application_protocol</td>
+<td>fatal</td>
+<td>ALPN negotiation fails</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-11">8.11 Worked Full-Handshake Sequence (ClientHello to application data)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Message</th>
+<th>Active Secrets After</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Client -&gt; ClientHello</td>
+<td>none yet</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Server -&gt; ServerHello</td>
+<td>Handshake Secret derived both sides</td>
+</tr>
+<tr>
+<td>3</td>
+<td>(rekey to handshake traffic)</td>
+<td>client/server_handshake_traffic_secret</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Server -&gt; EncryptedExtensions</td>
+<td>(handshake keys)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Server -&gt; Certificate</td>
+<td>(handshake keys)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Server -&gt; CertificateVerify</td>
+<td>(handshake keys)</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Server -&gt; Finished</td>
+<td>(handshake keys); Master Secret derived</td>
+</tr>
+<tr>
+<td>8</td>
+<td>(rekey to application traffic, server side)</td>
+<td>server_application_traffic_secret_0</td>
+</tr>
+<tr>
+<td>9</td>
+<td>Client verifies Certificate/CertificateVerify/Finished</td>
+<td>(handshake keys, client side)</td>
+</tr>
+<tr>
+<td>10</td>
+<td>Client -&gt; Finished</td>
+<td>(handshake keys, client side)</td>
+</tr>
+<tr>
+<td>11</td>
+<td>(rekey to application traffic, client side)</td>
+<td>client_application_traffic_secret_0</td>
+</tr>
+<tr>
+<td>12</td>
+<td>Application data both directions</td>
+<td>application traffic secrets</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-12">8.12 Worked Resumption Handshake (PSK, no fresh ECDHE)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Message</th>
+<th>Note</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Client -&gt; ClientHello with <code>pre_shared_key</code> + <code>psk_key_exchange_modes=psk_dhe_ke</code></td>
+<td>binder computed over partial transcript</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Server selects PSK identity, verifies binder</td>
+<td>rejects with <code>decrypt_error</code> on binder mismatch</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Server -&gt; ServerHello with <code>pre_shared_key</code> extension selecting the PSK</td>
+<td>Early Secret now keyed by resumption PSK</td>
+</tr>
+<tr>
+<td>4</td>
+<td>(fresh ECDHE still performed for forward secrecy, mode=psk_dhe_ke)</td>
+<td>Handshake Secret includes both PSK and DHE input</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Remainder identical to <a class="cite" href="/system-design-blueprints/systems/tls-handshake/architecture/#sec-8-11">§8.11</a> steps 4-12</td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-13">8.13 Malformed-Input Examples</h3>
+<ul>
+<li>ClientHello with no mutually supported <code>key_share</code> group -&gt; server sends
+HelloRetryRequest naming a supported group (not a fatal alert — a legitimate retry
+path, RFC 8446 section 4.1.4).</li>
+<li>A <code>Certificate</code> message received in <code>WaitEncryptedExtensions</code> (skipped
+EncryptedExtensions) -&gt; <code>unexpected_message</code>, fatal, per <a class="cite" href="/system-design-blueprints/systems/tls-handshake/reliability/#inv-6">I6</a>.</li>
+<li>A certificate chain whose intermediate lacks <code>CA:TRUE</code> -&gt; <code>bad_certificate</code> per
+section 8.8&#39;s decision table.</li>
+<li>A <code>Finished</code> whose HMAC does not match the locally computed value over the
+transcript -&gt; <code>bad_record_mac</code>, fatal, connection aborts with no partial trust
+extended to any preceding message (P4).</li>
+<li>A record that fails AEAD authentication (tag mismatch) -&gt; <code>bad_record_mac</code>, fatal,
+no partial plaintext is ever exposed to the caller.</li>
+<li>0-RTT early data replaying a previously-seen ticket without a fresh, unused
+single-use marker -&gt; server rejects the early data (<a class="cite" href="/system-design-blueprints/systems/tls-handshake/reliability/#inv-10">I10</a>), continues the handshake
+without it, does not treat this as fatal to the rest of the handshake.</li>
+<li>ServerHello.random containing the TLS 1.2 or TLS 1.1 downgrade sentinel while
+negotiating TLS 1.3 -&gt; <code>illegal_parameter</code>, fatal, per <a class="cite" href="/system-design-blueprints/systems/tls-handshake/reliability/#inv-7">I7</a>.</li>
+</ul>
+<h3 id="sec-8-14">8.14 Failure-Path Example (end-to-end)</h3>
+<p>Client sends ClientHello proposing X25519 only. Server does not support X25519 (only
+P-256 configured). Server has no common <code>key_share</code> -&gt; checks <code>supported_groups</code> for a
+mutually acceptable group (P-256 present) -&gt; sends HelloRetryRequest naming P-256 -&gt;
+client resets transcript per P13, re-sends ClientHello with a P-256 <code>key_share</code> -&gt;
+handshake proceeds normally from <a class="cite" href="/system-design-blueprints/systems/tls-handshake/architecture/#sec-8-11">§8.11</a> step 2. If instead no group is mutually
+supported at all, server sends fatal <code>handshake_failure</code> and the connection closes
+without ever entering a keyed state.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

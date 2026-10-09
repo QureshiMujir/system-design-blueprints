@@ -1,0 +1,543 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>CSS Selector Engine — Architecture · Engineering Blueprints</title><meta name="description" content="CSS Selector Engine, hld: §3 overview + §8 domain model. A from-scratch Rust library that parses a CSS Selectors Level 4 string into a typed immutable AST, computes specificity, and answers &#34;does this node match / which nodes match&#34; against an arbitrary…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/web-browsers-collaboration/">Web, Browsers &amp; Collaboration</a> </li><li> <a href="/system-design-blueprints/systems/css-selector-engine/">CSS Selector Engine</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:255"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/web-browsers-collaboration/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Web, Browsers &amp; Collaboration</span></a> </p> <h1>CSS Selector Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~22 weeks</li> <li>2,992 lines</li> <li>blueprint #258</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/css-selector-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/css-selector-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/css-selector-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/css-selector-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/css-selector-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/css-selector-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/css-selector-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/css-selector-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/css-selector-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/css-selector-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:CSS Selector Engine — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                 Host application / CSSOM / style system
+            querySelector   querySelectorAll   matches   closest
+                                  |  selector string (UNTRUSTED) + Element tree (UNTRUSTED)
+   ===== TRUST BOUNDARY ======================================================
+                                  v
+   sel-query : query_selector / _all · matches · closest · :scope · SyntaxError · :visited gate
+        | parse                                              | match
+        v                                                    v
+   sel-parser : grammar -&gt; AST                          sel-matching : matches_selector (right-to-left)
+     SelectorList / Selector / Component / Combinator      MatchingContext · AncestorHashes · BloomFilter
+     Specificity · ToCss serialization  -------AST------&gt;   SelectorMap · NthIndexCache · invalidation
+        | tokens                                            | Element trait (host-tree abstraction)
+        v                                                    v
+   sel-tokenizer : Syntax L3 Token stream               sel-dom : reference tree (NodeRef) impl Element
+
+   selq (sel-cli) drives: parse · specificity · serialize · match · query · bench  (std harness over all)
+
+   DATA FLOWS:  selector &amp;str --tokenize--&gt; Token&lt;&#39;i&gt; --parse--&gt; Selector (immutable AST)
+                Element tree  --walk (read-only)--&gt; matches_selector -&gt; bool / Vec&lt;E&gt;
+   CONCURRENCY: post-parse Selector/SelectorList = immutable, Send+Sync -&gt; share across threads;
+                matching is read-only over the tree (&amp;E) -&gt; querySelectorAll parallelizes by subtree;
+                MatchingContext is per-thread, &amp;mut (caches/bloom) -&gt; NOT shared.
+   PERSISTENCE: none at runtime; compiled Selector + AncestorHashes + SelectorMap MAY be cached/
+                memoized by the host across calls (pure fn of selector string). No I/O on hot path.</code></pre>
+<p>The boundary at the top is the only place untrusted bytes enter: a selector <code>&amp;str</code> and a host tree reachable through <code>Element</code>. Everything below the boundary is total (no panics on adversarial input — malformed selectors become <code>ParseError</code>/<code>SyntaxError</code>, cyclic/deep trees are bounded by <code>nesting_level</code>). Left pipeline = compile (string -&gt; AST); right pipeline = match (AST + tree -&gt; answer). The two pipelines meet only at the immutable <code>Selector</code> value, which is the serialization point for caching and the unit shared across threads.</p>
+<h3 id="sec-3-1">3.1 sel-tokenizer</h3>
+<p>CSS Syntax L3 tokenization. Input: <code>&amp;&#39;i str</code>. Output: pull stream of <code>Token&lt;&#39;i&gt;</code> via <code>CowRcStr&lt;&#39;i&gt;</code> (zero-copy by default; owns only on escape-forced materialization). Emits <code>IDHash</code>/<code>Hash</code>, <code>BadString</code>/<code>BadUrl</code> error tokens, all An+B-relevant shapes. <code>no_std</code> + alloc. (Phase 1 <a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-13">§13</a>)</p>
+<h3 id="sec-3-2">3.2 sel-parser</h3>
+<p>Selectors L4 grammar (simple→compound→complex→list) to typed immutable AST. Load-bearing invariant: <code>Component</code>s in <strong>matching order</strong> (rightmost compound first, <code>Combinator</code>s interleaved). Computes <code>Specificity</code> during construction; owns <code>ToCss</code> serialization and <code>ParseError</code>/<code>ParseErrorKind</code>. Never panics. <code>no_std</code> + alloc. (Phases 2–6, 11, 13)</p>
+<h3 id="sec-3-3">3.3 sel-matching — Element trait + MatchingContext + SelectorChecker</h3>
+<p>Matching engine. <code>Element</code> trait = host-tree abstraction (navigation, identity <code>opaque()→OpaqueElement</code>, predicates, <code>match_non_ts_pseudo_class</code>, <code>add_element_unique_hashes</code>). Entry point: <code>matches_selector(sel, offset, hashes, el, ctx)→bool</code>. RTL walk: rightmost compound first, <code>Combinator</code> components leftward; unbounded combinators backtrack, bounded ones do not. <code>MatchingContext</code> threads <code>bloom_filter</code>, <code>nth_index_cache</code>, <code>VisitedHandlingMode</code>, <code>QuirksMode</code>, <code>scope_element</code>, <code>nesting_level</code>. <code>no_std</code> + alloc, generic over <code>E: Element</code>. (Phases 7–12)</p>
+<h3 id="sec-3-4">3.4 AncestorHashes + BloomFilter</h3>
+<p>Ancestor-based fast reject. <code>AncestorHashes { packed: [u32;3] }</code> stores ≤3 hashes (ids/classes/local-names left of a descendant/child combinator), 3×24-bit + overflow bits. <code>BloomFilter</code>: counting Bloom, 4096 8-bit buckets, 2 hash slots/insert, built from all candidate ancestors via <code>add_element_unique_hashes</code>. <strong>Zero false negatives</strong> invariant — a real match is never rejected; FP only costs the slow path. Counting allows push/pop on traversal stack. (Phase 10 <a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-22">§22</a>; reused in Phases 11–12)</p>
+<h3 id="sec-3-5">3.5 SelectorMap</h3>
+<p>Rule bucketing by rightmost simple selector. <code>SelectorMap&lt;T&gt;</code>: <code>id_hash</code> / <code>class_hash</code> / <code>local_name_hash</code> / <code>namespace_hash</code> buckets + <code>other: Vec&lt;T&gt;</code> fallback. For each element, retrieves only candidate selectors matching its id/class/local-name. Union of buckets is a superset of all matching selectors (lossless). (Phase 10 <a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-22">§22</a>; feeds Phase 12 dependency indexing)</p>
+<h3 id="sec-3-6">3.6 NthIndexCache</h3>
+<p>Memoizes <code>(parent, of-type?)</code> → child-index maps; turns repeated <code>:nth-*</code> index computation from O(siblings) to O(1) amortized. 1-based. Valid only for an unmutated <code>MatchingContext</code>; scoped to one matching pass, discarded or invalidated on structural mutation. (Phase 4 <a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-16">§16</a>, Phase 10 <a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-22">§22</a>, Phase 12 <a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-24">§24</a>)</p>
+<h3 id="sec-3-7">3.7 Invalidation subsystem</h3>
+<p>At insert: build <code>DependencySet</code> (per-selector) + <code>InvalidationSet</code>s (class/id/attr/local-name keys). On mutation: compute <code>RestyleHint</code> bitflags (<code>RESTYLE_SELF</code>, <code>RESTYLE_DESCENDANTS</code>, <code>RESTYLE_LATER_SIBLINGS</code>). Invariant: soundness over minimality — hint must cover every element whose match result could change; over-invalidation is slow, under-invalidation is a correctness bug. Modeled on Blink <code>RuleFeatureSet</code>. (Phase 12 <a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-24">§24</a>)</p>
+<h3 id="sec-3-8">3.8 sel-dom</h3>
+<p>Reference tree (<code>NodeRef</code>/<code>RcDom</code>) implementing <code>Element</code> for tests, CLI, conformance, fuzzing. Faithful but minimal: correct navigation, case-sensitivity, namespace — no layout/style/cascade. Only crate (besides sel-cli) using <code>std</code>. (Phases 0, 7, 13)</p>
+<h3 id="sec-3-9">3.9 sel-query</h3>
+<p>DOM selector API: <code>matches</code>/<code>query_selector</code>/<code>query_selector_all</code>/<code>closest</code>, <code>:scope</code> resolution, <code>SyntaxError</code> on invalid input, <code>:visited</code> security gate. Non-forgiving top-level parsing; collapses <code>VisitedHandlingMode</code> visited/unvisited before returning. Generic over <code>E: Element</code>, <code>no_std</code> + alloc. (Phase 9 <a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-21">§21</a>)</p>
+<h3 id="sec-3-10">3.10 sel-cli (selq)</h3>
+<p><code>selq</code> binary: subcommands <code>parse</code>, <code>specificity</code>, <code>serialize</code>, <code>match</code>, <code>query</code>, <code>bench</code>. Thin orchestration over public APIs, zero matching logic of its own. <code>std</code> harness exercising the whole stack. Used throughout as manual repro and debugging front door. (Phases 6, 13)</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — CSS Selector Grammar</h2>
+<p>This section is normative for <code>sel-tokenizer</code> and <code>sel-parser</code>. It fixes the token vocabulary, the Selectors Level 4 grammar (EBNF), the grammar-production → <code>Component</code> mapping, the <code>&lt;An+B&gt;</code> state machine, and worked / malformed examples. Matching semantics live in <a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-19">§19</a>; here we define only what a selector string <em>is</em> and what AST it becomes.</p>
+<h3 id="sec-8-1">8.1 Tokenization model (CSS Syntax Level 3)</h3>
+<p><code>Tokenizer&lt;&#39;i&gt;</code> consumes a <code>&amp;&#39;i str</code>, emits <code>Token&lt;&#39;i&gt;</code>. Zero-copy: token values borrow the input or wrap it in <code>CowRcStr&lt;&#39;i&gt;</code> (owned only when an escape forces materialization). One pass, no backtracking; preprocessing per Syntax L3 <a class="cite" href="/system-design-blueprints/systems/css-selector-engine/architecture/#sec-3-3">§3.3</a> (CR/CRLF/FF → LF; U+0000 → U+FFFD).</p>
+<p>Code-point class → token (decision per first significant code point):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Leading code point(s)</th>
+<th>Token produced</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ident-start (<code>[a-zA-Z_]</code>, non-ASCII ≥ U+0080, or escape)</td>
+<td><code>Ident</code> / <code>Function</code></td>
+<td><code>Function</code> iff immediately followed by <code>(</code></td>
+</tr>
+<tr>
+<td><code>#</code> + name code point</td>
+<td><code>Hash</code> or <code>IDHash</code></td>
+<td><code>IDHash</code> iff value is a valid <code>&lt;ident&gt;</code> (id-like); else <code>Hash</code> (unrestricted)</td>
+</tr>
+<tr>
+<td>digit, or <code>+</code>/<code>-</code>/<code>.</code> + digit</td>
+<td><code>Number</code> / <code>Percentage</code> / <code>Dimension</code></td>
+<td><code>int_value: Some</code> iff no <code>.</code>/<code>e</code>; <code>Percentage</code> iff trailing <code>%</code>; <code>Dimension</code> iff trailing ident</td>
+</tr>
+<tr>
+<td><code>&quot;</code> / <code>&#39;</code></td>
+<td><code>QuotedString</code> or <code>BadString</code></td>
+<td><code>BadString</code> on unescaped newline before close quote</td>
+</tr>
+<tr>
+<td><code>~= |= ^= $= *=</code></td>
+<td><code>IncludeMatch</code> <code>DashMatch</code> <code>PrefixMatch</code> <code>SuffixMatch</code> <code>SubstringMatch</code></td>
+<td>two-char match-operators; lone <code>~ | ^ $ *</code> → <code>Delim</code></td>
+</tr>
+<tr>
+<td><code>(</code> <code>[</code> <code>{</code></td>
+<td><code>ParenthesisBlock</code> <code>SquareBracketBlock</code> <code>CurlyBracketBlock</code></td>
+<td>open tokens; matching close = <code>Close*</code></td>
+</tr>
+<tr>
+<td><code>)</code> <code>]</code> <code>}</code></td>
+<td><code>CloseParenthesis</code> <code>CloseSquareBracket</code> <code>CloseCurlyBracket</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>:</code> <code>;</code> <code>,</code></td>
+<td><code>Colon</code> <code>Semicolon</code> <code>Comma</code></td>
+<td><code>::</code> = two <code>Colon</code> (pseudo-element decided in parser)</td>
+</tr>
+<tr>
+<td><code>/* … */</code></td>
+<td><code>Comment</code></td>
+<td>preserved as token; parser skips</td>
+</tr>
+<tr>
+<td>whitespace run</td>
+<td><code>WhiteSpace(&amp;&#39;i str)</code></td>
+<td>significant: descendant combinator vs adjacency</td>
+</tr>
+<tr>
+<td><code>&lt;!--</code> <code>--&gt;</code></td>
+<td><code>CDO</code> <code>CDC</code></td>
+<td>accepted + ignored at top level only</td>
+</tr>
+<tr>
+<td><code>url(</code> malformed</td>
+<td><code>BadUrl</code></td>
+<td>url() not used by selectors but tokenized for fidelity</td>
+</tr>
+<tr>
+<td>anything else</td>
+<td><code>Delim(char)</code></td>
+<td>e.g. <code>&gt; + ~ * . | =</code> arrive here pre-classification</td>
+</tr>
+</tbody></table></div>
+<p><strong>Escapes</strong>: <code>\</code> + hex (1–6 digits + optional WS) → code point; <code>\</code> + non-hex → literal; <code>\</code> at EOF → U+FFFD; forces <code>CowRcStr</code> to <code>Owned</code>. **IDHash vs Hash**: <code>IDHash(value)</code> if name is a valid <code>&lt;ident&gt;</code> (→ <code>Component::ID</code>); <code>Hash</code> otherwise → <code>ParseError::UnexpectedToken</code>. **Unused tokens** (<code>Semicolon</code>, <code>CDO</code>, <code>Dimension</code>, <code>BadUrl</code>, etc.) still emitted; parser maps them to <code>UnexpectedToken</code> — keeps tokenizer a pure Syntax-L3 layer.</p>
+<h3 id="sec-8-2">8.2 Selector grammar (EBNF)</h3>
+<p>Normative grammar parsed by <code>sel-parser</code>. <code>&lt;ws&gt;</code> = optional <code>WhiteSpace</code>/<code>Comment</code> run; <code>S</code> = one <em>required</em> whitespace run (significant → descendant combinator). Terminals in <code>UPPER</code> are <code>Token</code> variants.</p>
+<pre class="code language-ebnf" data-lang="ebnf"><code>selector-list       ::= complex-selector ( &lt;ws&gt; COMMA &lt;ws&gt; complex-selector )*
+relative-sel-list   ::= relative-selector ( &lt;ws&gt; COMMA &lt;ws&gt; relative-selector )*   (* :has() arg *)
+relative-selector   ::= combinator? &lt;ws&gt; complex-selector                          (* leading combinator allowed *)
+
+complex-selector    ::= compound-selector ( combinator compound-selector )*
+combinator          ::= &lt;ws&gt; &quot;&gt;&quot; &lt;ws&gt;          (* Child *)
+                      |  &lt;ws&gt; &quot;+&quot; &lt;ws&gt;          (* NextSibling *)
+                      |  &lt;ws&gt; &quot;~&quot; &lt;ws&gt;          (* LaterSibling / subsequent-sibling *)
+                      |  S                      (* Descendant: required whitespace, no symbol *)
+
+compound-selector   ::= ( type-selector subclass-selector* )
+                      |  ( subclass-selector+ )
+                      |  ( type-selector subclass-selector* pseudo-element-selector* )
+type-selector       ::= ( ns-prefix? element-name ) | ns-prefix? &quot;*&quot;
+ns-prefix           ::= ( IDENT | &quot;*&quot; )? &quot;|&quot;
+element-name        ::= IDENT
+subclass-selector   ::= id-selector | class-selector | attribute-selector | pseudo-class-selector
+id-selector         ::= IDHASH
+class-selector      ::= &quot;.&quot; IDENT
+attribute-selector  ::= &quot;[&quot; &lt;ws&gt; ns-prefix? IDENT &lt;ws&gt;
+                          ( attr-operator &lt;ws&gt; ( IDENT | STRING ) &lt;ws&gt; attr-case-flag? &lt;ws&gt; )? &quot;]&quot;
+attr-operator       ::= &quot;=&quot; | INCLUDEMATCH | DASHMATCH | PREFIXMATCH | SUFFIXMATCH | SUBSTRINGMATCH
+attr-case-flag      ::= IDENT(&quot;i&quot;) | IDENT(&quot;s&quot;)
+
+pseudo-class-selector   ::= &quot;:&quot; IDENT | &quot;:&quot; FUNCTION &lt;ws&gt; functional-args &lt;ws&gt; &quot;)&quot;
+pseudo-element-selector ::= &quot;:&quot; &quot;:&quot; IDENT | &quot;:&quot; &quot;:&quot; FUNCTION &lt;ws&gt; functional-args &lt;ws&gt; &quot;)&quot;
+
+functional-args     ::= selector-list                  (* :is :where :not *)
+                      |  relative-sel-list              (* :has *)
+                      |  An-plus-B ( S &quot;of&quot; S selector-list )?   (* :nth-child / :nth-last-child *)
+                      |  An-plus-B                      (* :nth-of-type / :nth-last-of-type *)
+                      |  IDENT ( &lt;ws&gt; COMMA &lt;ws&gt; IDENT )*  (* :lang *)
+                      |  ( &quot;ltr&quot; | &quot;rtl&quot; | IDENT )       (* :dir *)
+
+An-plus-B           ::= &quot;even&quot; | &quot;odd&quot;
+                      |  INTEGER
+                      |  [ &quot;+&quot; | &quot;-&quot; ]? ( INTEGER )? N-IDENT ( &lt;ws&gt; SIGN &lt;ws&gt; INTEGER )?
+N-IDENT             ::= IDENT(&quot;n&quot;) | IDENT(&quot;-n&quot;) | DIMENSION(unit=&quot;n&quot;) | DIMENSION(unit=&quot;n-&quot;)
+SIGN                ::= &quot;+&quot; | &quot;-&quot;</code></pre>
+<p><code>&lt;ws&gt;</code> around <code>&gt;</code>/<code>+</code>/<code>~</code> is discarded; a whitespace run with <strong>no</strong> symbol between two compounds is the Descendant combinator. A whitespace-only gap <em>followed by</em> <code>&gt;</code>/<code>+</code>/<code>~</code> collapses to the symbol combinator (whitespace not double-counted).</p>
+<h3 id="sec-8-3">8.3 AST mapping (grammar production → <code>Component</code> variant)</h3>
+<p>A <code>Selector</code> stores <code>Box&lt;[Component]&gt;</code> in <strong>matching order</strong> (rightmost compound first; iterating the slice left-to-right walks the selector right-to-left as written) plus its packed <code>Specificity</code>. Combinators are interleaved as <code>Component::Combinator</code> between compounds.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Grammar production</th>
+<th><code>Component</code> variant(s)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>*</code> (no ns)</td>
+<td><code>ExplicitUniversalType</code></td>
+</tr>
+<tr>
+<td><code>*|</code> / <code>|</code> / default ns</td>
+<td><code>ExplicitAnyNamespace</code> / <code>ExplicitNoNamespace</code> / <code>DefaultNamespace(NamespaceUrl)</code></td>
+</tr>
+<tr>
+<td><code>ns|E</code></td>
+<td><code>Namespace(NamespacePrefix, NamespaceUrl)</code> then <code>LocalName</code></td>
+</tr>
+<tr>
+<td><code>E</code></td>
+<td><code>LocalName(LocalName)</code></td>
+</tr>
+<tr>
+<td><code>#id</code> (<code>IDHASH</code>)</td>
+<td><code>ID(Atom)</code></td>
+</tr>
+<tr>
+<td><code>.cls</code></td>
+<td><code>Class(Atom)</code></td>
+</tr>
+<tr>
+<td><code>[attr]</code></td>
+<td><code>AttributeInNoNamespaceExists{ local_name, local_name_lower }</code></td>
+</tr>
+<tr>
+<td><code>[attr OP val]</code> no-ns</td>
+<td><code>AttributeInNoNamespace{ local_name, operator, value, case_sensitivity, never_matches }</code></td>
+</tr>
+<tr>
+<td><code>[ns|attr OP val]</code></td>
+<td><code>AttributeOther(Box&lt;AttrSelectorWithOptionalNamespace&gt;)</code></td>
+</tr>
+<tr>
+<td><code>:not(...)</code></td>
+<td><code>Negation(Box&lt;[Selector]&gt;)</code></td>
+</tr>
+<tr>
+<td><code>:is(...)</code> / <code>:where(...)</code></td>
+<td><code>Is(Box&lt;[Selector]&gt;)</code> / <code>Where(Box&lt;[Selector]&gt;)</code></td>
+</tr>
+<tr>
+<td><code>:has(...)</code></td>
+<td><code>Has(Box&lt;[RelativeSelector]&gt;)</code></td>
+</tr>
+<tr>
+<td><code>:root</code> <code>:empty</code> <code>:scope</code></td>
+<td><code>Root</code> <code>Empty</code> <code>Scope</code></td>
+</tr>
+<tr>
+<td><code>:nth-child</code> / <code>:nth-last-child</code> / <code>:nth-of-type</code> / <code>:nth-last-of-type</code> (no <code>of</code>)</td>
+<td><code>Nth(NthData{ a, b, ty })</code></td>
+</tr>
+<tr>
+<td><code>:nth-child(An+B of S)</code></td>
+<td><code>NthOf(NthOfData{ nth, selectors })</code></td>
+</tr>
+<tr>
+<td><code>:hover</code> … <code>:lang()</code> <code>:dir()</code> <code>:link</code> <code>:visited</code> etc.</td>
+<td><code>NonTSPseudoClass(NonTSPseudoClass)</code></td>
+</tr>
+<tr>
+<td><code>::before</code> …</td>
+<td><code>PseudoElement(PseudoElement)</code></td>
+</tr>
+<tr>
+<td><code>&gt;</code> <code>+</code> <code>~</code> / descendant</td>
+<td><code>Combinator(Child / NextSibling / LaterSibling / Descendant)</code></td>
+</tr>
+<tr>
+<td><code>:host()</code> <code>::slotted()</code> <code>::part()</code></td>
+<td><code>Host</code> / <code>Slotted</code> / <code>Part</code> (shadow DOM = stretch)</td>
+</tr>
+</tbody></table></div>
+<p>Parse-time folding: <code>never_matches:true</code> for <code>[a^=&#39;&#39;]</code>/<code>[a$=&#39;&#39;]</code>/<code>[a*=&#39;&#39;]</code> (short-circuits, retains specificity); <code>local_name_lower</code> precomputed for HTML case-insensitive attr matching; <code>case_sensitivity</code> from explicit <code>i</code>/<code>s</code> or quirks mode; <code>:where()</code> args flagged zero-specificity.</p>
+<h3 id="sec-8-4">8.4 <code>&lt;An+B&gt;</code> parse state machine</h3>
+<p>1-based index microsyntax. Inputs arrive as <code>Number</code>, <code>Dimension(unit)</code>, <code>Ident</code>, <code>Delim(&#39;+&#39;/&#39;-&#39;)</code>. Goal: <code>NthData{ a, b, ty }</code>. States:</p>
+<pre class="diagram"><code>START --&quot;even&quot;-------------------&gt; ACCEPT (a=2,  b=0)
+START --&quot;odd&quot;--------------------&gt; ACCEPT (a=2,  b=1)
+START --INTEGER b---------------&gt; ACCEPT (a=0,  b)            (* e.g. :nth-child(3) *)
+START --IDENT &quot;n&quot; / &quot;-n&quot; -------&gt; AFTER_N (a=±1)
+START --INTEGER &quot;n&quot; (DIM unit=n)-&gt; AFTER_N (a=int)            (* 2n, -3n *)
+START --SIGN -------------------&gt; EXPECT_N (carry sign)
+EXPECT_N --IDENT &quot;n&quot; -----------&gt; AFTER_N (a=±1)
+AFTER_N --(end)-----------------&gt; ACCEPT (b=0)                (* &quot;2n&quot; *)
+AFTER_N --SIGN INTEGER ---------&gt; ACCEPT (b=±int)             (* &quot;2n + 1&quot; / &quot;2n-1&quot; *)
+AFTER_N --DIM unit=&quot;n-&quot; b ------&gt; ACCEPT (split &quot;n-1&quot; form)
+any unexpected / trailing token-&gt; ERROR (BadNthExpression)</code></pre>
+<p>Edge cases: whitespace permitted only around the inner <code>SIGN</code> (<code>2n + 1</code> ok; <code>2 n</code> is ERROR — <code>Number</code> then <code>Ident</code> is two tokens with no <code>n</code>-attach). <code>n</code> alone → <code>a=1,b=0</code>. <code>-n+3</code> → <code>a=-1,b=3</code>. <code>of S</code> tail: after ACCEPT, optional <code>S &quot;of&quot; S selector-list</code> → promotes <code>Nth</code> to <code>NthOf</code>; a <em>forgiving-style</em> but actually <strong>non-forgiving</strong> inner list (invalid → <code>BadNthExpression</code>). <code>ty</code> (<code>Child</code>/<code>LastChild</code>/<code>OfType</code>/<code>LastOfType</code>) is fixed by which pseudo-class function wraps the <code>An+B</code>, not by the microsyntax.</p>
+<h3 id="sec-8-5">8.5 Worked example A</h3>
+<p>Selector: <code>ul.nav &gt; li:nth-child(2n+1) a[href^=&#39;https&#39;]:not(.ext)</code></p>
+<p>Token stream (whitespace/comments elided to significant):</p>
+<pre class="diagram"><code>Ident(ul) Delim(.) Ident(nav)  WS  Delim(&gt;)  WS  Ident(li) Colon Function(nth-child)
+  Number{value:2,int:2} Ident(n) Delim(+) Number{value:1,int:1} CloseParenthesis
+  WS  Ident(a) SquareBracketBlock Ident(href) PrefixMatch QuotedString(https) CloseSquareBracket
+  Colon Function(not) Delim(.) Ident(ext) CloseParenthesis</code></pre>
+<p>AST as written (left-to-right, logical): <code>[ul.nav] &gt;child [li :nth-child(2n+1)] descendant [a [href^=&#39;https&#39;] :not(.ext)]</code>.</p>
+<p>Stored <strong>matching-order</strong> component slice (index 0 = rightmost compound matched first):</p>
+<pre class="diagram"><code>0: LocalName(&quot;a&quot;)                                   ┐ rightmost compound (subject)
+1: AttributeInNoNamespace{ href, Prefix, &quot;https&quot;, CaseSensitive, never_matches:false }
+2: Negation([ Selector[ Class(&quot;ext&quot;) ] ])           ┘
+3: Combinator(Descendant)
+4: LocalName(&quot;li&quot;)                                  ┐
+5: Nth(NthData{ a:2, b:1, ty:Child })               ┘
+6: Combinator(Child)
+7: LocalName(&quot;ul&quot;)                                  ┐
+8: Class(&quot;nav&quot;)                                     ┘</code></pre>
+<p>Specificity = (a,b,c): ids <code>a=0</code>; classes/attrs/pseudo-classes <code>b</code> = <code>.nav</code> + <code>[href^=]</code> + <code>:nth-child</code> + <code>:not(.ext)</code>(takes most-specific arg <code>.ext</code> = 1 class) = <strong>4</strong>; types <code>c</code> = <code>ul</code>+<code>li</code>+<code>a</code> = <strong>3</strong>. Packed <code>(0,4,3)</code>.</p>
+<h3 id="sec-8-6">8.6 Malformed inputs → error mapping</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Result</th>
+<th><code>ParseErrorKind</code></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>div &gt;</code></td>
+<td>dangling trailing combinator</td>
+<td><code>DanglingCombinator</code></td>
+</tr>
+<tr>
+<td><code>&gt; div</code></td>
+<td>dangling leading combinator (top-level; allowed only in <code>:has</code> relative list)</td>
+<td><code>DanglingCombinator</code></td>
+</tr>
+<tr>
+<td><code>a..b</code></td>
+<td><code>.</code> then <code>.</code> (empty class name)</td>
+<td><code>UnexpectedToken</code></td>
+</tr>
+<tr>
+<td><code>#123</code></td>
+<td><code>Hash</code> (unrestricted), not <code>IDHash</code></td>
+<td><code>UnexpectedToken</code></td>
+</tr>
+<tr>
+<td><code>:nth-child()</code></td>
+<td>empty <code>An+B</code></td>
+<td><code>BadNthExpression</code></td>
+</tr>
+<tr>
+<td><code>:nth-child(2 n)</code></td>
+<td>split number/ident, no <code>n</code>-attach</td>
+<td><code>BadNthExpression</code></td>
+</tr>
+<tr>
+<td><code>[</code></td>
+<td>unterminated <code>SquareBracketBlock</code></td>
+<td><code>UnclosedBlock</code></td>
+</tr>
+<tr>
+<td><code>[href~]</code></td>
+<td>operator with no value</td>
+<td><code>BadAttributeSelector</code></td>
+</tr>
+<tr>
+<td><code>::unknown</code></td>
+<td>unrecognized pseudo-element</td>
+<td><code>UnsupportedPseudo</code></td>
+</tr>
+<tr>
+<td><code>:unknown</code> (non-functional)</td>
+<td>unrecognized pseudo-class</td>
+<td><code>UnsupportedPseudo</code></td>
+</tr>
+<tr>
+<td><code>:not()</code></td>
+<td>empty non-forgiving list</td>
+<td><code>EmptySelector</code></td>
+</tr>
+<tr>
+<td><code>,</code> / `` (empty)</td>
+<td>empty selector list</td>
+<td><code>EmptySelector</code></td>
+</tr>
+<tr>
+<td><code>ns|div</code> (ns not declared)</td>
+<td>unknown namespace prefix</td>
+<td><code>NamespaceUnknown</code></td>
+</tr>
+<tr>
+<td><code>:is(.x, !!!)</code></td>
+<td>forgiving: drops <code>!!!</code>, keeps <code>.x</code></td>
+<td>(no error)</td>
+</tr>
+<tr>
+<td><code>:has(:has(:has(… &gt; cap)))</code></td>
+<td>nesting depth &gt; cap (default 32)</td>
+<td><code>BadPseudo</code></td>
+</tr>
+</tbody></table></div>
+<p>Forgiving vs non-forgiving (binding): <code>:is()</code>/<code>:where()</code> drop invalid complex selectors (no error unless <em>all</em> drop → empty <code>Is</code>/<code>Where</code>, still valid-empty = matches nothing). <code>:not()</code> and <code>:has()</code> are non-forgiving (any invalid arg → propagate error). Top-level <code>query_selector</code> is non-forgiving → <code>SyntaxError</code> (<a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-21">§21</a>). Recursion/complexity guards: nesting cap on <code>:is</code>/<code>:not</code>/<code>:has</code> (default 32, configurable) → <code>BadPseudo</code> past cap; protects parser stack against adversarial input.</p>
+<h3 id="sec-8-7">8.7 Right-to-left matching (sequence diagram)</h3>
+<p>Sample tree and selector <code>ul.nav &gt; li a</code> matched against candidate <code>&lt;a&gt;</code>:</p>
+<pre class="diagram"><code>ul.nav
+ └─ li
+     └─ span
+         └─ a   &lt;-- candidate (subject)</code></pre>
+<pre class="diagram"><code>Checker            &lt;a&gt;            &lt;span&gt;          &lt;li&gt;           &lt;ul.nav&gt;
+   |  match LocalName(&quot;a&quot;) on candidate -&gt; ✓
+   |  Combinator(Descendant): walk ancestors looking for [li]
+   |----parent()------&gt;|
+   |  [span] match LocalName(&quot;li&quot;)? ✗  (descendant = unbounded -&gt; keep climbing, backtrack point)
+   |---------------- parent() --------------&gt;|
+   |  [li] match LocalName(&quot;li&quot;)? ✓
+   |  Combinator(Child): parent MUST match [ul.nav] (bounded, no backtrack)
+   |------------------------------ parent() -------------------&gt;|
+   |  [ul] match LocalName(&quot;ul&quot;) ✓ AND Class(&quot;nav&quot;) ✓
+   |  no more components -&gt; MATCH</code></pre>
+<p>Right-to-left + rightmost-first rejects fastest (most selectors fail on the subject&#39;s simple selector). <code>Descendant</code>/<code>LaterSibling</code> keep a backtrack frame (unbounded climb/scan); <code>Child</code>/<code>NextSibling</code> are bounded (single step, fail immediately on mismatch). <code>AncestorHashes</code>/<code>BloomFilter</code> (<a class="cite" href="/system-design-blueprints/systems/css-selector-engine/build/#sec-22">§22</a>) pre-reject before this walk; they never produce false negatives.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

@@ -1,0 +1,446 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Rate Limiter — Architecture · Engineering Blueprints</title><meta name="description" content="Rate Limiter, hld: §3 overview + §8 domain model. Build a distributed rate limiter: a library plus a thin control surface that admits or rejects discrete units of work against a quota, shared correctly across N stateless service replicas, under real…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/rate-limiter/">Rate Limiter</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Rate Limiter</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~16 weeks</li> <li>2,453 lines</li> <li>blueprint #39</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-ok" title="Every phase meets its definition of done">Build: all phases</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/rate-limiter/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/rate-limiter/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/rate-limiter/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/rate-limiter/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/rate-limiter/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/rate-limiter/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/rate-limiter/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/rate-limiter/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/rate-limiter/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/rate-limiter/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Rate Limiter — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code> Client / Downstream Service
+        │
+        ▼
+ ┌───────────────────────────────────────────────────────────────┐
+ │ Middleware (ratelimiter-tower / -axum / -hyper / -actix)      │
+ │  KeyExtractor → composite Key(tenant, scope, value)           │
+ │  hierarchical composition: IP → user → route → tenant → global│
+ └───────────────────────────┬───────────────────────────────────┘
+                             ▼
+ ┌───────────────────────────────────────────────────────────────┐
+ │ Hot-Key Pre-Filter (local, sketch-based; §21)                 │
+ │  Count-Min Sketch admission gate before the coordination hop  │
+ └───────────────────────────┬───────────────────────────────────┘
+                             ▼
+ ┌───────────────────────────────────────────────────────────────┐
+ │ Limiter (algorithm dispatch, ratelimiter-core; §8)            │
+ │  TokenBucket │ LeakyBucket │ FixedWindow │ SlidingLog │       │
+ │  SlidingCounter │ GCRA                                        │
+ └───────────────────────────┬───────────────────────────────────┘
+                             ▼
+ ┌───────────────────────────────────────────────────────────────┐
+ │ Backend (per-key state store; §14)                            │
+ │  In-Process Sharded │ Redis + atomic Lua │ Cluster (shard)   │
+ │  Local-Approximate + Gossip Reconciliation                    │
+ └───────────────────────────┬───────────────────────────────────┘
+                             ▼
+ ┌───────────────────────────────────────────────────────────────┐
+ │ Circuit Breaker + FailureMode Dispatch (§22)                  │
+ │  fail-open | fail-closed, never a silent default              │
+ └───────────────────────────┬───────────────────────────────────┘
+                             ▼
+                     Decision { Permit | Reject }
+                             │
+                             ▼
+ ┌───────────────────────────────────────────────────────────────┐
+ │ Protocol Layer (ratelimiter-protocol; §8.9)                   │
+ │  200 + RateLimit-* headers  │  429 + Retry-After + headers    │
+ └───────────────────────────────────────────────────────────────┘
+
+ Cross-cutting: ClockSource (monotonic; §8.8) feeds every box above.
+ Telemetry (Prometheus counters + OTel spans) attaches to every decision.</code></pre>
+<p><strong>Middleware.</strong> Extracts the caller&#39;s <code>Key</code> and composes the hierarchy (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#sec-7">§7</a>); the first
+layer to reject short-circuits the request before any layer&#39;s counter is touched twice.</p>
+<p><strong>Hot-Key Pre-Filter.</strong> A local Count-Min Sketch (Cormode-Muthukrishnan 2005, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/study/#sec-5">§5</a>) flags keys
+whose estimated rate already exceeds a coarse ceiling, rejecting locally before a
+network round-trip to the coordination substrate is spent — this is the structural DDoS
+defense (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#sec-23">§23</a>, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#t-1">T1</a>).</p>
+<p><strong>Limiter.</strong> Dispatches to exactly one of the six algorithms per <a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-1">P1</a>; the algorithm owns its
+state-transition semantics (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#sec-8">§8</a>) and never mixes with another algorithm&#39;s state shape.</p>
+<p><strong>Backend.</strong> The three topologies of <a class="cite" href="/system-design-blueprints/systems/rate-limiter/blueprint/#sec-1">§1</a>&#39;s non-goals discussion: in-process (fastest, single
+node), Redis-centralized (strict, network-bound), cluster/gossip (partition-tolerant,
+approximate). Selection is a <code>Quota</code>-level configuration, not a code fork (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-7">P7</a>).</p>
+<p><strong>Circuit Breaker + FailureMode Dispatch.</strong> Wraps every backend call; on repeated backend
+failure it opens and the configured <code>FailureMode</code> (never a silent default, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-4">P4</a>) decides the
+<code>Decision</code> returned to the middleware.</p>
+<p><strong>Protocol Layer.</strong> Renders the <code>Decision</code> into wire form: the IETF <code>RateLimit-*</code> headers on
+every response, RFC 6585&#39;s 429 plus RFC 7231&#39;s <code>Retry-After</code> on reject (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#sec-8-9">§8.9</a>).</p>
+<p>The diagram is the contract: every later section — the Domain Model, the Repository
+Layout, and every phase — names exactly these boxes and no others.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Protocol / Data Model</h2>
+<p>Every algorithm below shares the same contract: <code>check(key, cost, now_ns) -&gt; Decision</code>. The
+state each keeps, and the equation each uses, differ. This section is the normative
+reference every phase&#39;s N.2 anchors back to.</p>
+<h3 id="sec-8-1">8.1 Token Bucket</h3>
+<p><strong>State:</strong> <code>{ tokens: f64, last_refill_ns: u64 }</code>.</p>
+<p><strong>Equation:</strong> on <code>check(cost)</code> at <code>now_ns</code>: <code>elapsed = now_ns - last_refill_ns</code>;
+<code>tokens = min(burst, tokens + elapsed × (rate / period))</code>; if <code>tokens ≥ cost</code>, admit and
+<code>tokens -= cost</code>; else reject with <code>retry_after = ceil((cost - tokens) / (rate/period))</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+<th>Bound</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>tokens</code></td>
+<td>current burst budget</td>
+<td><code>0 ≤ tokens ≤ burst</code></td>
+</tr>
+<tr>
+<td><code>last_refill_ns</code></td>
+<td>last decision&#39;s monotonic timestamp</td>
+<td>strictly non-decreasing (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-3">I3</a>)</td>
+</tr>
+</tbody></table></div>
+<p>Contract: &quot;burst once, then refill at <code>rate</code>.&quot; Paper: Turner 1986 (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/study/#sec-5">§5</a>).</p>
+<h3 id="sec-8-2">8.2 Leaky Bucket</h3>
+<p><strong>State:</strong> <code>{ level: f64, last_drip_ns: u64 }</code>.</p>
+<p><strong>Equation:</strong> on <code>check(cost)</code>: <code>elapsed = now_ns - last_drip_ns</code>; <code>level = max(0, level - elapsed × (rate/period))</code>; if <code>level + cost ≤ burst</code>, admit and <code>level += cost</code>; else reject
+with <code>retry_after = ceil((level + cost - burst) / (rate/period))</code>.</p>
+<p>Contract: smooths the <em>output</em> rate regardless of input burstiness — the dual of token
+bucket, which smooths nothing but bounds burst admission. Ref-impl: nginx
+<code>ngx_http_limit_req_module</code> (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/study/#sec-5">§5</a>).</p>
+<h3 id="sec-8-3">8.3 Fixed-Window Counter</h3>
+<p><strong>State:</strong> <code>{ count: u64, window_start_ns: u64 }</code>, keyed by <code>window_id = now_ns / period_ns</code>.</p>
+<p><strong>Equation:</strong> if <code>now_ns / period_ns != window_start_ns / period_ns</code>, reset <code>count = 0</code>,
+<code>window_start_ns = now_ns</code>; if <code>count + cost ≤ limit</code>, admit and <code>count += cost</code>; else reject
+with <code>retry_after = window_start_ns + period_ns - now_ns</code>.</p>
+<p><strong>Boundary effect:</strong> a client may issue up to <code>2 × limit</code> requests inside any real 1-period
+span that straddles a window boundary — the defining weakness this algorithm trades for O(1)
+state and no per-request scan.</p>
+<h3 id="sec-8-4">8.4 Sliding-Window Log</h3>
+<p><strong>State:</strong> <code>{ events: Vec&lt;u64&gt; }</code> (timestamps within <code>[now_ns - period_ns, now_ns]</code>), capped
+at a configurable <code>max_events</code> (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-5">I5</a>).</p>
+<p><strong>Equation:</strong> evict every <code>e ∈ events</code> with <code>e &lt; now_ns - period_ns</code>; if
+<code>events.len() + cost ≤ limit</code>, admit and push <code>cost</code> copies of <code>now_ns</code> (batched as a count,
+not <code>cost</code> separate pushes); else reject with <code>retry_after</code> = time until the oldest
+in-window event expires.</p>
+<p>Exact accuracy, unbounded memory growth under sustained traffic — bounded here by <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-5">I5</a>&#39;s
+explicit cap, which trades exactness for the same memory ceiling as sliding-window-counter
+once the cap binds.</p>
+<h3 id="sec-8-5">8.5 Sliding-Window Counter</h3>
+<p><strong>State:</strong> <code>{ current: u64, previous: u64, window_start_ns: u64 }</code>.</p>
+<p><strong>Equation:</strong> let <code>f = (now_ns - window_start_ns) / period_ns</code> (fraction elapsed in the
+current window); <code>estimated_count = current + previous × (1 - f)</code>; if
+<code>estimated_count + cost ≤ limit</code>, admit and <code>current += cost</code>; on window roll-over,
+<code>previous = current; current = 0; window_start_ns += period_ns</code>.</p>
+<p>Cloudflare&#39;s approximation (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/study/#sec-5">§5</a>): O(1) memory, error ≤ 6% worst-case at a traffic spike
+exactly at the boundary, ≤ 1% under steady-state traffic — the number in <a class="cite" href="/system-design-blueprints/systems/rate-limiter/numbers/#sec-4">§4</a> is this
+algorithm&#39;s documented ε for <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-1">I1</a>.</p>
+<h3 id="sec-8-6">8.6 GCRA (Generic Cell Rate Algorithm)</h3>
+<p><strong>State:</strong> <code>{ tat_ns: u64 }</code> — the Theoretical Arrival Time, one integer per key.</p>
+<p><strong>Equation:</strong> <code>increment_ns = period_ns / rate</code> (scaled by <code>cost</code>);
+<code>dvt_ns = (burst - 1) × increment_ns</code> (delay-variation tolerance);
+<code>new_tat = max(now_ns, tat_ns) + increment_ns</code>; <code>allow_at = new_tat - dvt_ns</code>; if
+<code>allow_at ≤ now_ns</code>, admit and <code>tat_ns = new_tat</code>; else reject with
+<code>retry_after = allow_at - now_ns</code>.</p>
+<p>GCRA is token-bucket-with-leaky-bucket-mean-rate re-expressed as a single timestamp (ATM
+Forum 1996, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/study/#sec-5">§5</a>) — its one-integer-per-key footprint is why it is the Phase-0 default
+(<a class="cite" href="/system-design-blueprints/systems/rate-limiter/trade-offs/#adr-10">ADR-10</a>).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Algorithm</th>
+<th>Memory/key</th>
+<th>Accuracy</th>
+<th>Burst semantics</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Token Bucket</td>
+<td>16 B (2×f64/u64)</td>
+<td>exact</td>
+<td>explicit burst param</td>
+</tr>
+<tr>
+<td>Leaky Bucket</td>
+<td>16 B</td>
+<td>exact (output-smoothed)</td>
+<td>bounded queue depth</td>
+</tr>
+<tr>
+<td>Fixed Window</td>
+<td>16 B</td>
+<td>boundary error up to 2×</td>
+<td>none (hard cliff)</td>
+</tr>
+<tr>
+<td>Sliding Log</td>
+<td>≤16 KiB capped</td>
+<td>exact until cap binds</td>
+<td>none (hard cliff)</td>
+</tr>
+<tr>
+<td>Sliding Counter</td>
+<td>24 B</td>
+<td>≤6% worst-case, ≤1% steady</td>
+<td>approximate</td>
+</tr>
+<tr>
+<td>GCRA</td>
+<td>8 B</td>
+<td>exact</td>
+<td><code>dvt_ns</code> window</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 Distributed Counter &amp; Over-Admission Bound</h3>
+<p>Two enforcement topologies, per <a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-7">P7</a>:</p>
+<p><strong>Centralized (Redis + atomic Lua, Phase 3).</strong> Every node calls the same store; the atomic
+script (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-8">I8</a>) makes the decision exact <em>at the store</em>. Over-admission arises only from network
+partition: if a node cannot reach the store, <code>FailureMode::FailOpen</code> admits unconditionally
+until the circuit breaker (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#sec-24">§24</a> <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#fm-3">FM-3</a>) opens. Bound: <code>over_admission ≤ burst × (nodes partitioned)</code> — zero when every node reaches the store.</p>
+<p><strong>Sharded / gossip (local-approximate, Phase 7/8).</strong> Each node keeps a local counter and
+reconciles asynchronously (Demers et al. 1987, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/study/#sec-5">§5</a>). Over-admission bound, derived: with N
+enforcement nodes, replication lag L (seconds), and local rate <code>r</code> per node,
+<code>over_admission ≤ N × r × L</code> — the excess every node can admit before it learns of the
+others&#39; consumption. This is <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-2">I2</a>&#39;s formal statement; <a class="cite" href="/system-design-blueprints/systems/rate-limiter/numbers/#sec-33">§33</a> instantiates it with concrete
+numbers.</p>
+<p><strong>Worked example.</strong> N=8 nodes, r=1000 req/s local cap each, L=50 ms (Phase 8&#39;s convergence
+window, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/numbers/#sec-4">§4</a>): <code>over_admission ≤ 8 × 1000 × 0.05 = 400</code> excess admissions in the worst window
+— 0.4× a single node&#39;s per-second budget, converging to 0 as L → 0 (Phase 3&#39;s centralized
+mode).</p>
+<h3 id="sec-8-8">8.8 Clock Model</h3>
+<p><code>ClockSource</code> (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/design/#sec-11">§11</a>) wraps <code>tokio::time::Instant</code> — monotonic, immune to NTP step corrections
+(<a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-2">P2</a>, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-3">I3</a>). Wall-clock (<code>SystemTime</code>) is used <em>only</em> to compute the fixed-window <code>window_id</code>
+initial epoch alignment (e.g. &quot;align to the top of the UTC minute&quot;) and is converted to a
+monotonic offset once at startup, never read again on the hot path. Clock skew <em>between</em>
+nodes (relevant only to the distributed topologies, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#sec-8-7">§8.7</a>) is bounded by NTP&#39;s own guarantee
+(Mills 1991, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/study/#sec-5">§5</a>); Phase 9 (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/build/#sec-21">§21</a>) treats skew beyond that guarantee as an operational alert,
+not a correctness bug, because every per-node decision is local-clock-relative by
+construction (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-3">I3</a>).</p>
+<h3 id="sec-8-9">8.9 Protocol: 429 + Retry-After + RateLimit Headers</h3>
+<p>On <code>Permit</code>: emit <code>RateLimit-Limit</code>, <code>RateLimit-Remaining</code>, <code>RateLimit-Reset</code> (delta
+seconds, IETF draft, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/study/#sec-5">§5</a>), <code>RateLimit-Policy</code>. On <code>Reject</code>: HTTP 429 (RFC 6585) plus
+<code>Retry-After</code> (RFC 7231, seconds, ceiling-rounded) plus the same <code>RateLimit-*</code> set with
+<code>Remaining=0</code>. Legacy emitters (<code>GitHub</code>, <code>Twitter</code> header shapes) are opt-in adapters
+(<a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-5">P5</a>); the draft form is the unconditional default.</p>
+<h3 id="sec-8-10">8.10 Worked Example — End-to-End Trace</h3>
+<p>Quota: GCRA, rate=10/s, burst=5. <code>period_ns/rate = 100,000,000 ns</code> (100 ms) =
+<code>increment_ns</code>; <code>dvt_ns = 4 × 100ms = 400ms</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>t (ms)</th>
+<th>tat before</th>
+<th>new_tat</th>
+<th>allow_at</th>
+<th>now</th>
+<th>Decision</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>0</td>
+<td>100</td>
+<td>-300</td>
+<td>0</td>
+<td>Permit (burst)</td>
+</tr>
+<tr>
+<td>10</td>
+<td>100</td>
+<td>200</td>
+<td>-200</td>
+<td>10</td>
+<td>Permit</td>
+</tr>
+<tr>
+<td>20</td>
+<td>200</td>
+<td>300</td>
+<td>-100</td>
+<td>20</td>
+<td>Permit</td>
+</tr>
+<tr>
+<td>30</td>
+<td>300</td>
+<td>400</td>
+<td>0</td>
+<td>30</td>
+<td>Permit</td>
+</tr>
+<tr>
+<td>40</td>
+<td>400</td>
+<td>500</td>
+<td>100</td>
+<td>40</td>
+<td>Reject, retry_after=60ms</td>
+</tr>
+<tr>
+<td>100</td>
+<td>400</td>
+<td>500</td>
+<td>100</td>
+<td>100</td>
+<td>Permit (allow_at ≤ now)</td>
+</tr>
+</tbody></table></div>
+<p>Five requests admitted in the first 30ms (the burst), the sixth rejected until <code>t=100ms</code> —
+exactly GCRA&#39;s contract (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#sec-8-6">§8.6</a>).</p>
+<h3 id="sec-8-11">8.11 Malformed-Input Handling</h3>
+<ul>
+<li><code>cost = 0</code>: well-defined, always <code>Permit</code> (a zero-cost probe), never advances state
+(<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-12">I12</a> — zero units consumed).</li>
+<li><code>cost &gt; burst</code> (token bucket) or <code>cost &gt; limit</code> (fixed window): always <code>Reject</code>, no matter
+the current state — the request can never be satisfied by this quota; <code>retry_after</code> is
+reported as the algorithm&#39;s own period as an upper bound, not computed as unreachable.</li>
+<li><code>Key.value</code> empty or <code>Key.tenant</code> empty: <code>Error::InvalidKey</code>, rejected at the middleware
+boundary before reaching any algorithm (never silently coerced to a wildcard key, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-9">I9</a>).</li>
+<li>Negative or overflowed <code>Quota.rate</code>/<code>burst</code>: rejected at <code>Quota</code> construction
+(<code>Error::InvalidQuota</code>), never at decision time — fail fast at configuration load.</li>
+</ul>
+<h3 id="sec-8-12">8.12 Failure-Path Example</h3>
+<p>Redis backend, circuit breaker closed, <code>FailureMode::FailClosed</code>. Redis connection drops
+mid-decision. The adapter surfaces <code>Error::Backend</code>; the circuit breaker&#39;s failure count
+crosses threshold (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#sec-24">§24</a> <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#fm-3">FM-3</a>) and it opens; every subsequent <code>check</code> for the next
+<code>half_open_after</code> seconds (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/numbers/#sec-4">§4</a> RTO ≤ 5s) short-circuits to <code>Decision::Reject</code> per the
+configured <code>FailureMode</code> without attempting Redis; telemetry emits
+<code>ratelimiter_circuit_state=open</code> (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-11">I11</a>); after the interval, one probe request is allowed
+through — success closes the breaker, failure resets the timer.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-1">P1</a> — Algorithms are first-class.</strong> The six algorithms are six independent modules dispatched by <code>Algorithm</code> (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/design/#sec-11">§11</a>); a caller choosing GCRA gets exactly GCRA. Tradeoff: no silent algorithm blending. Operational implication: the operator picks per Quota, not per flag combination. Violating it: a &quot;smart&quot; dispatcher that blends algorithms breaks the accuracy guarantees of <a class="cite" href="/system-design-blueprints/systems/rate-limiter/numbers/#sec-4">§4</a> because no single ε applies.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-2">P2</a> — Monotonic clocks only.</strong> Every decision reads <code>ClockSource::now_ns</code> (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#sec-8-8">§8.8</a>), never wall-clock. Tradeoff: bucket-id math (fixed-window) must convert monotonic time to a period index explicitly. Violating it: a wall-clock step during an NTP correction can double-admit or freeze a key (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#sec-24">§24</a> <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#fm-2">FM-2</a>).</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-3">P3</a> — Decisions are checked, not negotiated.</strong> The hot path is <code>Limiter::check(key, cost) -&gt; Decision</code>; there is no retry-politely surface. Violating it invites hidden retry storms that themselves violate <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-1">I1</a>.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-4">P4</a> — Fail-open vs. fail-closed is explicit, never defaulted.</strong> <code>FailureMode</code> is a required constructor argument (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-6">I6</a>). Violating it silently picks a security posture the operator never chose (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#sec-23">§23</a> <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#t-7">T7</a>).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-5">P5</a> — Headers are normative.</strong> The IETF draft&#39;s <code>RateLimit-*</code> headers are the default emission; legacy variants are opt-in adapters (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#sec-8-9">§8.9</a>). Violating it breaks every IETF-draft-aware client library.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-6">P6</a> — Hierarchical quotas compose, first-reject-wins.</strong> IP → user → route → tenant → global layers compose; the first layer to reject short-circuits (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/build/#sec-17">§17</a>). Violating it lets one tenant&#39;s burst starve another&#39;s budget.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-7">P7</a> — The Backend abstraction is narrow.</strong> Exactly three operations: <code>decide</code>, <code>state</code>, <code>clear</code> (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/design/#sec-11">§11</a>). Violating it (adding a fourth op) forces every backend, including future ones, to implement operations most will never need.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-8">P8</a> — Every distributed mutation is atomic.</strong> Redis decisions are one <code>EVALSHA</code>; no <code>WATCH/MULTI/EXEC</code> (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-8">I8</a>). Violating it introduces a lost-update race under concurrent callers on the same key.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-9">P9</a> — Multi-tenancy lives in the key, never in global state.</strong> <code>Key.tenant</code> is part of the wire form (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/design/#sec-11">§11</a>, <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-9">I9</a>). Violating it risks cross-tenant quota leakage (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#sec-23">§23</a> <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#t-4">T4</a>).</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-10">P10</a> — Observability is not opt-in.</strong> Every decision emits one Prometheus counter and one OTel span event (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-7">I7</a>). Violating it makes a production incident undebuggable.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-11">P11</a> — Cost is a first-class parameter, default 1.</strong> A caller weighting requests by byte count or compute cost passes a <code>cost</code> (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#inv-12">I12</a>). Violating it hardcodes cost=1 as a silent assumption the next caller trips over.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-12">P12</a> — No sleeps on the hot path.</strong> <code>Reject</code> returns immediately with <code>retry_after</code>; the caller decides whether to sleep (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#sec-8-9">§8.9</a>). Violating it turns the limiter into an unbounded-latency surface under load.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-13">P13</a> — Hot keys are detected locally before they reach the coordination substrate.</strong> The Count-Min Sketch pre-filter (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/build/#sec-21">§21</a>) rejects obvious abuse before a network hop is spent. Violating it lets a single hot key become the coordination substrate&#39;s DDoS vector (<a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#sec-23">§23</a> <a class="cite" href="/system-design-blueprints/systems/rate-limiter/reliability/#t-1">T1</a>).</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/rate-limiter/architecture/#p-14">P14</a> — Every number in this specification is derived, not asserted.</strong> Every entry in <a class="cite" href="/system-design-blueprints/systems/rate-limiter/numbers/#sec-4">§4</a> and <a class="cite" href="/system-design-blueprints/systems/rate-limiter/numbers/#sec-33">§33</a> shows its arithmetic. Violating it (asserting &quot;handles millions of RPS&quot; without deriving it) is exactly the failure mode the god-level bar exists to prevent.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

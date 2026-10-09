@@ -1,0 +1,432 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Coroutines / Green Threads / Fibers — Architecture · Engineering Blueprints</title><meta name="description" content="Coroutines / Green Threads / Fibers, hld: §3 overview + §8 domain model. Build helios: a stackful-coroutine (green-thread / fiber) runtime for Rust — a per-architecture assembly context-switch primitive, a stack-allocation subsystem (mmap'd fixed stacks now…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/operating-systems-hardware/">Operating Systems &amp; Hardware</a> </li><li> <a href="/system-design-blueprints/systems/coroutines-fibers/">Coroutines / Green Threads / Fibers</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:150"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/operating-systems-hardware/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Operating Systems &amp; Hardware</span></a> </p> <h1>Coroutines / Green Threads / Fibers</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac (qemu-mentioned)</li> <li>12 phases</li> <li>~27 weeks</li> <li>1,869 lines</li> <li>blueprint #131</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/coroutines-fibers/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/coroutines-fibers/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/coroutines-fibers/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/coroutines-fibers/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/coroutines-fibers/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/coroutines-fibers/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/coroutines-fibers/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/coroutines-fibers/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/coroutines-fibers/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Coroutines / Green Threads / Fibers — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌───────────────────────────────────────────────────────────────────────────┐
+│ User code: Coroutine::new / .resume() / yield_value() / Fiber::switch_to  │
+└───────────────────────────────────┬───────────────────────────────────────┘
+                                     │
+┌────────────────────────────────────▼──────────────────────────────────────┐
+│ helios (public facade, Phase 0/4/5, §12/§16/§17)                          │
+│  Coroutine&lt;R,Y&gt; · Fiber · Scheduler · channel::&lt;T&gt; · Mutex/RwLock/Sem/WG  │
+│  Cancel · pin_thread/unpin_thread · Stats                                 │
+└───────────────────────────────────┬───────────────────────────────────────┘
+                                     │
+┌────────────────────────────────────▼──────────────────────────────────────┐
+│ helios-scheduler (Phase 7, §19): per-worker runqueue (Chase-Lev deque) +   │
+│ global injector + work-stealing + parker. Coroutine state machine:        │
+│ Ready → Running → {Yielded, Blocked, Done, Panicked}                      │
+└──────────┬──────────────────────────┬──────────────────────┬──────────────┘
+           │                          │                      │
+┌──────────▼───────────┐  ┌───────────▼───────────┐ ┌────────▼─────────────┐
+│ helios-stack (Ph.2/3) │  │ helios-asm (Phase 1)  │ │ helios-overflow (Ph.6)│
+│ fixed/pooled mmap&#39;d   │  │ per-arch swap(): x86- │ │ SIGSEGV handler on   │
+│ stacks + guard page;  │  │ 64 SysV/Win, aarch64, │ │ altstack; fault →    │
+│ segmented/growable    │  │ riscv64               │ │ Panicked(Overflow)   │
+│ deferred (§37)        │  │                       │ │                       │
+└───────────────────────┘  └───────────────────────┘ └───────────────────────┘
+           │                          │                      │
+┌──────────▼──────────────────────────▼──────────────────────▼──────────────┐
+│ helios-channel (Phase 8, §20) + helios-sync (Phase 9, §21):                │
+│ CSP bounded/unbounded channels, select!; Mutex/RwLock/Semaphore/WaitGroup  │
+└───────────────────────────────────┬─────────────────────────────────────── ┘
+                                     │
+┌────────────────────────────────────▼──────────────────────────────────────┐
+│ helios-cancel (Phase 10, §22): Cancel token observed at every yield point  │
+└───────────────────────────────────┬───────────────────────────────────────┘
+                                     │
+┌────────────────────────────────────▼──────────────────────────────────────┐
+│ helios-async-bridge (Phase 11, §23): coroutine `await`s a future via a    │
+│ oneshot handoff; an async fn `block_on`s a coroutine via JoinHandle       │
+└─────────────────────────────────────────────────────────────────────────── ┘</code></pre>
+<p>Six boxes, six invariants they must jointly uphold. <strong>User code</strong> never touches raw stack pointers or registers — every unsafe operation is behind the facade (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-10">P10</a>). <strong>helios (facade)</strong> owns the type-state (<code>CoroutineResult&lt;R,Y&gt;</code>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/design/#sec-11">§11</a>) and is the only crate without <code>unsafe</code>. <strong>helios-scheduler</strong> owns exactly the state machine in <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#sec-8">§8</a>&#39;s state table and the work-stealing topology of <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/#adr-4">ADR-04</a>; it is the trust boundary between &quot;logically running&quot; and &quot;physically on some OS thread.&quot; <strong>helios-stack / helios-asm / helios-overflow</strong> are peers, not a stack: <code>helios-asm</code>&#39;s <code>swap()</code> is called by the scheduler on every transition; <code>helios-stack</code> supplies the memory <code>swap()</code> transitions into; <code>helios-overflow</code> is a side-channel (the SIGSEGV path) that converts a fault inside memory <code>helios-stack</code> allocated into a scheduler-visible <code>Panicked</code> state — this is a concurrency boundary (a signal handler runs asynchronously with respect to the faulting coroutine) as well as a persistence-adjacent boundary (the guard page is a page-table entry, not heap state). <strong>helios-channel / helios-sync</strong> are the only queues/wait-lists in the diagram; every parked coroutine is on exactly one of their wait lists (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-4">I4</a>). <strong>helios-cancel</strong> is a cross-cutting concern observed by every yield point in every box above it, not a separate pipeline stage. <strong>helios-async-bridge</strong> is the sole external interface, a protocol boundary to a different runtime&#39;s task model (<a class="cite" href="/system-design-blueprints/systems/async-runtime/" title="Async Runtime / Executor">rank-129</a>); everything left of it is this project&#39;s; everything right of it is <a class="cite" href="/system-design-blueprints/systems/async-runtime/" title="Async Runtime / Executor">rank-129</a>&#39;s, per <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-1">§1</a>&#39;s system boundary.</p>
+<p>The crate-naming convention <code>helios-*</code> is normative and reused verbatim in the Repository Layout (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/design/#sec-10">§10</a>) and Core Schema &amp; Types (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/design/#sec-11">§11</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Stackful vs. stackless</h3>
+<p>A <strong>stackless</strong> coroutine (<a class="cite" href="/system-design-blueprints/systems/async-runtime/" title="Async Runtime / Executor">rank-129</a>&#39;s model) is compiled to a state machine: local variables that live across a suspension point become struct fields; the &quot;stack&quot; is that struct, heap- or caller-allocated. A <strong>stackful</strong> coroutine (this project) keeps an ordinary call stack; suspension is a register-and-stack-pointer swap, not a compiler transform. Consequence (de Moura &amp; Ierusalimschy 2009, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/study/#sec-5">§5</a>): stackful coroutines can suspend from <em>any</em> call depth, including inside a blocking C FFI call; stackless coroutines can only suspend where the compiler inserted a suspension point, and a blocking call anywhere in that chain blocks the entire executor thread.</p>
+<h3 id="sec-8-2">8.2 The context switch: registers, stack, SP, IP</h3>
+<p>A context switch is <code>extern &quot;C&quot; fn swap(from: *mut Context, to: *const Context)</code>, called with <code>from</code> and <code>to</code> as ordinary ABI arguments. Effect: save the caller&#39;s callee-saved registers and current <code>sp</code> into <code>*from</code>; load <code>sp</code> and callee-saved registers from <code>*to</code>; <code>ret</code> — which pops the new stack&#39;s saved return address into <code>ip</code>, transferring control.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Arch/ABI</th>
+<th>Callee-saved (saved by <code>swap</code>)</th>
+<th>Caller-saved (not touched)</th>
+<th>Arg regs (1st two: <code>from</code>,<code>to</code>)</th>
+<th>Stack align at call</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>x86-64 SysV</td>
+<td>rbx, rbp, r12–r15, rsp</td>
+<td>rax, rcx, rdx, rsi, rdi, r8–r11, xmm0–15</td>
+<td>rdi, rsi</td>
+<td>16B (rsp ≡ 8 mod 16 at entry)</td>
+</tr>
+<tr>
+<td>x86-64 Windows x64</td>
+<td>rbx, rbp, rdi, rsi, r12–r15, rsp, xmm6–15</td>
+<td>rax, rcx, rdx, r8–r11, xmm0–5</td>
+<td>rcx, rdx</td>
+<td>16B</td>
+</tr>
+<tr>
+<td>aarch64 AAPCS64</td>
+<td>x19–x30, sp, d8–d15 (low 64b of v8–v15)</td>
+<td>x0–x18, v0–v7, v16–v31</td>
+<td>x0, x1</td>
+<td>16B</td>
+</tr>
+<tr>
+<td>riscv64 (LP64D)</td>
+<td>s0–s11, sp</td>
+<td>a0–a7, t0–t6, ra</td>
+<td>a0, a1</td>
+<td>16B</td>
+</tr>
+</tbody></table></div>
+<p>Malformed input: a <code>to</code> context whose <code>sp</code> does not point into a live, guard-paged stack region (a use-after-retire) — <code>swap()</code> performs no validation (it cannot; it is a handful of instructions with no room for a check) so this class is prevented upstream by <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-1">I1</a>/<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-12">I12</a>&#39;s ownership discipline, not detected in the routine itself. Failure path: if prevention fails, the <code>ret</code> transfers control into freed or foreign memory — undefined behavior, not a clean fault; this is why <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-1">I1</a>/<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-12">I12</a> are compile-time-enforced ownership invariants rather than runtime checks (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#sec-7">§7</a>).</p>
+<h3 id="sec-8-3">8.3 Stack management strategies</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Mechanism</th>
+<th>Overflow handling</th>
+<th>Phase</th>
+<th>Status</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Fixed</td>
+<td>One <code>mmap</code> per coroutine, size fixed at spawn (default 64 KiB, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/#adr-20">ADR-20</a>), guard page trailing.</td>
+<td>SIGSEGV on guard page → <code>Panicked(StackOverflow)</code> (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/build/#sec-18">§18</a>).</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/build/#sec-14">§14</a> (Phase 2)</td>
+<td>Default, Phase 0 onward</td>
+</tr>
+<tr>
+<td>Segmented</td>
+<td>Linked list of <code>mmap</code>&#39;d segments; overflow allocates a new segment and switches.</td>
+<td>Same guard-page trap, but recoverable by growing instead of panicking.</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/build/#sec-15">§15</a> (Phase 3)</td>
+<td>Deferred, gated</td>
+</tr>
+<tr>
+<td>Growable/copying</td>
+<td>One region, reallocated larger and copied on overflow; every internal pointer relocated.</td>
+<td>Requires precise pointer tracking (Go&#39;s GC has it; Rust does not without new machinery) — restricted to a sub-API with no escaping stack references.</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/build/#sec-15">§15</a> (Phase 3)</td>
+<td>Deferred, gated</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-4">8.4 The scheduler and M:N mapping</h3>
+<p>State table (coroutine lifecycle, referenced by <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-11">I11</a>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>—</td>
+<td><code>Coroutine::new</code></td>
+<td>Ready</td>
+</tr>
+<tr>
+<td>Ready</td>
+<td>scheduled onto a worker</td>
+<td>Running</td>
+</tr>
+<tr>
+<td>Running</td>
+<td><code>yield_value</code> / entry returns normally</td>
+<td>Yielded / Done</td>
+</tr>
+<tr>
+<td>Running</td>
+<td>blocks on channel/mutex/cancel-wait</td>
+<td>Blocked</td>
+</tr>
+<tr>
+<td>Running</td>
+<td>guard-page fault</td>
+<td>Panicked</td>
+</tr>
+<tr>
+<td>Yielded</td>
+<td><code>resume()</code> called again</td>
+<td>Running</td>
+</tr>
+<tr>
+<td>Blocked</td>
+<td>wait condition satisfied, re-queued</td>
+<td>Ready</td>
+</tr>
+<tr>
+<td>Done/Panicked</td>
+<td>(terminal)</td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<p>M:N mapping worked example: 4 OS worker threads (N=4), 12 coroutines (M=12) spawned at once onto the global injector. Each worker pops up to 3 from the injector into its local Chase-Lev deque. Worker 2&#39;s 3 coroutines each do a blocking channel <code>recv</code> in sequence (none ready) and park; worker 2&#39;s deque empties. Per <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/#adr-4">ADR-04</a>&#39;s steal policy, worker 2 becomes a thief: it picks a random peer (say worker 0), and takes half of worker 0&#39;s remaining local queue (the &quot;half-stealing&quot; heuristic, Chase &amp; Lev 2005, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/study/#sec-5">§5</a>) — if worker 0 has 3 local, worker 2 steals 1 (rounding down), leaving 2. This repeats until either all coroutines are Blocked/Done or queues are balanced within one task of each other.</p>
+<pre class="diagram"><code>before:  W0:[c1 c2 c3]  W1:[c4 c5 c6]  W2:[]        W3:[c10 c11 c12]
+                                        ^ empty, W2 becomes a thief
+steal:   W2 targets W0, takes floor(3/2)=1 from the queue&#39;s bottom (FIFO)
+after:   W0:[c2 c3]     W1:[c4 c5 c6]  W2:[c1]      W3:[c10 c11 c12]</code></pre>
+<p>Malformed-input example: a coroutine that calls <code>resume()</code> on itself re-entrantly (from inside its own entry function, holding a handle to its own <code>Coroutine</code>) — detected because the header&#39;s state is already <code>Running</code>, not <code>Ready</code>/<code>Yielded</code>; <code>resume()</code> returns <code>Err(InvalidState)</code> per <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-2">I2</a> rather than double-switching into the same stack.</p>
+<p>Failure-path example: a worker thread panics (a genuine Rust panic, not a coroutine <code>Panicked</code> state) while holding a coroutine in <code>Running</code>. The scheduler&#39;s worker-loop wraps each <code>swap()</code> round-trip in <code>catch_unwind</code>; on an unwind, the coroutine is marked <code>Panicked(HostPanic)</code>, its stack is queued for retirement (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-12">I12</a>), and the worker thread restarts fresh (empty local deque, rejoins the injector pool) rather than the whole process aborting — bounding blast radius to the one coroutine and its worker&#39;s in-flight queue, matching the 0-blast-radius constraint in <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/numbers/#sec-4">§4</a>.</p>
+<hr>
+<h3 id="sec-8-5">8.5 Worked lifecycle trace: spawn → yield → cancel → retire</h3>
+<p>The following trace ties <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#sec-8-2">§8.2</a>–<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#sec-8-4">§8.4</a> together into one concrete sequence, cross-referencing the exact invariant or subsystem responsible at each step — the level of detail an on-call engineer reconstructs from <code>tracing</code> spans (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-26">§26</a>) during an incident.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Event</th>
+<th>Subsystem</th>
+<th>Invariant / Ref</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><code>Coroutine::new(entry)</code></td>
+<td><code>helios-stack::pool</code> allocates (or reuses) a 64 KiB stack + guard page</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/build/#sec-14">§14</a></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Trampoline frame written to the new stack</td>
+<td><code>helios-asm</code></td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-13-2">§13.2</a></td>
+</tr>
+<tr>
+<td>3</td>
+<td>Header constructed, state = <code>Ready</code></td>
+<td><code>helios</code> facade</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/design/#sec-11">§11</a></td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>resume()</code> called by a worker</td>
+<td><code>helios-scheduler</code> transitions <code>Ready → Running</code>, calls <code>swap()</code></td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-19-2">§19.2</a></td>
+</tr>
+<tr>
+<td>5</td>
+<td>Entry runs; calls <code>yield_value(v)</code></td>
+<td><code>helios-asm::swap</code> switches back to resumer</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-16-2">§16.2</a></td>
+</tr>
+<tr>
+<td>6</td>
+<td>State transitions <code>Running → Yielded</code></td>
+<td>scheduler</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#sec-8-4">§8.4</a> state table</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>CancelHandle::cancel()</code> called externally</td>
+<td><code>helios-cancel::Token</code> flag set</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-22-2">§22.2</a></td>
+</tr>
+<tr>
+<td>8</td>
+<td>Coroutine <code>resume()</code>d again</td>
+<td>scheduler transitions <code>Yielded → Running</code></td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-11">I11</a></td>
+</tr>
+<tr>
+<td>9</td>
+<td>Next yield point observes the cancel flag</td>
+<td><code>yield_value</code>/<code>park</code> check (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-7">I7</a>)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-22-2">§22.2</a></td>
+</tr>
+<tr>
+<td>10</td>
+<td>Coroutine&#39;s own code runs <code>Drop</code> cleanup (e.g. releases a held <code>Mutex</code>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-21-6">§21.6</a>)</td>
+<td>Rust&#39;s ordinary drop discipline</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-22-5">§22.5</a></td>
+</tr>
+<tr>
+<td>11</td>
+<td>Entry returns an <code>Err(Cancelled)</code>-observing early return</td>
+<td>coroutine body</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-22-2">§22.2</a></td>
+</tr>
+<tr>
+<td>12</td>
+<td>Trampoline calls <code>coroutine_exit()</code></td>
+<td><code>helios-asm</code></td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-13-2">§13.2</a></td>
+</tr>
+<tr>
+<td>13</td>
+<td>State transitions to <code>Done</code></td>
+<td>scheduler</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#sec-8-4">§8.4</a></td>
+</tr>
+<tr>
+<td>14</td>
+<td><code>Drop for Coroutine</code> retires the stack exactly once</td>
+<td><code>helios-stack::pool::retire</code>, zeroed (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-10">I10</a>)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-12">I12</a>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/build/#sec-14">§14</a></td>
+</tr>
+<tr>
+<td>15</td>
+<td><code>helios_stack_zero_ns</code> histogram records the retire cost</td>
+<td>telemetry</td>
+<td><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-14-7">§14.7</a>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-26">§26</a></td>
+</tr>
+</tbody></table></div>
+<p>Malformed-input variant of this trace: if step 7&#39;s cancel is signaled <em>before</em> step 3 completes (a cancel-handle obtained and fired against a coroutine still mid-construction) — the <code>Token</code> (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/design/#sec-11">§11</a>) is constructed atomically with the header in step 3, so there is no window in which a handle exists but the token does not; the cancel is simply observed at the coroutine&#39;s very first yield point instead of a later one, with no special-case handling required.</p>
+<p>Failure-path variant: if step 4&#39;s <code>swap()</code> call races against step 14&#39;s retire (a <code>resume()</code> called concurrently with a <code>Drop</code>, a caller-side logic bug since a <code>Coroutine</code> is not <code>Sync</code> and cannot legally be resumed from two threads at once) — Rust&#39;s <code>!Sync</code> bound on <code>Coroutine&lt;R,Y&gt;</code> (a compile-time property, not listed as a separate invariant because it is enforced by the type system rather than a runtime check) makes this scenario <strong>not compile</strong> for safe callers; the only way to reach it is through <code>unsafe</code> misuse of the type, which places the defect inside <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-10">P10</a>&#39;s audited boundary, not this trace&#39;s steady-state path.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-1">P1</a> — Stackful primacy.</strong> A <code>helios</code> coroutine owns a full stack and may call arbitrary blocking/FFI code at any depth. Tradeoff: memory-per-coroutine (64 KiB default, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/#adr-20">ADR-20</a>) vs. stackless&#39;s near-zero footprint. Operational implication: capacity planning is stack-count × stack-size (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/numbers/#sec-34">§34</a>), not &quot;however many tasks fit in one allocation.&quot; Violating it (e.g., trying to shrink stacks below the point recursive Rust code needs) reintroduces the exact overflow class <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/build/#sec-18">§18</a> exists to catch.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-2">P2</a> — Cooperative, not preemptive, scheduling.</strong> No forced context switch; yield points are explicit. Tradeoff: a non-yielding coroutine monopolizes its worker. Operational implication: the yield-budget tracer (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/#adr-23">ADR-23</a>) is mandatory, not optional, in production. Violating it (silently adding preemption) reintroduces the async-signal-safety hazard class <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-2">P2</a> was written to avoid.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-3">P3</a> — M:N over 1:1.</strong> Coroutine count is decoupled from OS-thread count. Tradeoff: scheduler complexity (runqueue/injector/steal, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/build/#sec-19">§19</a>) vs. thread-per-coroutine simplicity. Operational implication: the scheduler, not the OS, is the throughput bottleneck to profile. Violating it (falling back to 1:1) reintroduces the multi-KiB-to-MiB per-unit OS-thread cost this project exists to eliminate (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/compare/#sec-33">§33</a>).</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-4">P4</a> — One context-switch primitive, two APIs.</strong> <code>Coroutine</code> (asymmetric) and <code>Fiber</code> (symmetric) share one assembly <code>swap()</code>. Tradeoff: API-surface duplication vs. a single audited primitive. Operational implication: every context-switch bugfix lands once, not twice. Violating it (a second hand-rolled switch routine) doubles the two-reviewer assembly-audit burden (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/#adr-7">ADR-07</a>).</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-5">P5</a> — Stacks are mmap&#39;d, never malloc&#39;d.</strong> Every stack is its own VM mapping with a trailing guard page. Tradeoff: an <code>mmap</code> syscall (~5 µs) per fresh allocation vs. heap-adjacency safety. Operational implication: the stack pool (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/#adr-21">ADR-21</a>) exists specifically to amortize this cost. Violating it (<code>malloc</code>&#39;d stacks) turns every overflow into silent heap corruption instead of a clean fault.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-6">P6</a> — Guard page over software canary.</strong> Rely on hardware page-fault trapping, not a per-call canary check, to catch overflow. Tradeoff: canaries catch overflow one write early but cost a check per frame; guard pages are free until faulted. Operational implication: overflow detection latency is &quot;at the faulting instruction,&quot; not &quot;at the next canary check.&quot; Violating it (canary-only) misses the single-huge-frame overflow class guard pages catch for free.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-7">P7</a> — CSP channels as the primary IPC.</strong> Coroutines communicate over channels by convention, not shared mutable state. Tradeoff: a channel-send/recv cost (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/numbers/#m-5">M5</a>, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/numbers/#sec-30">§30</a>) vs. lock-free shared-state races. Operational implication: code review flags raw shared <code>Mutex&lt;T&gt;</code> used as an ad hoc channel. Violating it reintroduces exactly the races CSP (Hoare 1978, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/study/#sec-5">§5</a>) was designed to make unrepresentable.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-8">P8</a> — Cancellation is cooperative, observed at yield points.</strong> No forced unwind from an arbitrary instruction. Tradeoff: a non-yielding coroutine is uncancellable until its next yield. Operational implication: the grace-period force-terminate (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-22-6">§22.6</a>) is the escape hatch, not the default. Violating it (forced unwind) corrupts invariants a coroutine&#39;s unwound callees held mid-operation.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-9">P9</a> — Migration is opt-in; pinning is the default.</strong> A coroutine stays on its last-run worker unless explicitly marked migratable. Tradeoff: pinning forgoes some steal opportunities (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-31">§31</a>) vs. migration risking TLS/FFI-affinity bugs. Operational implication: an FFI call that depends on thread-local state must run inside a pinned coroutine. Violating it (always-migratable default) reproduces the exact TLS-affinity bug class <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/#adr-10">ADR-10</a> documents.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-10">P10</a> — Unsafe is boundary-scoped, and paired with a safety comment.</strong> Every <code>unsafe</code> block outside <code>helios-asm</code>/<code>helios-stack</code> is a defect (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/design/#sec-10">§10</a>). Tradeoff: review velocity vs. auditability. Operational implication: <code>#![forbid(unsafe_code)]</code> on every crate except the two named. Violating it (unsafe leaking into <code>helios-scheduler</code>, say) removes the single audit boundary the whole safety argument depends on.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-11">P11</a> — No global mutable state.</strong> A <code>Scheduler</code> is a value; multiple coexist in one process. Tradeoff: callers thread a handle explicitly vs. singleton convenience. Operational implication: a test harness and the production app can each own an independent scheduler in the same process (useful for embedding, <a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/compare/#sec-33">§33</a>). Violating it (a process-global scheduler) collides two independently-configured subsystems the moment both exist.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-12">P12</a> — Determinism via the replay harness.</strong> A fixed scheduler seed plus a recorded op-log reproduces a run bit-for-bit (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/reliability/#inv-13">I13</a>). Tradeoff: op-log recording overhead vs. debuggability. Operational implication: production incidents ship with a replayable op-log, not just a stack trace. Violating it (no replay support) makes a one-in-a-million interleaving bug effectively undebuggable.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-13">P13</a> — The C ABI is a first-class embedder surface.</strong> <code>helios-c-abi</code> is versioned and documented like the Rust API, binary-compatible with <code>libtask</code>&#39;s surface where shapes overlap (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/#adr-19">ADR-19</a>). Tradeoff: maintaining a second, stability-locked surface. Operational implication: a C/C++ embedder&#39;s upgrade path is covered by the same Compatibility &amp; Versioning policy (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/blueprint/#sec-27">§27</a>) as the Rust API. Violating it (Rust-only) forecloses exactly the embedder audience Boost.Context and libtask already serve.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/architecture/#p-14">P14</a> — Performance targets are CI-gated, not aspirational.</strong> Every M# target (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/numbers/#sec-30">§30</a>) has a <code>criterion</code> benchmark that fails the build on regression (<a class="cite" href="/system-design-blueprints/systems/coroutines-fibers/trade-offs/#adr-16">ADR-16</a>). Tradeoff: CI wall-clock time vs. undetected regressions. Operational implication: a context-switch regression is caught before merge, not after a customer&#39;s perf audit. Violating it (aspirational-only targets) is the exact failure mode that eroded confidence in early user-thread libraries industry-wide.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

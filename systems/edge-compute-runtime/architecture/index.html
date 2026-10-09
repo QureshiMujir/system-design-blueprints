@@ -1,0 +1,568 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Edge Compute Runtime from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Edge Compute Runtime from Scratch, hld: §3 overview + §8 domain model. A multi-tenant edge compute runtime executing per-request WebAssembly workers at distributed points of presence (PoPs). The runtime loads tenant WASM modules, isolates each request in a fresh or…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/edge-compute-runtime/">Edge Compute Runtime from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Edge Compute Runtime from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~43 weeks</li> <li>4,422 lines</li> <li>blueprint #357</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/edge-compute-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/edge-compute-runtime/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/edge-compute-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/edge-compute-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/edge-compute-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/edge-compute-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/edge-compute-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/edge-compute-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/edge-compute-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/edge-compute-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Edge Compute Runtime from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Diagram</h3>
+<pre class="diagram"><code>        client request --(anycast: nearest PoP; cf. project 355)--&gt;
+  +----------------------------------------------------------------------+
+  |                        Edge PoP  (one of many)                       |
+  |  +----------------+   +----------------------+   +----------------+   |
+  |  | edge-router    |   | edge-sched           |   | edge-coldstart |   |
+  |  | ingress +      |--&gt;| concurrency limits,  |--&gt;| warm pool +    |   |
+  |  | worker dispatch|   | CPU slice, fairness, |   | snapshot/      |   |
+  |  | + PoP failover |   | admission/backpressure|  | restore        |   |
+  |  +----------------+   +----------------------+   +----------------+   |
+  |          |                                              |            |
+  |          v                                              v            |
+  |  +----------------------------------------------------------------+  |
+  |  | edge-runtime  (WASM: instance, linear memory, fuel/epoch)      |  |
+  |  |   edge-isolate: per-request instance; memory cap;             |  |
+  |  |                 no cross-tenant state                         |  |
+  |  |   edge-host API: fetch / kv / cache / headers / log           |  |
+  |  +----------------------------------------------------------------+  |
+  |          |                              |                            |
+  |          v                              v                            |
+  |  +------------------+        +--------------------+                   |
+  |  | edge-kv          |        | edge-cache         |                   |
+  |  | namespaced KV,   |        | HTTP cache, TTL,   |                   |
+  |  | TTL, eventual    |        | purge, cache key   |                   |
+  |  +------------------+        +--------------------+                   |
+  +----------------------------------------------------------------------+
+          |  cross-PoP eventual-consistency propagation (edge-propagate)
+          v
+   other Edge PoPs ...           -&gt;  edge-metrics (cold-start / p99 / hit rate)</code></pre>
+<h3 id="sec-3-2">3.2 Subsystem Descriptions</h3>
+<p><strong>edge-router (ingress + worker dispatch + PoP failover)</strong>
+Receives inbound HTTP requests after anycast delivery. Resolves the target <code>WorkerId</code> from the request hostname/path. Checks local PoP health; on overload or failure, re-routes to next-nearest PoP (RoutingDecision with reason). Dispatches accepted requests to edge-sched for queuing. Trust boundary: first contact with untrusted tenant-initiated traffic; no WASM execution. Concurrency boundary: handles many simultaneous inbound connections; delegates scheduling to edge-sched. Persistence boundary: stateless; PoP health state in-memory with periodic heartbeat refresh.</p>
+<p><strong>edge-sched (concurrency limits + CPU time-slicing + fairness + admission/backpressure)</strong>
+Enforces per-PoP and per-tenant concurrency quotas. Queues incoming invocation requests with a deadline; drops or returns 429 when queue full (admission control). Selects next invocation using weighted/fair scheduler (prevents noisy-neighbor starvation). Signals edge-coldstart to acquire a warm instance. CPU time-slicing coordinates with fuel/epoch mechanism in edge-runtime to yield between concurrent invocations. Concurrency boundary: owns the active-invocation set; lock-granularity per tenant bucket.</p>
+<p><strong>edge-coldstart (warm pool + snapshot/restore)</strong>
+Maintains a per-<code>WorkerId</code> <code>InstancePool</code> of <code>WarmInstance</code> records. Pool hit: pops a <code>WarmInstance</code>, resets to <code>ColdStartSnapshot</code> baseline (CoW memory restore), validates reset token, returns to caller. Pool miss: instantiates a new instance via edge-runtime, runs module init to checkpoint, snapshots <code>ColdStartSnapshot</code>, promotes to warm. Reuses Wasmtime&#39;s pooling allocator to avoid per-instantiation mmap overhead. Persistence boundary: snapshot images held in process heap or memory-mapped arena; disk-backed snapshots are PhaseDeferred(&quot;Deferred Features Register&quot;).</p>
+<p><strong>edge-runtime (WASM engine: instance, linear memory, fuel/epoch)</strong>
+Wraps the Wasmtime engine. Compiles a WASM module to native code (Cranelift); caches compiled artifact by content hash. Instantiates with per-instance linear memory region (no shared memory). Links host imports from edge-host at instantiation time. Calls the exported fetch handler, passing the marshaled <code>Request</code>. Reads <code>Response</code> from guest memory after return. Configures fuel metering (subtract fuel per instruction) and epoch-interruption (deadline timer). Engine config: disable float nondeterminism (deterministic NaN), disable WASM threads and shared memory. Trust boundary: WASM sandbox is the primary isolation primitive; engine memory safety is the TCB.</p>
+<p><strong>edge-isolate (per-request instance + memory cap + no cross-tenant state)</strong>
+Layer above edge-runtime enforcing the isolation contract. Each request gets its own <code>Isolate</code> wrapping one WASM instance. Tracks <code>memory_pages</code> (enforces max), <code>fuel_remaining</code>, <code>epoch_deadline</code>, and <code>tenant</code> tag. On any resource breach or trap: destroys the instance (never reuses), records breach in edge-metrics. No shared mutable globals between instances. Trust boundary: enforces <a class="cite" href="/system-design-blueprints/systems/edge-compute-runtime/reliability/#inv-1">I1</a>–<a class="cite" href="/system-design-blueprints/systems/edge-compute-runtime/reliability/#inv-4">I4</a>; audited in Phase 13. Concurrency boundary: one instance per active request; no intra-instance parallelism.</p>
+<p><strong>edge-host (host API: fetch / kv / cache / headers / log)</strong>
+Implements the <code>HostCall</code> enum as Wasmtime host functions linked at instantiation. Each call checks <code>ExecutionContext</code> for capability (<a class="cite" href="/system-design-blueprints/systems/edge-compute-runtime/reliability/#inv-10">I10</a>): a worker may only invoke KV/fetch/cache calls declared in its bindings. Fetch counts against <code>subrequest_count</code> (<a class="cite" href="/system-design-blueprints/systems/edge-compute-runtime/reliability/#inv-5">I5</a>). KV and cache calls dispatch to edge-kv/edge-cache. Structured log calls buffer into a per-invocation log drain flushed to edge-metrics on completion. Deny-by-default surface; no ambient host access.</p>
+<p><strong>edge-kv (namespaced KV + TTL + eventual consistency)</strong>
+Per-PoP read-optimized replica of the edge KV store. Reads served from local in-memory index (B-tree or hash map) keyed by <code>(KvNamespace, key)</code>. Write path: record locally then enqueue for async cross-PoP replication via edge-propagate. TTL enforcement: expired entries not served (<a class="cite" href="/system-design-blueprints/systems/edge-compute-runtime/reliability/#inv-6">I6</a>); background reaper sweeps expired keys. Versioning: monotonic version counter per key (last-writer-wins on conflict). Persistence boundary: local replica rebuilt from propagation stream on PoP restart; disk-backed snapshot is PhaseDeferred(&quot;Deferred Features Register&quot;).</p>
+<p><strong>edge-cache (HTTP cache + TTL + stale-while-revalidate + purge)</strong>
+Two-tier store: hot tier in-memory (bounded LRU), warm tier on local NVMe (optional). Cache key derived from request URL + Vary headers. Stores <code>CacheEntry</code> records with <code>expires_at</code> and <code>stale_until</code>. Stale-while-revalidate: serves stale response while async revalidation dispatches. Purge: marks key invalidated; propagated cross-PoP via edge-propagate <code>Invalidation</code> messages. Workers interact via Cache host API (edge-host -&gt; edge-cache).</p>
+<p><strong>edge-propagate (cross-PoP eventual-consistency propagation)</strong>
+Async message bus between PoPs carrying <code>Invalidation</code> records (KvKey or CacheKey with version and origin PoP). Applies monotonic version checks before accepting writes (no rollback). Convergence property: every write eventually reaches every PoP within the stated staleness bound. Fan-out topology: configurable (full-mesh, hub-spoke, gossip); prescribed in Phase 11 contract.</p>
+<p><strong>edge-metrics (cold-start rate + p99 latency + hit rate + attribution)</strong>
+Per-PoP metrics collection with per-tenant + per-worker labels. Collects: cold-start vs. warm counts; invocation latency histogram (HdrHistogram); CPU-fuel consumed per invocation; memory pages high-watermark; cache hit/miss counts; subrequest counts. Exposes a Prometheus-compatible scrape endpoint. Attribution: every metric carries <code>TenantId</code> + <code>WorkerId</code> labels for cost accounting.</p>
+<p><strong>edge-cli (deploy/run/bench/inspect)</strong>
+Developer-facing toolchain. Commands: <code>deploy &lt;wasm&gt;</code> uploads artifact to configured PoP; <code>run &lt;wasm&gt; &lt;request.json&gt;</code> local single-PoP smoke test; <code>bench &lt;wasm&gt;</code> measures cold/warm start latency locally; <code>inspect &lt;wasm&gt;</code> prints module imports/exports/limits. Offline path: spins up an in-process PoP (edge-runtime + edge-host + edge-kv/cache stubs) without network. Trust model: runs with the developer&#39;s credentials; never executes inside the production sandbox.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Entity Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Crate</th>
+<th>Cardinality</th>
+<th>Lifecycle</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>TenantId(u64)</td>
+<td>edge-core</td>
+<td>1 per customer account</td>
+<td>created on onboarding; revoked on account close</td>
+</tr>
+<tr>
+<td>WorkerId(u64)</td>
+<td>edge-core</td>
+<td>N per tenant</td>
+<td>created on deploy; invalidated on new deploy</td>
+</tr>
+<tr>
+<td>WorkerScript</td>
+<td>edge-core</td>
+<td>1 per WorkerId</td>
+<td>immutable after deploy; new deploy ⇒ new WorkerId</td>
+</tr>
+<tr>
+<td>IsolateId(u64)</td>
+<td>edge-isolate</td>
+<td>1 per request invocation</td>
+<td>born at dispatch; destroyed on completion or trap</td>
+</tr>
+<tr>
+<td>PoPId(u32)</td>
+<td>edge-core</td>
+<td>fixed at build time per PoP</td>
+<td>healthy / degraded / offline</td>
+</tr>
+<tr>
+<td>PoP</td>
+<td>edge-router</td>
+<td>1 per physical location</td>
+<td>health state transitions; capacity integer</td>
+</tr>
+<tr>
+<td>ExecutionContext</td>
+<td>edge-isolate</td>
+<td>1 per in-flight invocation</td>
+<td>created pre-dispatch; dropped post-response</td>
+</tr>
+<tr>
+<td>WarmInstance</td>
+<td>edge-coldstart</td>
+<td>pooled N per WorkerId</td>
+<td>idle / in-use / poisoned</td>
+</tr>
+<tr>
+<td>ColdStartSnapshot</td>
+<td>edge-coldstart</td>
+<td>1 per WorkerId version</td>
+<td>created once post-init; read-only thereafter</td>
+</tr>
+<tr>
+<td>KvEntry</td>
+<td>edge-kv</td>
+<td>N per namespace</td>
+<td>created/updated/TTL-expired</td>
+</tr>
+<tr>
+<td>CacheEntry</td>
+<td>edge-cache</td>
+<td>N per cache key</td>
+<td>fresh / stale / revalidating / purged</td>
+</tr>
+<tr>
+<td>RoutingDecision</td>
+<td>edge-router</td>
+<td>1 per inbound request</td>
+<td>ephemeral; logged for metrics</td>
+</tr>
+<tr>
+<td>Invalidation</td>
+<td>edge-propagate</td>
+<td>event record</td>
+<td>in-flight until acknowledged by target PoP</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 WorkerScript Lifecycle State Machine</h3>
+<pre class="diagram"><code>State: [PENDING_DEPLOY] -&gt; [COMPILING] -&gt; [READY] -&gt; [DRAINING] -&gt; [TOMBSTONED]
+                                |
+                         compile-error
+                                |
+                          [DEPLOY_FAILED]
+
+Transitions:
+  PENDING_DEPLOY  --deploy-request-received--&gt;  COMPILING
+  COMPILING       --wasm-validated + module-compiled--&gt;  READY
+  COMPILING       --validation-error / OOM--&gt;  DEPLOY_FAILED
+  READY           --new-deploy-for-same-worker--&gt;  DRAINING  (in-flight finish; new WorkerId becomes READY)
+  DRAINING        --all-in-flight-complete--&gt;  TOMBSTONED
+  READY           --explicit-delete--&gt;  DRAINING</code></pre>
+<h3 id="sec-8-3">8.3 Isolate Lifecycle State Machine</h3>
+<pre class="diagram"><code>[UNBORN] -&gt; [ACQUIRING_INSTANCE] -&gt; [RUNNING] -&gt; [COMPLETED]
+                     |                  |
+               [COLD_START]        [TRAPPED]
+                     |                  |
+               [RUNNING]          [DESTROYED]
+                              (never reused: I3)
+
+Transitions:
+  UNBORN              --dispatch--&gt;  ACQUIRING_INSTANCE
+  ACQUIRING_INSTANCE  --pool-hit--&gt;  RUNNING  (warm path)
+  ACQUIRING_INSTANCE  --pool-miss--&gt;  COLD_START
+  COLD_START          --snapshot-restore or fresh-instantiate--&gt;  RUNNING
+  RUNNING             --handler returns--&gt;  COMPLETED -&gt; instance reset -&gt; pool (P10)
+  RUNNING             --fuel-exhausted | epoch-deadline | memory-cap | wall-timeout--&gt;  TRAPPED -&gt; DESTROYED
+  RUNNING             --guest-panic | wasm-trap--&gt;  TRAPPED -&gt; DESTROYED
+  COMPLETED           --reset-fails integrity check--&gt;  DESTROYED (never pooled)</code></pre>
+<h3 id="sec-8-4">8.4 WarmInstance Lifecycle State Machine</h3>
+<pre class="diagram"><code>[IDLE_IN_POOL] -&gt; [CHECKED_OUT] -&gt; [RESETTING] -&gt; [IDLE_IN_POOL]
+                       |                |
+                  [IN_USE]       [DESTROYED] (reset integrity fail)
+                       |
+                  [RESETTING]
+
+Key invariant (I4): reset must reproduce ColdStartSnapshot state exactly -- memory image + globals, zero tenant data.
+Pool size: bounded by InstancePool::per_worker capacity; LRU eviction on overflow.</code></pre>
+<h3 id="sec-8-5">8.5 KvEntry State Machine</h3>
+<pre class="diagram"><code>[LIVE] -&gt; [TTL_EXPIRED] -&gt; (evicted; not served: I6)
+[LIVE] -&gt; [SUPERSEDED]   (new write with higher version; old entry invisible to reads)
+[LIVE] -&gt; [TOMBSTONED]   (explicit delete; tombstone propagated cross-PoP)
+
+Write path:  KvPut(ns, key, val, ttl)
+  -&gt; assign monotonic version (origin_pop || timestamp || sequence)
+  -&gt; store locally as KvEntry { value, expires_at }
+  -&gt; enqueue Invalidation for edge-propagate fan-out (I9)
+
+Read path: KvGet(ns, key)
+  -&gt; local replica lookup
+  -&gt; if expires_at &lt;= now -&gt; treat as miss (I6)
+  -&gt; return value or miss; never block on remote PoP</code></pre>
+<h3 id="sec-8-6">8.6 CacheEntry State Machine</h3>
+<pre class="diagram"><code>[FRESH] -&gt; [STALE] -&gt; [REVALIDATING] -&gt; [FRESH]   (stale-while-revalidate)
+                   \               \-&gt; [STALE]    (revalidation 304: extend TTL)
+                    [PURGED]          [PURGED]    (explicit invalidation)
+[FRESH] -&gt; [PURGED]  (explicit CachePurge or Invalidation arrival)
+
+Admission: cache key derivation -&gt; hash(method, url, vary-header-values, worker-override)
+TTL sources (precedence): worker CachePut TTL &gt; Cache-Control max-age &gt; default-per-tenant
+Stale-while-revalidate window: configurable per entry; default 0s</code></pre>
+<h3 id="sec-8-7">8.7 HostCall Dispatch Sequence</h3>
+<pre class="diagram"><code>guest wasm                edge-isolate          edge-host           downstream
+   |                           |                    |                   |
+   |--host_call(Fetch(req))--&gt;  |                    |                   |
+   |                    check subrequest_count &lt;= cap (I5)              |
+   |                           |--dispatch_host_call(Fetch)--&gt;          |
+   |                           |                    |--HTTP out-------&gt; |
+   |                           |                    |&lt;--response--------|
+   |                    fuel: charge outbound bytes  |                   |
+   |&lt;--return response bytes-- |&lt;--HostCallResult---|                   |
+   |                           |                    |                   |
+
+Failure path (subrequest cap breach):
+  subrequest_count == cap -&gt; return HostCallResult::Err(SubrequestCapExceeded)  (no panic, guest sees error)
+  (I5: cap+1th fetch fails; guest may handle or trap)
+
+Failure path (fetch timeout):
+  wall_ms budget exhausted during outbound fetch -&gt; HostCallResult::Err(Timeout)
+  ExecutionContext.wall_deadline checked before and after await points</code></pre>
+<h3 id="sec-8-8">8.8 Cross-PoP Propagation Sequence</h3>
+<pre class="diagram"><code>origin-PoP                  edge-propagate              remote-PoP-N
+    |                              |                          |
+    |--KvPut(ns,k,v,ttl)--&gt;        |                          |
+    | locally committed            |                          |
+    |--enqueue Invalidation------&gt; |                          |
+    |                              |--push Invalidation-----&gt; |
+    |                              |                  apply if version &gt; local
+    |                              |&lt;--Ack------------|       |
+    |                              |                          |
+    | (if Ack timeout: retry with exponential backoff)        |
+    |                              |                          |
+
+Invalidation record:
+  { kind: KvKey(ns, key) | CacheKey(key), version: MonotonicVersion, origin_pop: PoPId }
+Convergence guarantee (I9): all PoPs apply or discard based on version ordering; last-writer-wins on version tie-break by PoPId.
+Bounded staleness: configurable per namespace; default 5 seconds wall time.</code></pre>
+<h3 id="sec-8-9">8.9 ResourceLimits Accounting Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Mechanism</th>
+<th>Enforcement Point</th>
+<th>Trap Kind</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>cpu_fuel: u64</td>
+<td>Wasmtime fuel injection; one unit per Wasm instruction</td>
+<td>engine per-store fuel counter</td>
+<td>FuelExhausted</td>
+</tr>
+<tr>
+<td>memory_bytes: u32</td>
+<td>max linear-memory pages (page = 64 KiB) set on instance</td>
+<td>engine memory limits</td>
+<td>UnreachableOrOOM</td>
+</tr>
+<tr>
+<td>wall_ms: u32</td>
+<td>monotonic clock checked at host-call entry and async yield</td>
+<td>ExecutionContext.wall_deadline</td>
+<td>WallClockExceeded</td>
+</tr>
+<tr>
+<td>subrequests: u16</td>
+<td>counter in ExecutionContext, incremented per Fetch dispatch</td>
+<td>edge-host before dispatch</td>
+<td>SubrequestCapExceeded</td>
+</tr>
+</tbody></table></div>
+<p>FuelMeter invariant (<a class="cite" href="/system-design-blueprints/systems/edge-compute-runtime/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/edge-compute-runtime/reliability/#inv-8">I8</a>): fuel charged = f(executed instructions); reproducible across runs of the same module + input; no randomness in accounting.
+EpochDeadline: epoch counter incremented by runtime background thread at configurable tick (e.g., 1ms); instance trapped if epoch counter &gt; deadline epoch.
+Fuel and epoch may run in parallel; first to trigger wins.</p>
+<h3 id="sec-8-10">8.10 Wire / Serialization Layouts</h3>
+<h4 id="sec-8-request-response-over-guest-memory-boundary">Request/Response over guest memory boundary</h4>
+<pre class="diagram"><code>Layout (little-endian, 4-byte aligned):
+  [u32: method_len][method bytes]
+  [u32: url_len][url bytes]
+  [u32: header_count]
+    repeated: [u16: name_len][name bytes][u16: val_len][val bytes]
+  [u32: body_len][body bytes]
+
+Zero-copy path: body passed as wasm linear-memory pointer + length; no copy if body &lt;= 64 KiB.</code></pre>
+<h4 id="sec-8-kventry-storage-layout-per-pop-local-store">KvEntry storage layout (per-PoP local store)</h4>
+<pre class="diagram"><code>Key:    namespace_id(8 bytes) || key_bytes (variable)
+Value:  [u8: version_type][u64: version][u64: expires_at_unix_ms][u32: value_len][value bytes]</code></pre>
+<h4 id="sec-8-invalidation-wire-format-cross-pop-messagepack">Invalidation wire format (cross-PoP, MessagePack)</h4>
+<pre class="diagram"><code>{
+  kind:       0x01 (KvKey) | 0x02 (CacheKey),
+  ns_or_nil:  bytes,
+  key:        bytes,
+  version:    [u64: wall_ms][u32: pop_id][u32: seq],   -- monotonic vector
+  origin_pop: u32
+}</code></pre>
+<h3 id="sec-8-11">8.11 RoutingDecision Semantics</h3>
+<pre class="diagram"><code>Inputs: client source IP -&gt; anycast catchment -&gt; PoPId list (ordered by proximity)
+Algorithm:
+  1. Select nearest PoP where PoP.healthy == true (I7)
+  2. If that PoP admission-check fails (sched backpressure): advance to next in list
+  3. Record RoutingDecision { pop, reason: Nearest | Failover(rank) }
+  4. Dispatch to selected PoP; set request affinity header for retry de-loop
+
+Failover:
+  - PoP marked unhealthy on N consecutive health-check failures (configurable threshold)
+  - In-flight requests on a newly-unhealthy PoP: drain or re-route depending on response stage
+  - Sticky vs stateless: workers are stateless (P8); re-routing to a different PoP is safe</code></pre>
+<h3 id="sec-8-12">8.12 Scheduler Semantics (per-PoP)</h3>
+<pre class="diagram"><code>Queuing model:
+  - Global concurrency slot pool: capacity = PoP.capacity (integer)
+  - Per-tenant sub-pool: max_concurrent_per_tenant &lt;= global_capacity / active_tenants
+  - Admission queue: bounded FIFO per tenant; max depth = 2x per-tenant sub-pool
+  - Deadline-aware eviction: requests past wall_ms budget dropped from queue with 429
+
+CPU time-slicing:
+  - Epoch-tick interrupts cooperative multitasking (1ms default epoch)
+  - On epoch interrupt: store fuel_remaining in ExecutionContext; yield tokio task
+  - Fairness: tenant with lowest cumulative CPU-ms this window scheduled next (deficit scheduling)
+
+Backpressure:
+  - Queue full -&gt; 429 Too Many Requests returned immediately (no blocking)
+  - Capacity restored when in-flight count drops below 80% of limit (hysteresis)</code></pre>
+<h3 id="sec-8-13">8.13 Snapshot/Restore Semantics</h3>
+<pre class="diagram"><code>ColdStartSnapshot creation (once per WorkerScript, post-init):
+  1. Instantiate fresh module; run _start / initialization exports
+  2. Capture: linear memory image (all pages), global values, table slots
+  3. Seal as ColdStartSnapshot { module_id, initialized_memory_image, globals }
+  4. Store in InstancePool; mark immutable (never mutated after sealing)
+
+Restore path (warm start):
+  1. Obtain pre-allocated memory slab from PoolingAllocator
+  2. Copy-on-write (or memcpy) initialized_memory_image into slab
+  3. Reset globals to snapshot values
+  4. Attach to Wasmtime Instance without re-running init
+  5. Assign new IsolateId; set FuelMeter + EpochDeadline per ResourceLimits
+  6. Verify reset: hash(memory_image + globals) == snapshot hash (I4)
+
+Reset-and-reuse path (after clean completion):
+  1. Call WarmInstance.reset_token handler (guest export, optional)
+  2. Verify memory/globals returned to snapshot state (same hash check)
+  3. If check passes -&gt; return to pool as IDLE; else DESTROYED (I3, P10)</code></pre>
+<h3 id="sec-8-14">8.14 Worked Example -- Happy Path Invocation</h3>
+<pre class="diagram"><code>1. Client HTTP GET /api/data -&gt; anycast -&gt; PoP-7
+2. edge-router: parse request -&gt; WorkerId lookup for hostname -&gt; RoutingDecision { pop: 7, reason: Nearest }
+3. edge-sched: concurrency slot available -&gt; admit
+4. edge-coldstart: InstancePool hit for WorkerId-42 -&gt; WarmInstance { instance, reset_token } checked out
+5. edge-isolate: attach ExecutionContext { fuel=500_000, wall_ms=50, subrequests=5 }
+6. edge-runtime: invoke fetch handler; guest runs
+7. guest calls kv_get(&quot;cache:data&quot;) -&gt; edge-host -&gt; edge-kv lookup -&gt; LIVE entry -&gt; return value bytes
+8. guest returns Response { 200, headers, body }
+9. edge-isolate: read response from guest memory; destroy ExecutionContext
+10. instance reset -&gt; hash check passes -&gt; return to pool (IDLE)
+11. edge-router: send Response to client; record metrics in edge-metrics</code></pre>
+<h3 id="sec-8-15">8.15 Failure-Path Example -- Fuel Exhaustion</h3>
+<pre class="diagram"><code>1-6: same as 8.14
+7. guest enters tight loop; fuel counter decrements to 0
+8. Wasmtime engine raises FuelExhausted trap
+9. edge-isolate: catches trap -&gt; IsolateId-XYZ state -&gt; TRAPPED
+10. Instance DESTROYED immediately; never returned to pool (I3)
+11. edge-router: returns 503 to client with header X-Edge-Error: ResourceLimit/CPUFuel
+12. edge-metrics: records invocation_trapped{reason=fuel_exhausted, tenant=T, worker=W}
+13. edge-sched: concurrency slot released; next queued request admitted</code></pre>
+<h3 id="sec-8-16">8.16 Edge Cases</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Handling</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Worker deploys while requests in-flight on old WorkerId</td>
+<td>Old WorkerId drains (DRAINING state); new WorkerId accepts new dispatch; pool for old purged after drain</td>
+</tr>
+<tr>
+<td>Snapshot hash mismatch on reset</td>
+<td>Instance DESTROYED; cold-start path used; alert metric emitted</td>
+</tr>
+<tr>
+<td>KV read on non-origin PoP during propagation window</td>
+<td>Returns local value (may be stale by bounded staleness); correct per P5/<a class="cite" href="/system-design-blueprints/systems/edge-compute-runtime/reliability/#inv-9">I9</a></td>
+</tr>
+<tr>
+<td>Subrequest itself times out</td>
+<td>HostCallResult::Err(Timeout); fuel charged for attempted request; guest decides to continue or abort</td>
+</tr>
+<tr>
+<td>Pool exhausted + cold-start under memory pressure</td>
+<td>PoolingAllocator returns OOM; 503 returned; metric pool_exhaustion_total incremented</td>
+</tr>
+<tr>
+<td>CacheEntry stale-while-revalidate window active</td>
+<td>Serve stale immediately; background revalidation fetch issued; new entry replaces on 200; TTL extended on 304</td>
+</tr>
+<tr>
+<td>Two PoPs write same KV key concurrently</td>
+<td>Both propagate Invalidation with their version; receiver applies higher version; lower discarded (LWW)</td>
+</tr>
+<tr>
+<td>Guest wasm calls host import not declared in bindings</td>
+<td>Capability check fails; HostCallResult::Err(NotAuthorized); <a class="cite" href="/system-design-blueprints/systems/edge-compute-runtime/reliability/#inv-10">I10</a> enforced; no ambient authority</td>
+</tr>
+<tr>
+<td>PoP health-check flip-flop</td>
+<td>Hysteresis: N consecutive failures to mark unhealthy; M consecutive successes to mark healthy; prevents routing oscillation</td>
+</tr>
+<tr>
+<td>Epoch tick while waiting on outbound fetch</td>
+<td>Epoch deadline accounts for async wait; deadline = dispatch_time + wall_ms; checked on resume</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

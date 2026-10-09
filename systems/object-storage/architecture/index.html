@@ -1,0 +1,280 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Object Storage (S3-like) — Architecture · Engineering Blueprints</title><meta name="description" content="Object Storage (S3-like), hld: §3 overview + §8 domain model. A cluster-scale, S3-API-compatible object storage system in the Amazon S3 / Ceph RADOS Gateway / MinIO / OpenStack Swift lineage: an immutable, versioned blob store addressed by a (bucket, key…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/object-storage/">Object Storage (S3-like)</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Object Storage (S3-like)</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~28 weeks</li> <li>2,447 lines</li> <li>blueprint #107</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/object-storage/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/object-storage/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/object-storage/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/object-storage/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/object-storage/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/object-storage/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/object-storage/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/object-storage/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/object-storage/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/object-storage/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Object Storage (S3-like) — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                       S3 clients (awscli, boto3, s5cmd, mc, ...)
+                                     |
+                                     | HTTPS, Sigv4
+                                     v
+        +----------------------------+----------------------------+
+        |                          gateway                        |
+        | axum HTTP | Sigv4 verifier | policy eval | range parser |
+        | router    | conditional    | multipart    | OTel spans  |
+        +------+-----------------+---------------------+---------+
+               |                 |                     |
+         metadata RPCs     blob put/get RPCs       admin REST (mTLS)
+               |                 |                     |
+       +-------v-------+ +-------v-------+     +-------v--------+
+       |   metadata    | |   blob nodes   |     |  admin / ops   |
+       | (Raft + WAL)  | | (storage pool) |     | rebalance / GC |
+       | bucket/obj/   | | fragments/     |     | scrub / fsck   |
+       | ver/mpu index | | shards on disk |     | lifecycle work |
+       | LSM engine    | | CRC32C, EC k+m |     +-------+--------+
+       +-------+-------+ +----------------+             |
+               |          replication + cross-region     |
+               +------------------------------------------+</code></pre>
+<p>Five properties, referenced throughout:</p>
+<ol>
+<li><strong>The gateway is stateless (P4).</strong> Every byte a user PUTs is durably in the storage
+pool before the gateway acknowledges (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-1">I1</a>). A gateway can be killed and replaced at any
+moment without data loss — the property that lets the gateway tier scale horizontally
+(<a class="cite" href="/system-design-blueprints/systems/object-storage/build/#sec-23">§23</a>).</li>
+<li><strong>The metadata service is the sole authoritative writer of the index (P14, <a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-13">I13</a>).</strong>
+Bucket creation, object insertion, version-id allocation, MPU state transitions, and
+placement decisions all go through the Raft-replicated state machine (<a class="cite" href="/system-design-blueprints/systems/object-storage/build/#sec-14">§14</a>).</li>
+<li><strong>Objects are immutable (P2).</strong> A PUT to an existing key produces a new version, never
+an in-place mutation; there is no &quot;overwrite&quot; RPC, only &quot;produce a new version&quot; and
+&quot;delete an old version&quot; — removing the need for write leases on the data path.</li>
+<li><strong>The data path is content-addressed (P6).</strong> Each fragment is stored under an <code>xxh3</code>
+fingerprint; a SHA-256 verifies integrity at read time (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-4">I4</a>). The blob layer does not
+know about buckets, keys, or versions.</li>
+<li><strong>Failures are first-class (P11).</strong> Gateway death, blob-node death, rack/zone loss,
+metadata-leader loss, replication-link loss, partial multipart, partial lifecycle
+transition — each has a phase, a conformance fixture, and a runbook (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#sec-24">§24</a>, <a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#sec-25">§25</a>).</li>
+</ol>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Bucket / Key / Version Model</h3>
+<p><code>BucketName</code> — 3–63 chars, lowercase, hyphenated, S3 lexical rules (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-1">§11.1</a>). <code>ObjectKey</code> —
+opaque UTF-8, ≤ 1024 bytes (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-1">§11.1</a>). <code>VersionId</code> — 128-bit, cluster-monotonic per
+<code>(bucket, key)</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-2">I2</a>). An object&#39;s identity is the triple; the <em>version ladder</em> for a key is
+<code>Vec&lt;(VersionId, Object)&gt;</code> ordered descending, the head being the &quot;current&quot; object (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-18-1">§18.1</a>).</p>
+<h3 id="sec-8-2">8.2 REST Wire Grammar</h3>
+<p>Request-line grammar (ABNF-style, RFC 5234 conventions):</p>
+<pre class="diagram"><code>request-target = &quot;/&quot; bucket [ &quot;/&quot; key ] [ &quot;?&quot; query ]
+query          = param *( &quot;&amp;&quot; param )
+param          = key-name [ &quot;=&quot; value ]
+range-value    = &quot;bytes=&quot; ( byte-range-spec / suffix-range-spec )
+byte-range-spec   = first-byte-pos &quot;-&quot; [ last-byte-pos ]
+suffix-range-spec = &quot;-&quot; suffix-length</code></pre>
+<p>Every documented S3 verb (<code>PUT</code>, <code>GET</code>, <code>HEAD</code>, <code>DELETE</code>, <code>POST</code> for multipart/batch) maps
+1:1 to a <code>MetadataService</code>/<code>BlobService</code> RPC pair (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-9">§11.9</a>–11.10); the gateway performs no
+business logic beyond translation, validation, and streaming (P4).</p>
+<h3 id="sec-8-3">8.3 Storage Backend Record Layout</h3>
+<p>A blob node stores one file per fragment (Phase 0–2, <a class="cite" href="/system-design-blueprints/systems/object-storage/trade-offs/#adr-23">ADR-23</a>) or one file per EC shard
+(Phase 3+):</p>
+<pre class="diagram"><code>${BLOB_DATA_DIR}/&lt;fragment_id_hex&gt;            # replicated fragment (Phase 0-2)
+${BLOB_DATA_DIR}/&lt;fragment_id_hex&gt;.shard-&lt;i&gt;  # EC data/parity shard, i in 0..k+m
+${BLOB_DATA_DIR}/&lt;fragment_id_hex&gt;.meta       # size, hash, durability mode
+${BLOB_DATA_DIR}/&lt;fragment_id_hex&gt;.crc        # one CRC32C per 64 KiB block</code></pre>
+<p>State per fragment (as tracked by <code>obj-blob::fragment_store</code>): <code>Writing → Committed → {Quarantined | GcPending → Deleted}</code>. <code>Quarantined</code> is entered only on checksum mismatch
+(<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-4">I4</a>); a quarantined fragment is excluded from placement and read paths until repaired.</p>
+<h3 id="sec-8-4">8.4 Metadata Index (LSM-Tree)</h3>
+<p>The metadata index is an <strong>LSM-tree</strong> (O&#39;Neil et al., 1996), chosen over a plain in-RAM
+<code>BTreeMap</code> once object counts exceed comfortable RAM residency: a <strong>MemTable</strong> (sorted
+skip-list, the live write target), a <strong>WAL</strong> (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-3">I3</a>) guarding the MemTable, immutable
+<strong>SSTable</strong> segments flushed on checkpoint, and a background <strong>compactor</strong> merging segments
+(<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-14-3">§14.3</a>). Reads check the MemTable, then segments newest-first; range scans (prefix listing,
+<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-13-4">§13.4</a>) merge-iterate across all levels. This directly extends Petrov&#39;s B-Tree treatment
+(Database Internals) with the log-structured write path Kleppmann motivates in DDIA Ch.3.</p>
+<h3 id="sec-8-5">8.5 Worked Example — PUT then GET</h3>
+<ol>
+<li>Client PUTs <code>/demo/hello.txt</code>, body <code>&quot;hi&quot;</code> (2 bytes), Sigv4-signed.</li>
+<li>Gateway computes <code>md5</code>, <code>xxh3</code> (⇒ <code>FragmentId</code>), <code>sha256</code> in one streaming pass.</li>
+<li>Gateway calls <code>MetadataService::put_object_begin</code> → <code>PutObjectTicket{ticket_id: 42}</code>.</li>
+<li>Gateway calls <code>BlobService::put_fragment(frag, bytes, plan)</code>; <code>plan</code> names 3 replica
+nodes (RF=3, P7) chosen by the metadata service (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-13">I13</a>).</li>
+<li>Once the RF quorum (2 of 3) acks, gateway calls <code>put_object_commit(ticket, manifest)</code> →
+<code>VersionId::NONE</code> (unversioned bucket).</li>
+<li>Metadata service logs <code>PutObjectCommit</code> to the WAL (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-3">I3</a>), applies it, returns.</li>
+<li>Gateway returns <code>200 OK</code>, <code>ETag: &quot;&lt;md5_hex&gt;&quot;</code>.</li>
+<li>A later <code>GET /demo/hello.txt</code> resolves the head version, streams the fragment from any
+replica, verifies SHA-256 (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-4">I4</a>), returns the 2 bytes.</li>
+</ol>
+<h3 id="sec-8-6">8.6 Malformed-Input Examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Expected Handling</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Bucket name <code>&quot;-bad-&quot;</code> (leading/trailing hyphen)</td>
+<td><code>400 InvalidBucketName</code> at parse (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-11-1">§11.1</a>)</td>
+</tr>
+<tr>
+<td>Key of 1025 bytes</td>
+<td><code>400 KeyTooLong</code></td>
+</tr>
+<tr>
+<td><code>Range: bytes=500-100</code> (start &gt; end)</td>
+<td><code>416 InvalidRange</code></td>
+</tr>
+<tr>
+<td><code>Authorization</code> header with a mismatched <code>x-amz-date</code></td>
+<td><code>403 SignatureDoesNotMatch</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-12">I12</a>)</td>
+</tr>
+<tr>
+<td><code>Content-MD5</code> header not matching the body</td>
+<td><code>400 BadDigest</code></td>
+</tr>
+<tr>
+<td><code>partNumber=10001</code> on <code>UploadPart</code></td>
+<td><code>400 InvalidPartNumber</code> (<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-7">I7</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 Failure-Path Example</h3>
+<p>A gateway crashes between step 4 and step 5 of <a class="cite" href="/system-design-blueprints/systems/object-storage/architecture/#sec-8-5">§8.5</a> (blob write acked, commit not yet
+logged). Recovery: the ticket remains <code>Allocating</code> in the WAL; the recovery sweep (<a class="cite" href="/system-design-blueprints/systems/object-storage/blueprint/#sec-14-4">§14.4</a>,
+<a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#fm-5">FM-5</a>) either finds no matching <code>PutObjectCommit</code> after the GC threshold and issues
+<code>PutObjectAbort</code> (fragment queued for GC, <a class="cite" href="/system-design-blueprints/systems/object-storage/reliability/#inv-10">I10</a>), or — if the client retries the same
+idempotency key — re-attempts the commit. No partial object is ever visible to a <code>GET</code>
+because the object index installs the manifest atomically (single WAL entry).</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

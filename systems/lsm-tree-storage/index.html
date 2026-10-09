@@ -1,0 +1,674 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>LSM-Tree Storage Engine · Engineering Blueprints</title><meta name="description" content="The blueprint's reference workload is one billion 16-byte keys with 100-byte values, about 136 GB raw, on a 64 GiB host where the engine may use at most 8 GiB (§4); the write target is ≥ 200,000 ops/s with an fsync on every commit (§4, M1). Every write acknowledged by put() must…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <span aria-current="page">LSM-Tree Storage Engine</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>LSM-Tree Storage Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~16 weeks</li> <li>2,666 lines</li> <li>blueprint #68</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/lsm-tree-storage/" aria-current="page" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/lsm-tree-storage/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/lsm-tree-storage/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/lsm-tree-storage/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/lsm-tree-storage/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/lsm-tree-storage/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/lsm-tree-storage/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/lsm-tree-storage/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:LSM-Tree Storage Engine"> <div class="doc-grid"> <aside class="doc-toc" data-pagefind-ignore> <details class="toc" open data-collapse-narrow> <summary>On this page</summary> <ol><li><a href="#ex-in-one-paragraph">In one paragraph</a></li><li><a href="#ex-the-problem-concretely">The problem, concretely</a></li><li><a href="#ex-how-it-works-end-to-end">How it works, end to end</a></li><li><a href="#ex-the-core-ideas">The core ideas</a></li><li><a href="#ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</a></li><li><a href="#ex-what-must-never-be-false">What must never be false</a></li><li><a href="#ex-what-breaks-in-production">What breaks in production</a></li><li><a href="#ex-the-numbers">The numbers</a></li><li><a href="#ex-how-it-compares">How it compares</a></li><li><a href="#ex-building-it-the-phase-plan">Building it — the phase plan</a></li><li><a href="#ex-questions-to-test-yourself">Questions to test yourself</a></li><li><a href="#ex-if-you-only-remember-three-things">If you only remember three things</a></li><li><a href="#ex-words-used-here">Words used here</a></li></ol> </details> </aside> <div class="doc-main"> <p class="meta doc-meta" data-pagefind-ignore> <span>Plain-words explainer</span> <span>status: checked</span> <span>written 2026-10-02</span> <span>checked by Opus 5.5 on 2026-10-07</span> <span>441 lines</span> </p>  <div class="prose explainer"><h2 id="ex-in-one-paragraph">In one paragraph</h2>
+<p>This is an embedded key-value storage engine written in Rust and compiled into the host
+program: it owns a data directory and offers put, get, delete, snapshot, range scan, range
+delete, flush, compact-range and checkpoint (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-1">§1</a>). Its shape is the <strong>log-structured merge
+tree (LSM-tree)</strong>: writes go to an append-only log and an in-memory table, become sorted
+files that never change, and are merged in the background (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-3">§3</a>). It targets hundreds of
+thousands of writes per second on commodity NVMe and microsecond point lookups over
+terabyte-scale data, with write, space and read amplification derived by formula, not
+asserted (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-1">§1</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a>). Systems engineers embed it; availability is the host process&#39;s, and the
+engine owns its own crash recovery (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-1">§1</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>).</p>
+<h2 id="ex-the-problem-concretely">The problem, concretely</h2>
+<p>The blueprint&#39;s reference workload is one billion 16-byte keys with 100-byte values, about
+136 GB raw, on a 64 GiB host where the engine may use at most 8 GiB (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>); the write target is
+≥ 200,000 ops/s with an fsync on every commit (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-1">M1</a>). Every write acknowledged by <code>put()</code>
+must survive <code>kill -9</code> plus a power cut, except writes acknowledged with <code>sync = false</code>, which
+may be lost only as a contiguous suffix of the log (P1). The classic disk structure, a tree
+whose pages are updated in place (<strong>B+tree</strong>), is rejected here because random in-place
+page-write amplification is unacceptable for a write-heavy workload (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-36">§36</a> alternative 2,
+<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-2">ADR-02</a>). The LSM bet is the opposite: background compaction, cheap in aggregate and deferred,
+beats foreground in-place update, expensive per operation and immediate (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-2">§2</a>). The blueprint
+derives the price: about 30 bytes written per logical byte (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #1), about 1.11× on-disk bytes
+per logical byte (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #2), and up to 14 block reads per point lookup before Bloom filters help
+(<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #3). A crash adds a WAL record torn mid-write (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-1">FM-1</a>) and an SSTable on disk the manifest
+never recorded (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-8">§8.8</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-4">FM-4</a>); the answer is a recovery story in which the manifest alone decides
+the file set (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-7">I7</a>).</p>
+<h2 id="ex-how-it-works-end-to-end">How it works, end to end</h2>
+<p>Lightly adapted from the <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-3">§3</a> diagram, with the crate that owns each box:</p>
+<pre class="diagram"><code> Public API (lsm-engine): Db::open/put/get/delete/snapshot/iter/delete_range/
+                          flush/compact_range/checkpoint
+          |
+ Engine core:  write path  WAL append -&gt; MemTable insert -&gt; ack              (I1)
+               read path   MemTable -&gt; ImmMemTables -&gt; L0 -&gt; L1..Ln         (I10)
+               background  flush, compact, vacuum, rate limit
+      |                      |                           |
+ WAL Adapter           MemTable Stack              Compaction Coordinator
+ (lsm-wal)             (lsm-memtable)              (lsm-compact, lsm-rate-limit)
+ append-only, CRC32C,  active + immutable queue,   picker, runner,
+ group commit (I1, I8) skip-list keyed InternalKey rate limiter (I3)
+      |                                                  |
+ SSTable Layer (lsm-sst, lsm-filter)
+   writer: data + filter + metaindex + index blocks + footer                 (I2)
+   reader: footer -&gt; index -&gt; filter -&gt; data block + cache
+      |                                                  |
+ Block + Table Cache (lsm-cache)       Manifest / VersionSet (lsm-manifest)
+ sharded LRU                           append-only edit log + snapshot       (I7)
+      |                                                  |
+ File I/O: pread/pwrite on raw FDs, optional O_DIRECT, fsync/fdatasync, atomic rename</code></pre>
+<p><strong>One write.</strong> <code>Db::put(key, value)</code> in <code>lsm-engine</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-21-2">§21.2</a>) goes first to the <strong>write-ahead
+log (WAL)</strong> in <code>lsm-wal</code>: a 24-byte header carrying a CRC32C over sequence number, kind, length
+and payload is appended to the current 64 MiB segment (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-2">§8.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-13-2">§13.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-8">I8</a>). Concurrent writers do
+not each pay a disk flush: the first to take the segment mutex becomes the leader, batches the
+queued payloads (cap 1 MiB), calls <code>fdatasync</code> once, and releases the followers — <strong>group
+commit</strong> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-13-2">§13.2</a>, P1). Only then is the record inserted into the active <strong>memtable</strong> in
+<code>lsm-memtable</code>, a skip-list ordered by <code>InternalKey</code>, and the call returns (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-1">I1</a>). When the
+memtable passes <code>write_buffer_size</code> (64 MiB by default, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>) it is frozen onto an immutable
+queue, a fresh memtable takes over with the next WAL <code>log_number</code>, and a flush job writes the
+frozen one out as a sorted, never-again-modified file — an <strong>SSTable</strong> — using <code>lsm-sst</code>
+(<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-14-2">§14.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-15-1">§15.1</a>). The new file is installed in a fixed order: write <code>path.tmp</code>, fsync, rename,
+fsync the directory, and only then append a <code>VersionEdit</code> to the manifest in <code>lsm-manifest</code>
+(<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-15-2">§15.2</a>, P6). The WAL segment that fed the flush is truncated only after that manifest edit has
+landed (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-13-2">§13.2</a>, P6).</p>
+<p><strong>One read.</strong> <code>Db::get(key)</code> at snapshot S walks the sources newest to oldest (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-5">§8.5</a>): the
+active memtable, each immutable memtable, every L0 file (they overlap, so each is checked,
+newest first), then levels 1 to 6, where files do not overlap and a binary search over the
+level&#39;s file list names at most one candidate (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-5">§8.5</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-3">I3</a>). Each candidate file is asked its
+<strong>Bloom filter</strong> first; a &quot;definitely not&quot; skips the file before any <code>pread</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-5">§8.5</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-32">MM5</a>). On a
+&quot;maybe&quot;, the reader binary-searches the file&#39;s in-memory index block, fetches the data block
+through <code>lsm-cache</code>, and searches inside the block (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-16-2">§16.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-20-2">§20.2</a>). The first entry with <code>seq ≤ S</code> ends the walk; if it is a deletion marker the answer is &quot;not found&quot; (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-5">§8.5</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-10">I10</a>).</p>
+<p><strong>In the background.</strong> <code>lsm-compact</code> scores each level as <code>size / max_bytes_for_level</code>, picks
+the level with the highest score above 1.0, merges the chosen file with every overlapping file
+in the level below, writes new files, and installs them with one manifest edit (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-19-2">§19.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-6">§8.6</a>).
+Four such jobs run at once by default (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-27">ADR-27</a>), each throttled by a token-bucket rate limiter
+in <code>lsm-rate-limit</code> so foreground reads keep their share of the disk (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-26">ADR-26</a>). A vacuum pass
+deletes any file on disk that the current <code>Version</code> does not reference (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-7">I7</a>).</p>
+<h2 id="ex-the-core-ideas">The core ideas</h2>
+<h3 id="ex-durable-before-acknowledged-with-one-fsync-for-many-writers-13-2-i1">Durable before acknowledged, with one fsync for many writers (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-13-2">§13.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-1">I1</a>)</h3>
+<p>The rule is <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-1">I1</a>: <code>put()</code> does not return success until its record is fsync&#39;d (<code>sync=true</code>) or
+queued in group commit (<code>sync=false</code>) (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-1">I1</a>). Three durability modes exist: <code>NoSync</code> (page cache
+only), <code>Synced</code> (one <code>fdatasync</code> per commit) and <code>FsyncBatch{interval}</code> (one <code>fdatasync</code> per
+interval, 1 ms by default) (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-13-2">§13.2</a>). The blueprint&#39;s arithmetic shows why batching matters: at
+about 150 µs per fsync on the reference NVMe, an unbatched stream caps at ≈ 6,667 fsyncs/s, and
+reaching <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-2">M2</a>&#39;s 1,500,000 writes/s at a 1 ms interval needs ≈ 1,500 writes per batch (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #7).
+The same document sets <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-1">M1</a> at ≥ 200,000 ops/s fsync-on-commit, single stream (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-30">§30</a>), and
+never reconciles <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-1">M1</a> with that ≈ 6,667 fsyncs/s ceiling (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #7). The log is <strong>redo-only</strong>: LSM
+writes are append-only, so there is nothing to undo in place (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-5">ADR-05</a>). Recovery walks the WAL
+from the manifest&#39;s <code>log_number</code>, verifies every record&#39;s CRC and stops at the first bad one;
+the default <code>StrictRedo</code> fails if that truncation falls inside a manifest-durable range, while
+<code>BestEffort</code> logs and continues, for forensics only (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-13-2">§13.2</a>). <code>fdatasync</code> returning success
+means the bytes reached the disk&#39;s volatile cache, not necessarily the platter (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-13-6">§13.6</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-32">MM6</a>,
+<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#t-6">T6</a>).</p>
+<h3 id="ex-one-key-many-versions-newest-first-8-4-i10-adr-09">One key, many versions, newest first (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-4">§8.4</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-10">I10</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-9">ADR-09</a>)</h3>
+<p>Every write is stamped with a strictly increasing <strong>sequence number</strong> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-4">I4</a>, P11). Inside the
+engine a key is the caller&#39;s bytes plus an 8-byte trailer <code>(seq &lt;&lt; 8) | kind</code> — the
+<strong>InternalKey</strong> — and the sort order is user key ascending, then sequence number
+<em>descending</em>, then kind descending (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-4">§8.4</a>). A <strong>snapshot</strong> is nothing more than a pinned
+sequence number with a reference count (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-9">ADR-09</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-17-2">§17.2</a>), and a read at snapshot S returns, per
+key, the version with the highest <code>seq ≤ S</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-10">I10</a>). The merging iterator pops entries in
+InternalKey order and applies four rules (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-17-2">§17.2</a>):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Entry popped from the merge heap</th>
+<th>What the snapshot filter does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>seq &gt; S</code></td>
+<td>skip — written after the snapshot</td>
+</tr>
+<tr>
+<td>same user key as the previous emission</td>
+<td>skip — an older version of a key already answered</td>
+</tr>
+<tr>
+<td><code>kind == Deletion</code></td>
+<td>mark &quot;swallow the next visible version&quot;</td>
+</tr>
+<tr>
+<td>anything else</td>
+<td>emit, unless a live range tombstone covers it (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-12">I12</a>)</td>
+</tr>
+</tbody></table></div>
+<p>Because newer versions sort first, the iterator emits only the most recent visible version of
+each key without a second pass (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-4">§8.4</a>); a <code>Deletion</code> hit on a point lookup returns <code>NotFound</code>
+(<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-5">§8.5</a>). A deletion is a record — a <strong>tombstone</strong> — not a removal (P12), and it is physically
+dropped only at the bottom level and only once its sequence number is below every live
+snapshot&#39;s (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-6">I6</a>). Snapshots pin SSTables and hold back tombstone collection; they do not pin WAL
+records, which can be truncated as soon as their memtable is flushed (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-17-6">§17.6</a>, P6).</p>
+<h3 id="ex-the-sstable-a-frozen-sorted-file-with-its-map-at-the-end-8-1-i2-mm1">The SSTable: a frozen, sorted file with its map at the end (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-1">§8.1</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-32">MM1</a>)</h3>
+<p>An SSTable is laid out as data blocks, then a filter block, a metaindex block, an index block
+and a fixed 48-byte footer that holds the handles of the metaindex and index blocks (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-1">§8.1</a>).
+Data blocks aim at 4 KiB (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-4">ADR-04</a>); inside one, each entry stores only the bytes its key does
+not share with the previous key, with a full key written at every 16th entry (a <strong>restart
+point</strong>) — 30–60% smaller on string keys with common prefixes (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-1">§8.1</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-15-2">§15.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-18">ADR-18</a>). Every
+block ends in a trailer naming its compression codec plus a CRC32C (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-1">§8.1</a>); the CRC is checked
+before any byte is parsed, so a bit flipped by bit-rot returns <code>Error::BlockCorrupt</code> instead of
+a length field the parser would trust (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-7">§8.7</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-8">I8</a>). The index block holds one entry per data
+block, keyed by the shortest string that is <code>≥</code> the block&#39;s largest key and <code>&lt;</code> the next
+block&#39;s smallest (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-15-2">§15.2</a>); a reader loads it once at open and keeps it — about 512 KiB for a 64
+MiB file (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-16-2">§16.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #8). Once the manifest references the file, its bytes never change (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-2">I2</a>).
+Each file also carries one <strong>Bloom filter</strong> over its keys (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-17">ADR-17</a>): at 10 bits per key and 7
+hashes the expected false-positive rate is about 0.8% (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-16-2">§16.2</a>), the billion-key reference set
+needs 1.25 GB of filter memory (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #4), and the expected cost of a lookup is <code>1 + 14 × 0.008 ≈ 1.11</code> block reads (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #3). <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a> states the budget as <code>≤ 1.1</code>, &quot;derived <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #3&quot;, and <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-5">§8.5</a> rounds
+to ≈ 1.1; the blueprint does not reconcile 1.11 with ≤ 1.1.</p>
+<h3 id="ex-leveled-compaction-and-the-three-amplifications-19-2-34-i3-p4">Leveled compaction and the three amplifications (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-19-2">§19.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-3">I3</a>, P4)</h3>
+<p>Files are arranged in levels. L0 files overlap one another (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-17-2">§17.2</a>); from L1 down, files within
+a level are sorted and non-overlapping (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-3">I3</a>), and the per-level size ratio (<strong>level
+multiplier</strong>) is <code>T = 10</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #1, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>). The picker is a pure function of the current
+<code>Version</code>: <code>score(L) = sizeof(L) / max_bytes_for_level(L)</code>, the highest score above 1.0 wins,
+and within that level the file overlapping the fewest next-level files is chosen and merged
+together with all of them (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-19-2">§19.2</a>). The runner moves through Idle → Picked → Reading → Merging →
+Writing → Installing → Retiring → Done; a crash in any state before Installing leaves the
+inputs untouched and at worst an orphan <code>.tmp</code> file for the vacuum (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-6">§8.6</a>). The costs, with the
+blueprint&#39;s formulas: <strong>write amplification</strong> <code>WA ≈ non_L0_levels × (T/2) = 6 × 5 = 30</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a>
+#1); <strong>space amplification</strong> <code>SA ≈ T/(T−1) = 10/9 ≈ 1.11</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #2); worst-case <strong>read
+amplification</strong> <code>L0_files + non_L0_levels = 8 + 6 = 14</code> block reads before the Bloom filters do
+their work (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #3). Lowering <code>T</code> lowers write amplification but adds levels and therefore read
+amplification — the trade Monkey and Dostoevsky formalise (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-19-7">§19.7</a>). Compaction never blocks the
+foreground until it falls behind: above 8 L0 files the writer sleeps
+<code>slowdown_microseconds(pending_l0)</code>, above 12 it gets <code>Error::WriteStall</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-19-2">§19.2</a>, P4), and the
+memtable side gives a <code>(2 + 1) × 64 MiB = 192 MiB</code> burst before the same stall (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #5).</p>
+<h3 id="ex-the-manifest-is-the-database-data-files-are-its-cache-8-3-18-2-i7-i11-mm2">The manifest is the database; data files are its cache (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-3">§8.3</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-18-2">§18.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-32">MM2</a>)</h3>
+<p>The <strong>manifest</strong> is an append-only log of <code>VersionEdit</code> records, each naming the files added
+(level, id, size, key range, sequence range) and removed, plus the new <code>log_number</code> and
+<code>last_sequence</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-3">§8.3</a>). <code>VersionSet::log_and_apply</code> serialises edits under a mutex, appends,
+fsyncs, and only then swaps the in-memory <code>Arc&lt;Version&gt;</code> — the fsync is the durability point
+(<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-18-2">§18.2</a>). Every 1,000 edits a full <code>VersionSnapshot</code> is written and the log truncated, which
+bounds how long recovery can take (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-3">§8.3</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-18-2">§18.2</a>). A one-line <code>CURRENT</code> file names the active
+manifest and is replaced only by write-tmp, fsync, rename, fsync-directory, so a crash leaves
+either the old or the new manifest valid, never a half-written pointer (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-18-2">§18.2</a>). Recovery
+is therefore mechanical: read <code>CURRENT</code>, replay the manifest into a <code>Version</code>, verify every
+referenced file exists (fatal <code>MissingFile</code> otherwise, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-7">I7</a>), then replay the WAL from
+<code>version.log_number</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-18-2">§18.2</a>). The blueprint&#39;s torn-write example shows the payoff: the engine
+dies after fsyncing and renaming <code>0000042.sst.tmp</code> to <code>0000042.sst</code>, but before the directory
+fsync and before the manifest edit lands; on reopen the manifest has never heard of file 42, so
+it is garbage by definition and the vacuum unlinks it, and nothing is lost because the WAL
+records behind that flush were never truncated (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-8">§8.8</a>, P6).</p>
+<h2 id="ex-the-trade-offs-where-engineers-disagree">The trade-offs — where engineers disagree</h2>
+<h3 id="ex-compaction-strategy-leveled-adr-03">Compaction strategy: leveled (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-3">ADR-03</a>)</h3>
+<p><strong>Chosen:</strong> leveled compaction, because it bounds space and read amplification for
+OLTP-shaped point lookups (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>). <strong>Rejected:</strong> size-tiered (Cassandra), universal (RocksDB),
+lazy leveling (Dostoevsky) — documented and deferred (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-37">§37</a> rows 3–5). <strong>When the rejected
+choice is right:</strong> size-tiered wins for time-series or immutable-event ingest where write
+amplification must be minimised and space is cheap.</p>
+<h3 id="ex-wal-policy-redo-only-adr-05">WAL policy: redo-only (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-5">ADR-05</a>)</h3>
+<p><strong>Chosen:</strong> a redo-only log — LSM writes are append-only, so there is nothing to undo in
+place. <strong>Rejected:</strong> redo plus undo, the full ARIES protocol. <strong>When the rejected choice is
+right:</strong> engines with in-place page updates or pre-commit multi-statement rollback — B+tree
+engines — need the undo log.</p>
+<h3 id="ex-write-concurrency-one-writer-thread-per-memtable-adr-08">Write concurrency: one writer thread per memtable (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-8">ADR-08</a>)</h3>
+<p><strong>Chosen:</strong> a single insert mutex per memtable with lock-free readers, which keeps rotation
+and recovery reasoning simple and never blocks a read (P5, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-32">MM8</a>). <strong>Rejected:</strong> a lock-free
+concurrent skip-list (RocksDB <code>InlineSkipList</code>) or a global write mutex across memtables.
+<strong>When the rejected choice is right:</strong> the lock-free skip-list wins past about 1M writes/s on
+a many-core host, where the insert mutex becomes the bottleneck (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-37">§37</a> row 1).</p>
+<h3 id="ex-snapshots-a-pinned-sequence-number-adr-09">Snapshots: a pinned sequence number (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-9">ADR-09</a>)</h3>
+<p><strong>Chosen:</strong> pin a sequence number and count references — snapshot creation is O(1) and there
+is no per-row version chain to maintain. <strong>Rejected:</strong> per-row MVCC version chains
+(Postgres-style) and copy-on-write B-tree snapshots (LMDB-style). <strong>When the rejected choice
+is right:</strong> per-row version chains win for long-running read-modify-write transactions that
+need fine-grained conflict detection.</p>
+<h3 id="ex-fsync-discipline-fdatasync-for-the-wal-fsync-for-the-manifest-adr-14">Fsync discipline: <code>fdatasync</code> for the WAL, <code>fsync</code> for the manifest (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-14">ADR-14</a>)</h3>
+<p><strong>Chosen:</strong> <code>fdatasync</code> on WAL segments, which never change file metadata after preallocation,
+and full <code>fsync</code> on the manifest and <code>CURRENT</code>, since the manifest grows. <strong>Rejected:</strong> <code>fsync</code>
+everywhere, or <code>sync_file_range</code> only. <strong>When the rejected choice is right:</strong> <code>sync_file_range</code>
+wins on copy-on-write filesystems such as btrfs or ZFS, where metadata is already versioned
+safely.</p>
+<h3 id="ex-filter-granularity-one-bloom-filter-per-sstable-adr-17">Filter granularity: one Bloom filter per SSTable (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-17">ADR-17</a>)</h3>
+<p><strong>Chosen:</strong> a single per-file filter — simpler to build and serialise, and sufficient at 10
+bits per key for point lookups. <strong>Rejected:</strong> per-block prefix filters (RocksDB
+<code>FilterPolicy</code>) or no filter. <strong>When the rejected choice is right:</strong> per-block prefix filters
+win for workloads dominated by prefix or time-range scans (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-37">§37</a> row 7).</p>
+<h3 id="ex-checkpoint-hard-link-export-adr-30">Checkpoint: hard-link export (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-30">ADR-30</a>)</h3>
+<p><strong>Chosen:</strong> hard-link every SSTable the pinned <code>Version</code> references into the destination —
+near-instant and space-free on the same filesystem, and consistent precisely because
+SSTables are immutable (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-22-2">§22.2</a>). <strong>Rejected:</strong> a full byte copy, or continuous streaming
+replication. <strong>When the rejected choice is right:</strong> byte copy wins when the checkpoint must
+cross a filesystem or volume boundary, since a hard link needs the same device (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-12">FM-12</a>).</p>
+<h3 id="ex-roads-not-taken-36">Roads not taken (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-36">§36</a>)</h3>
+<p><em>Size-tiered LSM</em> merges several similar-sized runs into one larger run; it wins for high write
+throughput over immutable time-series or event data where space and read amplification are
+tolerable. Real system: Apache Cassandra (STCS) (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-36">§36</a> alternative 1).</p>
+<p><em>In-place B+tree</em> wins for read-heavy work with small in-place updates and bounded fanout
+(WiredTiger&#39;s btree mode, the sibling B+tree project); it loses here on random page-write
+amplification (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-36">§36</a> alternative 2, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-2">ADR-02</a>).</p>
+<p><em>Copy-on-write B-tree</em> (LMDB) wins for read-mostly, single-writer, memory-mapped use that
+wants zero-copy reads; its process-wide write serialisation and space-doubling on bursts
+conflict with concurrent compaction (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-36">§36</a> alternative 3).</p>
+<p><em>A log-structured filesystem</em> (Sprite LFS) wins when the whole filesystem should be
+write-optimised; this engine stays a userspace library over ext4 or xfs, keeping only the
+&quot;cleaner&quot; analogy for compaction (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-36">§36</a> alternative 4).</p>
+<p>The deferred register adds un-defer triggers: key-value separation (WiscKey) once median values
+pass 1 KiB, a lock-free memtable past 1M writes/s, encryption at rest when a customer contract
+requires SOC-2 CC6.1 (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-37">§37</a>).</p>
+<h2 id="ex-what-must-never-be-false">What must never be false</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-1">I1</a></strong> — <code>put()</code> does not return success before its record is fsync&#39;d or queued in group
+commit. Noticed by the crash fixture <code>kill-after-fsync</code>; <code>lsm_wal_fsync_latency_seconds</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-2">I2</a></strong> — once a <code>VersionEdit</code> references an SSTable, its bytes never change. Noticed by the
+<code>sst_block</code> fuzz target and any CRC mismatch; <code>lsm_reads_total{corrupt}</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-3">I3</a></strong> — L1+ files in a level are sorted and non-overlapping. The <code>compact.leveled</code> fixture
+asserts no overlap; <code>lsm_files_per_level</code>; a violating edit is rejected.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-4">I4</a></strong> — sequence numbers strictly increase and are never reused. Property test against a
+monotonic oracle; recovery recomputes <code>last_sequence</code> from manifest plus WAL tail.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-5">I5</a></strong> — compaction loses nothing: output visible keys equal input visible keys minus
+collected tombstones. Property test against a <code>BTreeMap</code> oracle; <code>lsm_compactions_total</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-6">I6</a></strong> — a tombstone is dropped only at the bottom level <em>and</em> below every live snapshot.
+Property test with a pinned snapshot; <code>lsm_snapshots_alive</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-7">I7</a></strong> — the manifest is truth: an unreferenced file is garbage, a referenced-but-missing
+file is fatal. <code>lsmctl fsck</code> diffs manifest against directory.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-8">I8</a></strong> — every WAL record, block and manifest record carries a CRC32C. Every read verifies
+it first; <code>lsm_reads_total{corrupt}</code>; <code>lsmctl repair</code> is the explicit fix.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-9">I9</a></strong> — memory is bounded: memtable, immutable queue and cache each have a cap. Gauges
+<code>lsm_memtable_size_bytes</code> and <code>lsm_block_cache_used_bytes</code> against the configured caps.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-10">I10</a></strong> — a read at snapshot S returns the highest <code>seq ≤ S</code> per key. Property test of a
+pinned snapshot against recorded state; <code>lsm_reads_total{hit_or_miss}</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-11">I11</a></strong> — <code>CURRENT</code> changes only via write-tmp, fsync, rename, fsync-dir. Crash fixture
+<code>kill-mid-current-rename</code>; <code>lsm_recovery_duration_seconds</code>.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-12">I12</a></strong> — a key under a live range tombstone is never returned. Property test <code>range-del.jsonl</code>.</li>
+</ul>
+<h2 id="ex-what-breaks-in-production">What breaks in production</h2>
+<ul>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-1">FM-1</a> — a torn WAL write.</strong> Recovery stops mid-segment because a crash interrupted a
+<code>pwrite</code>; the CRC and header-length check catches it (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-13-2">§13.2</a>); the trailing partial record
+is discarded and replay resumes from the last valid one, though <code>StrictRedo</code> may insist on
+replay from the prior fsync point. The segment is kept for offline analysis.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-4">FM-4</a> — an orphan SSTable.</strong> Disk usage exceeds what the manifest accounts for after a
+crash between the file&#39;s fsync and the manifest append; the vacuum&#39;s manifest-versus-
+directory diff finds it (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-18-2">§18.2</a>) and <code>Db::vacuum()</code> unlinks it on schedule, logging the path.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-6">FM-6</a> — a write stall.</strong> <code>put()</code> latency spikes and <code>Error::WriteStall</code> appears because
+compaction fell behind L0 growth (throttle too low, slow disk, starved CPU); watch
+<code>lsm_l0_files</code> against <code>level0_stop_writes_trigger</code>. Nothing recovers automatically by
+design (P4): raise <code>max_background_compactions</code> or the rate limit (<code>runbooks/write-stall.md</code>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-7">FM-7</a> — a Bloom false-positive storm.</strong> Read p99 regresses and disk IOPS spike because
+<code>bloom_bits_per_key</code> is undersized or the workload defeats locality; the
+<code>lsm_bloom_total{result}</code> ratio shows it; raise the bits per key and rebuild via compaction.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-8">FM-8</a> — a snapshot leak.</strong> Disk grows without bound and tombstones are never collected
+because an application holds a <code>Snapshot</code> forever; <code>lsm_snapshots_alive</code> trends up with no
+drops. Nothing recovers automatically by design (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-6">I6</a>); the operator identifies and stops
+the leaking client (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#sec-25">§25</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-32">MM7</a>).</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-9">FM-9</a> — compaction debt runaway.</strong> Per-level scores sit far above 1 and read amplification
+climbs because the write rate exceeds the compaction budget; <code>lsm_bytes_per_level</code> against
+<code>max_bytes_for_level</code> is the tell; scale the rate limiter and parallelism or reduce writes.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-11">FM-11</a> — a slow open.</strong> <code>db.open()</code> takes minutes because the manifest grew unbounded (a
+missed snapshot rotation) or the WAL tail is huge; <code>lsm_recovery_duration_seconds</code> trends
+up; rotation bounds it by design (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-18-2">§18.2</a>) and <code>lsmctl compact-manifest</code> forces one.</li>
+<li><strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-12">FM-12</a> — a cross-filesystem checkpoint.</strong> <code>checkpoint()</code> returns <code>EXDEV</code> because the
+destination is on a different device than the hard-link source; the error surfaces
+immediately (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#sec-25">§25</a>). The blueprint is split on the fallback: <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-22-2">§22.2</a> says a cross-device <code>dst</code>
+falls back to a byte copy per file; <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-22-9">§22.9</a> makes it an explicit opt-in, never automatic (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#sec-25">§25</a>).</li>
+</ul>
+<p>Threats a reader should know (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#sec-24">§24</a>): <strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#t-2">T2</a></strong> a malformed or corrupted block, answered by
+CRC-before-parse and bounded length checks (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-7">§8.7</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-8">I8</a>); <strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#t-6">T6</a></strong> a disk that lies about fsync —
+undetectable from userspace, so the operator must choose NVMe with power-loss protection (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-32">MM6</a>);
+<strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#t-8">T8</a></strong> a hand-crafted <code>.sst</code> fed to <code>ingest_external_sst</code>, which the reader validates exactly
+as it would any other file and rejects atomically (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-21-6">§21.6</a>); <strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#t-10">T10</a></strong> a crafted <code>payload_len</code>
+meant to exhaust memory during replay, defeated by checking the length against the remaining
+bytes before allocating; <strong><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#t-11">T11</a></strong> data at rest is readable by anyone with filesystem access
+until encryption at rest ships (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-37">§37</a> row 9) — use dm-crypt meanwhile.</p>
+<h2 id="ex-the-numbers">The numbers</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Quantity</th>
+<th>Budget / result</th>
+<th>Formula or source</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Write throughput, fsync-on-commit</td>
+<td>≥ 200,000 ops/s</td>
+<td><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-1">M1</a> — design target; not reconciled with <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #7</td>
+</tr>
+<tr>
+<td>Write throughput, group commit @ 1 ms</td>
+<td>≥ 1,500,000 ops/s</td>
+<td><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-2">M2</a> — design target</td>
+</tr>
+<tr>
+<td>Group-commit batch <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-2">M2</a> implies</td>
+<td>≈ 1,500 writes per 1 ms batch</td>
+<td>1,500,000 × 0.001; unbatched ceiling 1/150 µs ≈ 6,667 fsyncs/s (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #7)</td>
+</tr>
+<tr>
+<td>Read p50 / p95 / p99, warm cache</td>
+<td>≤ 5 / 20 / 50 µs</td>
+<td><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a> — design targets (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-8">M8</a>)</td>
+</tr>
+<tr>
+<td>Read p99, cold, no Bloom hit</td>
+<td>≤ 300 µs</td>
+<td><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a> — design target</td>
+</tr>
+<tr>
+<td>Write amplification, steady state</td>
+<td>≤ 30×</td>
+<td>6 non-L0 levels × (10/2) = 30 (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #1, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-10">M10</a>)</td>
+</tr>
+<tr>
+<td>Space amplification, steady state</td>
+<td>≈ 1.11×, budget ≤ 1.3×</td>
+<td>10/9 (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #2, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-11">M11</a>)</td>
+</tr>
+<tr>
+<td>Read amplification, worst pre-Bloom</td>
+<td>≤ 14 block reads</td>
+<td>8 L0 files + 6 levels (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #3)</td>
+</tr>
+<tr>
+<td>Read amplification, expected post-Bloom</td>
+<td><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a> budget ≤ 1.1; <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> derives ≈ 1.11</td>
+<td>1 + 14 × 0.008 (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #3)</td>
+</tr>
+<tr>
+<td>Bloom filter RAM at 1B keys</td>
+<td>1.25 GB</td>
+<td>10 bits × 1e9 / 8 (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #4)</td>
+</tr>
+<tr>
+<td>Burst absorbed before a write stall</td>
+<td>192 MiB</td>
+<td>(2 + 1) × 64 MiB (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #5)</td>
+</tr>
+<tr>
+<td>Blocks resident in the block cache</td>
+<td>65,536</td>
+<td>256 MiB / 4 KiB (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #6)</td>
+</tr>
+<tr>
+<td>Index block per 64 MiB SSTable</td>
+<td>512 KiB</td>
+<td>16,384 blocks × 32 B (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #8)</td>
+</tr>
+<tr>
+<td>On-disk footprint, reference workload</td>
+<td>≈ 151 GB</td>
+<td>1e9 × (16 + 100 + ~20) B = 136 GB raw, × 1.11 (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #9)</td>
+</tr>
+<tr>
+<td>Crash recovery, 1M WAL records</td>
+<td>≤ 20 s</td>
+<td>≥ 50,000 records/s (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-12">M12</a>) — design target</td>
+</tr>
+<tr>
+<td>Engine RAM ceiling at 1B keys</td>
+<td>≤ 8 GiB of a 64 GiB host; 5,000 open files</td>
+<td><a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #10</td>
+</tr>
+</tbody></table></div>
+<p>Throughput, latency and recovery rows are design targets measured by <code>lsm-bench::db_bench</code> on
+the reference host (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-30">§30</a>); the other rows are arithmetic from stated inputs (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a>).</p>
+<h2 id="ex-how-it-compares">How it compares</h2>
+<ul>
+<li><strong>LevelDB</strong> is the ancestor this blueprint studies most closely: leveled only, per-file
+Bloom, a single LRU, and a global mutex around <code>Version</code> that bounds read parallelism at
+extreme scale, which this design avoids with an <code>Arc&lt;Version&gt;</code> swap (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/compare/#sec-33">§33</a>). It ships the
+smallest possible correct LSM (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/compare/#sec-33">§33</a>).</li>
+<li><strong>RocksDB</strong> generalised LevelDB with column families, pluggable compaction and the
+production rate limiter <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-26">ADR-26</a> mirrors; its &quot;one engine, every workload&quot; niche costs a
+300-plus-option configuration surface this blueprint avoids (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/compare/#sec-33">§33</a>). Pebble is the Go
+re-implementation in the same lineage (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/compare/#sec-33">§33</a>).</li>
+<li><strong>Cassandra</strong> made compaction a per-table choice (size-tiered, leveled, TWCS) from day one,
+which this blueprint documents but defers; its niche is built-in multi-DC replication,
+out of scope for a library (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-1">§1</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/compare/#sec-33">§33</a>). ScyllaDB is the shard-per-core rewrite (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/compare/#sec-33">§33</a>).</li>
+<li><strong>WiredTiger</strong> ships B-tree and LSM modes behind one API, showing the <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-2">ADR-02</a> choice is an
+interface-compatible configuration; its LSM mode merges more eagerly than RocksDB&#39;s,
+trading write amplification for simpler merge code, and it has no built-in filter (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/compare/#sec-33">§33</a>).</li>
+</ul>
+<h2 id="ex-building-it-the-phase-plan">Building it — the phase plan</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>What exists afterwards</th>
+<th>The proof (from §N.4)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>workspace of every crate, core types, stub WAL and memtable, CI</td>
+<td><code>make test</code> passes the smoke-test round trip; CI green in ≤ 10 min (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-12">§12</a>)</td>
+</tr>
+<tr>
+<td>1</td>
+<td>WAL adapter, group commit, recovery, truncation</td>
+<td>64 concurrent writers sustain ≥ 100,000 records/s; <code>StrictRedo</code> rejects a manifest-durable truncation (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-13">§13</a>)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>skip-list memtable and immutable queue</td>
+<td>read throughput under write load stays ≥ 80% of baseline; 3× burst before <code>WriteStall</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-14">§14</a>)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>SSTable writer and block format</td>
+<td>byte-identical output across two runs; ≥ 50 MiB/s single-threaded (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-15">§15</a>)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>SSTable reader and Bloom filter</td>
+<td>FPR ≤ 1.5% at 10 bits/key over 10K absent keys; a &lt; 48-byte file is rejected, never a panic (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-16">§16</a>)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>merging iterator, snapshots, range deletes</td>
+<td>zero mismatches against a <code>BTreeMap</code> oracle over 1M cases; forward scan ≥ 2 GiB/s warm (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-17">§17</a>)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>manifest, <code>VersionSet</code>, crash recovery</td>
+<td>24-hour soak with zero missing, orphan or corrupt files; recovery ≥ 50,000 records/s (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-18">§18</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-12">M12</a>)</td>
+</tr>
+<tr>
+<td>7</td>
+<td>leveled picker, runner, rate limiter</td>
+<td>write amp ≤ 30× (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-10">M10</a>), space amp ≤ 1.3× (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-11">M11</a>); YCSB-A within 20% of the no-compaction baseline (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-19">§19</a>)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>sharded block cache and table cache</td>
+<td>1M concurrent pins with zero double-evict or use-after-free under Miri; overflow still returns correct values (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-20">§20</a>)</td>
+</tr>
+<tr>
+<td>9</td>
+<td>public API, bulk ingest, benchmark harness</td>
+<td>every API method in one write→flush→compact→read test; 4 disjoint SSTables land at the lowest fitting level (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-21">§21</a>)</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>Db::checkpoint(dst)</code></td>
+<td>≥ 10,000 files/s on the hard-link path (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-16">M16</a>); a checkpoint under live writes matches the source at its snapshot (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-22">§22</a>)</td>
+</tr>
+<tr>
+<td>11</td>
+<td>metrics, tracing, <code>lsmctl</code>, runbooks, fuzzing</td>
+<td>30-day fuzz campaign with zero crashes (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-14">M14</a>); 24-hour soak with observability live (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-13">M13</a>) (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-23">§23</a>)</td>
+</tr>
+</tbody></table></div>
+<p>Each phase is budgeted at one week, except Phase 6 (1–2), Phase 7 (2–3) and Phase 11 (1–2)
+weeks (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-40">§40</a>). <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-1">§1</a> puts Phases 0–11 at 9–10 weeks of core engineering and a hardened v1.0 at 4–6
+months; the <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/build/#sec-40">§40</a> durations do not add up to 9–10 weeks, and the blueprint does not reconcile
+them. Build card: <code>blueprints/build-cards/LSM-Tree-Storage.md</code>.</p>
+<h2 id="ex-questions-to-test-yourself">Questions to test yourself</h2>
+<ol>
+<li>Why does a torn write during SSTable rename never corrupt the manifest&#39;s view of the file
+set? (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-15-2">§15.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-18-2">§18.2</a>) — <em>Hint: walk the <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/architecture/#sec-8-8">§8.8</a> example with <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-7">I7</a> in mind.</em></li>
+<li>How does the minimum live snapshot bound tombstone GC, and what production symptom appears
+when a snapshot is held open for days? (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-17-2">§17.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#sec-25">§25</a> FM8) — <em>Hint: <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-32">MM7</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#fm-8">FM-8</a>.</em></li>
+<li>Why does leveled compaction&#39;s write-amplification formula predict ≈30× rather than a naive
+per-level <code>T×</code>, and what lever reduces it? (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #1, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-9">§9</a> <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-3">ADR-03</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#sec-37">§37</a> row 5) — <em>Hint: see <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-19-7">§19.7</a>.</em></li>
+<li>Why can two SSTables safely share a byte offset for different blocks, and what breaks if
+the cache keyed only on offset? (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-20-2">§20.2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-2">I2</a>) — <em>Hint: the <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-20-2">§20.2</a> cache key.</em></li>
+<li>Why does the reference hardware&#39;s fsync latency directly bound the group-commit throughput
+derivation, and what happens to <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#m-2">M2</a> if fsync latency doubles? (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #7, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-4">§4</a>) — <em>Hint: redo
+the <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a> #7 arithmetic with the fsync latency doubled.</em></li>
+</ol>
+<h2 id="ex-if-you-only-remember-three-things">If you only remember three things</h2>
+<p>Writes are never done in place: they are appended to a log, absorbed in memory, frozen into
+immutable sorted files and merged later, and the blueprint derives the price — write, space
+and read amplification — from formulas rather than asserting it (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/blueprint/#sec-2">§2</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/numbers/#sec-34">§34</a>). The manifest, not
+the directory, decides which files exist, and the WAL decides which writes happened — two
+independent durability boundaries, never conflated (P3, P6, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/reliability/#inv-7">I7</a>). A snapshot is just a pinned
+sequence number: O(1) to take, but every open one is a debt against future compaction
+(<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/trade-offs/#adr-9">ADR-09</a>, <a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-32">MM7</a>).</p>
+<h2 id="ex-words-used-here">Words used here</h2>
+<ul>
+<li><strong>LSM-tree</strong> — a write-optimised structure: absorb writes in memory, flush sorted runs,
+merge them in background compaction (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>WAL</strong> — the write-ahead log; the data-side durability boundary (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>Memtable</strong> — the in-memory, single-writer table that absorbs writes; frozen copies await
+flush as immutable memtables (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>SSTable</strong> — Sorted String Table; an immutable, sorted on-disk file (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>Manifest</strong> — the append-only log of <code>VersionEdit</code>s; the metadata-side durability
+primitive (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>Compaction</strong> — the background merge of SSTables that bounds amplification and reclaims
+space (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>Write / read / space amplification</strong> — bytes written per logical byte; block reads per
+logical read; on-disk bytes per logical byte (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>Bloom filter</strong> — probabilistic membership test: false positives allowed, never false negatives (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>Tombstone</strong> — a deletion record marking a key logically deleted; a range tombstone covers
+<code>[start, end)</code> (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>Sequence number</strong> — the monotonic write-order clock and the sole MVCC mechanism (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>Snapshot</strong> — a pinned sequence number; the unit of read isolation (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+<li><strong>Write stall</strong> — foreground backpressure when L0 or immutable-queue limits are exceeded (<a class="cite" href="/system-design-blueprints/systems/lsm-tree-storage/study/#sec-38">§38</a>).</li>
+</ul>
+</div> </div> </div> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

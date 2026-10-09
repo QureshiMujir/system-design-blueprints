@@ -1,0 +1,620 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Deterministic Replay System from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Deterministic Replay System from Scratch, hld: §3 overview + §8 domain model. A deterministic record/replay engine for native Linux x86-64 processes: the dret system captures every source of nondeterminism in a running program (syscall arguments and results, signal delivery…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/deterministic-replay-system/">Deterministic Replay System from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Deterministic Replay System from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux (qemu-mentioned)</li> <li>14 phases</li> <li>~30 weeks</li> <li>4,303 lines</li> <li>blueprint #344</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/deterministic-replay-system/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/deterministic-replay-system/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/deterministic-replay-system/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/deterministic-replay-system/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/deterministic-replay-system/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/deterministic-replay-system/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/deterministic-replay-system/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/deterministic-replay-system/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/deterministic-replay-system/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/deterministic-replay-system/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Deterministic Replay System from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Architecture Diagram</h3>
+<pre class="diagram"><code>                          dret record   (supervisor / tracer process)
+  +---------------------------------------------------------------------------+
+  |  dret-cli record                                                          |
+  |     |                                                                     |
+  |     v        ptrace + seccomp-BPF                                         |
+  |  dret-record ===============&gt; TRACEE process  [thread 1 .. thread N]      |
+  |     |  ^                              |  syscall / signal / rdtsc / cpuid |
+  |     |  | trap (PTRACE_SYSCALL,        |  trap                             |
+  |     |  |  seccomp SECCOMP_RET_TRACE)  v                                   |
+  |     v  |                       dret-sched  (1 logical CPU; preempt at     |
+  |  dret-syscall (ABI decode,            tick boundary; serialize threads)   |
+  |     |  arg + ret + mem effects)       |                                   |
+  |     v                                 v                                   |
+  |  dret-time (RCB ticks, perf_event_open) &lt;----- per-task logical clock     |
+  |     |                                                                     |
+  |     v                                                                     |
+  |  dret-mem (COW page snapshot, /proc/pid/mem, page diff)                   |
+  |     |                                                                     |
+  |     v                                                                     |
+  |  dret-trace  ====&gt;  TRACE DIR { events.log | data.log | mmap.log | ckpt/ }|
+  +---------------------------------------------------------------------------+
+                                     |
+                                     v   (offline; deterministic; replay-many)
+  +---------------------------------------------------------------------------+
+  |  dret replay                                                              |
+  |  dret-replay  &lt;====  dret-trace      re-exec TRACEE on ONE logical CPU    |
+  |     |   inject recorded syscall ret + mem effects + signals at exact tick |
+  |     v                                                                     |
+  |  dret-divergence  (per-event reg + tick + mem-hash vs recorded -&gt; abort)  |
+  |     |                                                                     |
+  |     v                                                                     |
+  |  dret-gdb  (gdbserver RSP: reverse-step / reverse-continue / watchpoint)  |
+  +---------------------------------------------------------------------------+</code></pre>
+<h3 id="sec-3-2">3.2 Subsystem Descriptions</h3>
+<p><strong>dret-cli</strong> — entry point; parses subcommand (<code>record</code>, <code>replay</code>, <code>dump</code>, <code>pack</code>, <code>ps</code>); validates arguments; constructs RecordSession or ReplaySession; owns process lifetime; propagates exit codes. Trust boundary: the only component with direct user input; validates paths and permissions before delegating.</p>
+<p><strong>dret-record (supervisor loop)</strong> — forks tracee under PTRACE_TRACEME; installs seccomp-BPF filter; drives the waitpid(2) event loop; dispatches each stop (syscall entry, syscall exit, signal-delivery, clone, exec, death) to dret-syscall / dret-sched / dret-time / dret-mem for annotation; writes each TraceFrame to dret-trace. Data in: ptrace stops (waitpid status words). Data out: TraceFrame stream to dret-trace. Concurrency boundary: single OS thread in the supervisor; tracee threads are individually stopped and resumed under PTRACE_CONT or PTRACE_SYSEMU. Does not hold any GFDs that the tracee will inherit.</p>
+<p><strong>TRACEE process [thread 1..N]</strong> — the untrusted program under observation. Constrained by seccomp-BPF to emit SECCOMP_RET_TRACE on a selected syscall subset. Never modified in memory by the recorder except for vsyscall page patching (Phase 10). Each thread has a separate ptrace attachment, a separate Ticks counter, and a separate TraceWriter stream segment.</p>
+<p><strong>dret-sched</strong> — implements the single-logical-CPU abstraction during recording. Maintains a run-queue of (TaskId, Ticks, state) tuples. At each SchedPoint it picks the next thread deterministically (by TaskId, breaking ties by ticks). Records SchedSwitch events so replay can apply identical switch order. Intercepts futex FUTEX_WAIT/WAKE to record the total ordering of futex operations. On replay, enforces <a class="cite" href="/system-design-blueprints/systems/deterministic-replay-system/reliability/#inv-6">I6</a>: exactly one task runnable at any instant.</p>
+<p><strong>dret-syscall</strong> — owns the x86-64 syscall ABI table (syscall number → name, arg types, pointer-range effects, return semantics). At syscall-entry stop: reads rax (nr), rdi/rsi/rdx/r10/r8/r9 (args); classifies pointer args; computes MemRange list for args that name memory written by the kernel. At syscall-exit stop: reads rax (ret) and reconstructs errno. Returns SyscallRecord for dret-record to serialize. Pure decode logic; no OS calls beyond ptrace register reads.</p>
+<p><strong>dret-time</strong> — manages one perf_event_open file descriptor per tracked task, configured for PERF_COUNT_HW_BRANCH_INSTRUCTIONS (retired conditional branches). Reads counter via ioctl PERF_EVENT_IOC_RESET/ioctl at each ptrace stop. Provides <code>read_ticks(tid) → Ticks</code>. Implements overcount/skid correction: after a hardware overflow interrupt, adjusts the Ticks value backward by the measured skid. The Ticks value is the sole addressing mechanism for positions in the trace; it must be monotonically non-decreasing per task (<a class="cite" href="/system-design-blueprints/systems/deterministic-replay-system/reliability/#inv-2">I2</a>).</p>
+<p><strong>dret-mem</strong> — reads tracee memory via /proc/pid/mem pread(2) after each syscall-exit stop, for ranges named in MemRange list from dret-syscall. Produces MemDelta { range, bytes_ref } written into data.log via DataRef. Manages COW page snapshots for Checkpoint: on checkpoint request, reads all dirty pages since last checkpoint, hashes each page, stores (MemRange, PageRef) list. On replay, provides pwrite(2) injection of recorded page contents.</p>
+<p><strong>dret-trace</strong> — the persistence layer. events.log: fixed-size framed records (EventId u64, tid u32, ticks u64, kind u8, regs[144 bytes], data_ref u64, crc32 u32). data.log: variable-length payloads at DataRef offsets (memory snapshots, checkpoint dirty pages). mmap.log: address-space change records (mmap/munmap/mremap/brk/exec). ckpt/: one directory per checkpoint, named by EventId. All writes are append-only; fsync at checkpoint boundaries (P7). Forward-compatible: unknown field tags skipped by older readers (P8).</p>
+<p><strong>dret-replay</strong> — reads TraceReader; re-execs the same binary under ptrace PTRACE_SYSEMU; at each PTRACE_SYSEMU stop, injects the recorded syscall result (write rax = ret; pwrite memory effects into tracee via /proc/pid/mem; call PTRACE_SETSIGINFO for recorded signals). Consumes events in strict EventId order (<a class="cite" href="/system-design-blueprints/systems/deterministic-replay-system/reliability/#inv-3">I3</a>). Enforces <a class="cite" href="/system-design-blueprints/systems/deterministic-replay-system/reliability/#inv-4">I4</a>: injected ret == recorded ret. Enforces <a class="cite" href="/system-design-blueprints/systems/deterministic-replay-system/reliability/#inv-5">I5</a>: no real syscall executes during injection. After each event, delegates to dret-divergence for register/tick/mem-hash comparison.</p>
+<p><strong>dret-divergence</strong> — compares (RecordedRegs, Ticks, touched-page SHA-256) from replay execution vs stored values in TraceFrame. On first mismatch, emits DivergenceReport and aborts replay (P6). Provides bisect mode: binary search on EventId range to find first divergent event. Used in Phase 12 to validate the entire replay pipeline against a conformance corpus.</p>
+<p><strong>dret-gdb</strong> — listens on a TCP port for GDB remote serial protocol connections. Maps gdb &#39;c&#39; (continue) → replay-forward; &#39;s&#39; (step) → replay single event; &#39;bs&#39; (reverse-step) → seek to (event_id − 1) via checkpoint rewind + replay-forward; &#39;bc&#39; (reverse-continue) → binary-search backward for watchpoint/breakpoint hit. Exposes register reads (&#39;g&#39;), memory reads (&#39;m&#39;), and breakpoints (&#39;Z0&#39;) as views into the current replay position. Has no write-back path to the trace; all mutations are in replay session state only.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Core Entities and Relationships</h3>
+<div class="filetree" role="tree"><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">RecordSession</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">1──* TaskRecord { TaskId, Tid, initial_regs, entry_ticks }</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">1──* TraceFrame  { EventId, Ticks, TaskId, EventKind, RecordedRegs, DataRef }</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">1──1 AddressSpace (per-process snapshot, updated on mmap/munmap/brk)</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">1──N Checkpoint   (periodic; anchored to EventId boundary)</span></span></li><li class="ft-dir"><details open><summary><span class="ft-name">TraceFrame</span></summary><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">├── Syscall  → SyscallRecord { nr, args[6], ret, mem_effects: Vec&lt;MemDelta&gt;, errno }</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── Signal   → SignalRecord { signo, si_code, deterministic: bool, delivery_ticks }</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── SchedSwitch → SchedPoint { tid, ticks }</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── RdtscTrap   → { recorded_tsc: u64 }</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── CpuidTrap   → { leaf, subleaf, eax, ebx, ecx, edx }</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── PatchVsyscall → { page_addr, slot }</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── Exec        → { path_ref: DataRef, argv_ref: DataRef, envp_ref: DataRef }</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── Exit        → { tid, exit_code }</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">└── Checkpoint  → { checkpoint_id: u64, event_id: EventId }</span></span></li></ul></details></li><li class="ft-dir"><details open><summary><span class="ft-name">Checkpoint</span></summary><ul><li class="ft-file"><span class="ft-row"><span class="ft-name">├── regs_per_task: Map&lt;TaskId, RecordedRegs&gt;</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── dirty_pages:  Vec&lt;(MemRange, PageRef)&gt;</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── fd_table:     Vec&lt;FdRecord&gt;</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">├── mmaps:        Vec&lt;MmapEntry&gt;</span></span></li><li class="ft-file"><span class="ft-row"><span class="ft-name">└── brk:          u64</span></span></li></ul></details></li></ul></div>
+<h3 id="sec-8-2">8.2 EventKind Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>EventKind</th>
+<th>Source trap</th>
+<th>Recorder action</th>
+<th>Replayer action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Syscall</td>
+<td>PTRACE_SYSCALL stop (exit)</td>
+<td>record nr, args, ret, mem_effects</td>
+<td>PTRACE_SYSEMU; inject ret + mem writes</td>
+</tr>
+<tr>
+<td>Signal(sync)</td>
+<td>SIGSEGV/SIGFPE/SIGILL fault</td>
+<td>record signo, si_code, regs at fault</td>
+<td>re-raise at same rip; no tick pinning</td>
+</tr>
+<tr>
+<td>Signal(async)</td>
+<td>SIGINT/SIGUSR1/… delivered async</td>
+<td>pin to (tid, delivery_ticks)</td>
+<td>step to delivery_ticks, PTRACE setsiginfo</td>
+</tr>
+<tr>
+<td>SchedSwitch</td>
+<td>tick-budget exhausted</td>
+<td>record (old_tid, new_tid, ticks)</td>
+<td>force same switch at same ticks</td>
+</tr>
+<tr>
+<td>RdtscTrap</td>
+<td>CR4.TSD=1 or seccomp SIGSEGV</td>
+<td>record GPR snapshot + tsc value</td>
+<td>inject recorded eax:edx</td>
+</tr>
+<tr>
+<td>CpuidTrap</td>
+<td>seccomp or UD#; leaf/subleaf</td>
+<td>record four output regs</td>
+<td>inject recorded eax/ebx/ecx/edx</td>
+</tr>
+<tr>
+<td>PatchVsyscall</td>
+<td>vsyscall page rip intercept</td>
+<td>record slot; rewrite to int 0x80 path</td>
+<td>same patch applied on replay binary</td>
+</tr>
+<tr>
+<td>Exec</td>
+<td>PTRACE_EVENT_EXEC</td>
+<td>record path + argv + envp</td>
+<td>verify replayed exec matches</td>
+</tr>
+<tr>
+<td>Exit</td>
+<td>PTRACE_EVENT_EXIT</td>
+<td>record exit_code; close task entry</td>
+<td>expect same exit code</td>
+</tr>
+<tr>
+<td>Checkpoint</td>
+<td>periodic / forced</td>
+<td>flush dirty pages; snapshot fd_table</td>
+<td>restore for seek/reverse ops</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Ticks (RCB) State Machine per TaskId</h3>
+<pre class="diagram"><code>States: UNBORN → RUNNING → BLOCKED → RUNNABLE → RUNNING → … → DEAD
+Transitions:
+  UNBORN     --[clone/exec trap]--&gt; RUNNING    (Ticks reset to 0 at exec)
+  RUNNING    --[syscall entry]----&gt; RUNNING    (ticks read at PTRACE stop)
+  RUNNING    --[tick budget 0]----&gt; BLOCKED    (SchedSwitch emitted; another task scheduled)
+  BLOCKED    --[sched grant]------&gt; RUNNABLE   (new tick budget assigned)
+  RUNNABLE   --[PTRACE_CONT]------&gt; RUNNING
+  RUNNING    --[exit trap]---------&gt; DEAD</code></pre>
+<ul>
+<li>Ticks are read via <code>ioctl(PERF_EVENT_IOC_RESET)</code> / <code>read()</code> on the per-task perf fd at every PTRACE stop.</li>
+<li>Ticks(RCB) is <strong>monotonic non-decreasing</strong> within a TaskId (<a class="cite" href="/system-design-blueprints/systems/deterministic-replay-system/reliability/#inv-2">I2</a>); wrapping to zero only at <code>exec</code>.</li>
+<li>The scheduler grants a <code>tick_budget</code> from <code>SchedPoint.ticks</code> to the next SchedSwitch ticks; it uses <code>PERF_EVENT_IOC_RESET</code> + overflow signal to preempt at the exact boundary.</li>
+</ul>
+<h3 id="sec-8-4">8.4 Trace-on-Disk Layout</h3>
+<pre class="diagram"><code>TRACE_DIR/
+  header.json          — { version, arch, record_pid, start_time_ns, task_count }
+  events.log           — append-only; fixed-stride frames or length-prefixed if variable
+  data.log             — variable-length blobs; DataRef = byte offset
+  mmap.log             — AddressSpace deltas (mmap/munmap/mremap/brk) in order
+  checkpoints/
+    ckpt_&lt;event_id&gt;/
+      regs.bin         — per-task RecordedRegs (fixed layout)
+      pages.bin        — dirty pages: (addr:u64, len:u32, data_ref:u64) per entry
+      fd_table.bin     — FdRecord list
+      mmap_snapshot.bin— full AddressSpace at this checkpoint</code></pre>
+<p><strong>events.log frame wire layout (little-endian):</strong></p>
+<pre class="diagram"><code> 0       4       8      12      16      24      32      40     48     56     64
+[magic:4][len:4][crc:4][eid:8][tid:4][ticks:8][kind:1][pad:3][regs:N][dref:8][tag-fields...]</code></pre>
+<ul>
+<li><code>magic</code> = <code>0x44524554</code> (&quot;DRET&quot;)</li>
+<li><code>len</code> = total frame byte count including header</li>
+<li><code>crc</code> = CRC-32C over bytes [12..len]</li>
+<li><code>eid</code> = EventId (u64, strictly +1 from prior)</li>
+<li><code>ticks</code> = Ticks at this event</li>
+<li><code>regs</code> = RecordedRegs (17 × u64 = 136 bytes for GPRs + rip + rflags + fs_base + gs_base + orig_rax)</li>
+<li><code>dref</code> = DataRef into data.log (0 if no payload)</li>
+<li>tag-fields = kind-specific payload if small enough to inline (max 32 bytes); else DataRef</li>
+</ul>
+<p><strong>data.log blob entry:</strong></p>
+<pre class="diagram"><code>[len:4][crc:4][payload:len]</code></pre>
+<ul>
+<li>Blobs are referenced only by DataRef offset; no reverse index in data.log itself.</li>
+<li>TraceReader builds an in-memory EventId→offset index on first open; checkpointed to <code>events.idx</code> after pack.</li>
+</ul>
+<p><strong>mmap.log entry:</strong></p>
+<pre class="diagram"><code>[eid:8][kind:1 (Map|Unmap|Remap|Brk)][addr:8][len:8][prot:4][flags:4][offset:8][path_ref:8]</code></pre>
+<h3 id="sec-8-5">8.5 RecordedRegs Layout</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Width</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>rax</td>
+<td>u64</td>
+<td>return value at syscall exit</td>
+</tr>
+<tr>
+<td>rbx–r15</td>
+<td>u64×13</td>
+<td>general-purpose</td>
+</tr>
+<tr>
+<td>rip</td>
+<td>u64</td>
+<td>instruction pointer at stop</td>
+</tr>
+<tr>
+<td>rflags</td>
+<td>u64</td>
+<td>including TF (trap flag) state</td>
+</tr>
+<tr>
+<td>fs_base</td>
+<td>u64</td>
+<td>TLS base; captured via PTRACE_GETREGSET</td>
+</tr>
+<tr>
+<td>gs_base</td>
+<td>u64</td>
+<td>alternate TLS / per-cpu (user-space only)</td>
+</tr>
+<tr>
+<td>orig_rax</td>
+<td>u64</td>
+<td>syscall number at entry stop</td>
+</tr>
+</tbody></table></div>
+<p>Total: 17 × 8 = 136 bytes. Stored verbatim in each TraceFrame.</p>
+<h3 id="sec-8-6">8.6 SyscallRecord Semantics</h3>
+<pre class="diagram"><code>SyscallRecord {
+  nr:          u32,                  // syscall number (x86-64 ABI)
+  args:        [u64; 6],             // rdi, rsi, rdx, r10, r8, r9 at entry
+  ret:         i64,                  // rax at exit (negative = -errno)
+  errno:       i32,                  // decoded errno or 0
+  mem_effects: Vec&lt;MemDelta&gt;,        // each region kernel wrote into tracee
+}
+MemDelta { range: MemRange, bytes_ref: DataRef }</code></pre>
+<ul>
+<li>Pointer args classified by <code>dret-syscall</code> ABI table: IN (read by kernel), OUT (written by kernel), INOUT, or SCALAR.</li>
+<li>Only OUT/INOUT ranges with non-zero <code>len</code> produce <code>MemDelta</code> entries.</li>
+<li><code>mem_effects</code> captured by reading <code>/proc/pid/mem</code> at the PTRACE syscall-exit stop, before PTRACE_CONT.</li>
+<li>On replay: write each <code>MemDelta.bytes</code> into tracee address <code>range.addr</code> via <code>PTRACE_POKEDATA</code> or <code>/proc/pid/mem</code> pwrite.</li>
+</ul>
+<h3 id="sec-8-7">8.7 Signal Determinism Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Signal class</th>
+<th>Examples</th>
+<th>Determinism strategy</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Synchronous</td>
+<td>SIGSEGV, SIGFPE, SIGILL</td>
+<td>Caused by exact rip/instruction; replays without pinning</td>
+</tr>
+<tr>
+<td>Async hardware</td>
+<td>SIGALRM, SIGIO</td>
+<td>Pinned to (tid, delivery_ticks); replayer steps to that tick</td>
+</tr>
+<tr>
+<td>Async software</td>
+<td>kill(2), tkill, tgkill</td>
+<td>Same; sender tid + ticks also recorded (<a class="cite" href="/system-design-blueprints/systems/deterministic-replay-system/reliability/#inv-8">I8</a>)</td>
+</tr>
+<tr>
+<td>SIGCHLD</td>
+<td>child state change</td>
+<td>Pinned; note: pid remapping required on replay</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li><code>SignalRecord.deterministic == true</code> for sync signals (no tick injection needed).</li>
+<li><code>SignalRecord.deterministic == false</code> requires replayer to single-step tracee until <code>Ticks == delivery_ticks</code>, then inject via <code>PTRACE_SETSIGINFO</code> + <code>PTRACE_CONT</code>.</li>
+<li>Nested signals: recorded in event order; replayer re-queues in same order.</li>
+</ul>
+<h3 id="sec-8-8">8.8 Scheduler Serialization Semantics</h3>
+<pre class="diagram"><code>RunQueue (replay):
+  - ordered list of (TaskId, tick_budget)
+  - head task = currently running
+  - tail tasks = blocked at PTRACE stop
+
+SchedSwitch event:
+  { prev_tid, next_tid, prev_ticks, next_ticks_start }</code></pre>
+<ul>
+<li>All threads held at PTRACE stops except the running one (<a class="cite" href="/system-design-blueprints/systems/deterministic-replay-system/reliability/#inv-6">I6</a>).</li>
+<li>Tick budget = <code>next_switch.ticks - current.ticks</code>; perf overflow at budget end causes SIGTRAP.</li>
+<li>Futex record: <code>futex(2)</code> exit recorded with <code>{uaddr, op, ret}</code>; replayer injects at same position, unblocking waiter at the recorded ticks.</li>
+<li><code>sched_setaffinity</code> called in tracee&#39;s namespace to pin to CPU 0; supervisor ignores the call during replay (injects <code>ret=0</code>).</li>
+</ul>
+<h3 id="sec-8-9">8.9 Checkpoint Model</h3>
+<pre class="diagram"><code>Checkpoint creation triggers:
+  - Every K events (default K=50,000; tunable)
+  - Before exec, exit, and dlopen (mandatory)
+  - Forced by CLI: `dret pack --checkpoint-interval`
+
+Seek semantics:
+  target_event_id E:
+    1. Find largest Checkpoint C where C.event_id &lt;= E
+    2. Restore: write C.regs_per_task, C.dirty_pages, C.mmaps, C.fd_table into replay process
+    3. Replay-forward from C.event_id to E consuming events in order
+    4. On reverse-step: seek(E-1); on reverse-continue: seek(last watchpoint hit before E)</code></pre>
+<ul>
+<li><a class="cite" href="/system-design-blueprints/systems/deterministic-replay-system/reliability/#inv-7">I7</a>: Checkpoint is always placed on an event boundary; <code>C.event_id</code> points to the TraceFrame emitted immediately before the snapshot.</li>
+<li>Dirty pages: union of all pages written since prior Checkpoint; stored as <code>(addr, PageRef→data.log)</code>.</li>
+<li>FdRecord: <code>{ fd, kind: File|Pipe|Socket|Epoll|…, path_or_peer, flags, offset }</code>. Sockets recorded as closed/unrestorable on replay if not <code>AF_UNIX</code>.</li>
+</ul>
+<h3 id="sec-8-10">8.10 Address-Space Model</h3>
+<pre class="diagram"><code>AddressSpace {
+  segments: Vec&lt;Segment { addr, len, prot, flags, offset, MmapProvenance }&gt;,
+  brk:      u64,
+}
+MmapProvenance: { path: Option&lt;DataRef&gt;, build_id: Option&lt;[u8;20]&gt;, inode: u64, dev: u64 }</code></pre>
+<ul>
+<li>Updated on every <code>mmap/mmap2/munmap/mremap/brk/mprotect</code> syscall exit.</li>
+<li>On replay: <code>mmap</code> calls with <code>MAP_FIXED</code> to reproduce layout (<a class="cite" href="/system-design-blueprints/systems/deterministic-replay-system/reliability/#inv-10">I10</a>); file-backed mappings resolved from packed trace or host filesystem by build-id.</li>
+<li>ASLR disabled in tracee via <code>personality(ADDR_NO_RANDOMIZE)</code> at record and replay start.</li>
+<li><code>[vvar]/[vdso]</code> pages: vsyscall patch applied at exec (PatchVsyscall event); vDSO remapped to supervisor-controlled page on replay.</li>
+</ul>
+<h3 id="sec-8-11">8.11 Replay Injection Semantics</h3>
+<p>Sequence per Syscall event during replay:</p>
+<pre class="diagram"><code>1. PTRACE_SYSCALL → stop at syscall entry
+2. Read syscall nr from orig_rax; verify == recorded nr (else DivergenceReport)
+3. PTRACE_SYSEMU → tracee does not execute syscall; stops again at entry
+4. Set rax = SyscallRecord.ret in tracee regs via PTRACE_SETREGS
+5. For each MemDelta: pwrite /proc/pid/mem at range.addr with bytes from data.log
+6. Verify RecordedRegs (I9): read regs; hash vs stored; on mismatch → DivergenceReport
+7. PTRACE_CONT</code></pre>
+<ul>
+<li><code>PTRACE_SYSEMU</code> replaces both entry and exit stops with a single combined stop; replayer uses the exit-equivalent position.</li>
+<li><code>errno</code> encoded in rax as <code>-(errno)</code> per Linux x86-64 ABI; replayer sets rax directly.</li>
+<li><code>write(2)</code>, <code>read(2)</code>, <code>pread(2)</code>: inject <code>ret</code> + any OUT buffers; actual file I/O suppressed.</li>
+</ul>
+<h3 id="sec-8-12">8.12 RdtscTrap and CpuidTrap Injection</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Trap</th>
+<th>Mechanism</th>
+<th>Record</th>
+<th>Replay injection</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>RDTSC / RDTSCP</td>
+<td>CR4.TSD=1 via seccomp-BPF SIGSEGV or ptrace UD</td>
+<td>read eax:edx + rcx (rdtscp)</td>
+<td>PTRACE_SETREGS eax:edx[:rcx]; skip instr</td>
+</tr>
+<tr>
+<td>CPUID</td>
+<td>seccomp BPF traps to supervisor</td>
+<td>record leaf, subleaf, 4 outputs</td>
+<td>PTRACE_SETREGS; advance rip by 2</td>
+</tr>
+<tr>
+<td>gettimeofday(vDSO)</td>
+<td>vsyscall page rewrite + PatchVsyscall event</td>
+<td>recorded as Syscall nr=96</td>
+<td>injected as normal SyscallRecord</td>
+</tr>
+<tr>
+<td>clock_gettime(vDSO)</td>
+<td>same</td>
+<td>recorded as Syscall nr=228</td>
+<td>injected as normal SyscallRecord</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>On replay: <code>rip</code> advanced past the faulting instruction length (RDTSC=2, CPUID=2 bytes).</li>
+<li>CPUID masking: replayer applies a feature mask table to prevent tracee from detecting host CPU differences; recorded leaf/subleaf values win.</li>
+</ul>
+<h3 id="sec-8-13">8.13 Divergence Detection State Machine</h3>
+<pre class="diagram"><code>States: CLEAN → DIVERGED → ABORTED
+Transitions:
+  CLEAN    --[event E: regs match + ticks match + mem_hash match]--&gt; CLEAN
+  CLEAN    --[event E: any mismatch]-----&gt; DIVERGED (emit DivergenceReport)
+  DIVERGED --[--strict mode]--&gt; ABORTED  (replay process killed)
+  DIVERGED --[--lenient mode]--&gt; CLEAN   (resync regs; continue; increment mismatch_count)</code></pre>
+<ul>
+<li>Default mode: <code>--strict</code> (P6: fail closed).</li>
+<li><code>DivergenceReport { event_id, kind: RegMismatch|TickMismatch|MemHashMismatch, expected, actual, task_id }</code>.</li>
+<li><code>mem_hash</code>: xxhash3 of pages touched by syscall <code>mem_effects</code> at exit stop (record side) vs identical pages post-injection (replay side).</li>
+</ul>
+<h3 id="sec-8-14">8.14 gdbserver RSP Interaction Model</h3>
+<pre class="diagram"><code>GDB client &lt;──RSP over TCP/Unix──&gt; dret-gdb stub &lt;──&gt; ReplaySession</code></pre>
+<ul>
+<li>Supported packets: <code>?</code>, <code>g</code>/<code>G</code>, <code>m</code>/<code>M</code>, <code>c</code>/<code>s</code>, <code>vCont</code>, <code>qXfer:features</code>, <code>Z0/Z1</code> (sw/hw breakpoint), <code>Z2/Z3/Z4</code> (watchpoints via mem-delta scan).</li>
+<li>Reverse packets: <code>bc</code> (reverse-continue), <code>bs</code> (reverse-step) — mapped to <code>checkpoint_seek(event_id - 1)</code> + replay-forward.</li>
+<li>Thread list: <code>qfThreadInfo</code> returns all recorded TaskIds; <code>Hg&lt;tid&gt;</code> selects focus task.</li>
+<li>Watchpoints on replay: no hardware DR registers; replayer re-runs from nearest checkpoint scanning for writes to watched address range; first hit = watchpoint event.</li>
+<li>No side effects: <code>M</code> (memory write) during replay session updates only the replayer&#39;s tracee; does not persist to trace (P2).</li>
+</ul>
+<h3 id="sec-8-15">8.15 Worked Example — Normal Syscall Record/Replay</h3>
+<p><strong>Record side:</strong></p>
+<pre class="diagram"><code>tracee calls: read(fd=3, buf=0x7fff1000, count=4096)
+PTRACE_SYSCALL entry stop: orig_rax=0, rdi=3, rsi=0x7fff1000, rdx=4096
+  → record args; continue tracee
+PTRACE_SYSCALL exit stop:  rax=512 (bytes read)
+  → record SyscallRecord{ nr=0, args=[3,0x7fff1000,4096,0,0,0], ret=512, errno=0 }
+  → read /proc/pid/mem at [0x7fff1000, 512): capture 512 bytes → data.log offset D1
+  → MemDelta{ range={0x7fff1000,512}, bytes_ref=D1 }
+  → emit TraceFrame{ eid=42, tid=T1, ticks=8103, kind=Syscall, dref=DataRef(D0) }
+     where D0 = serialized SyscallRecord pointing to D1</code></pre>
+<p><strong>Replay side:</strong></p>
+<pre class="diagram"><code>event 42: PTRACE_SYSEMU stop; orig_rax=0 ✓
+  → set rax=512 via PTRACE_SETREGS
+  → pwrite /proc/pid/mem at 0x7fff1000 ← 512 bytes from data.log[D1]
+  → read regs; compare vs RecordedRegs stored in frame 42 → match (I9)
+  → PTRACE_CONT
+  → ticks after event = 8103 ✓ (I2 monotonic)</code></pre>
+<h3 id="sec-8-16">8.16 Malformed/Failure-Path Example — EventId Gap</h3>
+<p><strong>Scenario:</strong> recorder killed between writing frame 99 and frame 100; data.log has partial blob.</p>
+<pre class="diagram"><code>TraceReader open:
+  scan events.log frames: frames 0–99 valid CRC; frame 100 truncated (len field reads 0xFFFFFFFF)
+  → detect: eid[99]+1 != eid[100] — gap detected
+  → mark trace as TRUNCATED_AT(99)
+  → TraceReader.last_valid_event_id() = 99
+
+Replay attempt to event 150:
+  → ReplaySession::seek(150) → error: TraceError::TruncatedTrace { last_valid: 99 }
+  → CLI prints: &quot;trace truncated at event 99; replay available up to event 99&quot;
+
+P7 (crash-only recorder): prefix 0..99 is valid and replayable.</code></pre>
+<h3 id="sec-8-17">8.17 Edge Cases</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Edge Case</th>
+<th>Handling</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>fork</code> + <code>exec</code> in child</td>
+<td>PTRACE_EVENT_FORK creates new TaskId; Exec event resets Ticks to 0 for that TaskId</td>
+</tr>
+<tr>
+<td><code>vfork</code> with parent blocked</td>
+<td>Parent PTRACE stop held until child exec/exit; recorded as vfork event pair</td>
+</tr>
+<tr>
+<td>Large <code>mmap</code> anonymous region</td>
+<td>AddressSpace updated; dirty-page tracking deferred until first write fault (COW)</td>
+</tr>
+<tr>
+<td><code>mmap(MAP_FIXED)</code> over existing mapping</td>
+<td>Old segments removed from AddressSpace; new segment inserted</td>
+</tr>
+<tr>
+<td>Signal during syscall (<code>EINTR</code>)</td>
+<td>Signal recorded before interrupted-syscall retry; replay delivers signal first</td>
+</tr>
+<tr>
+<td><code>ptrace(2)</code> by tracee</td>
+<td>Supervisor intercepts; returns <code>EPERM</code> (tracee cannot have its own sub-tracee)</td>
+</tr>
+<tr>
+<td><code>seccomp</code> already installed by tracee</td>
+<td>Supervisor detects on exec; emits warning; compatibility depends on seccomp filter chain</td>
+</tr>
+<tr>
+<td>Ticks skid (hardware overcount)</td>
+<td><code>dret-time</code> applies skid correction: step backward by 1–4 ticks, re-measure</td>
+</tr>
+<tr>
+<td>Nested <code>clone</code> (thread → thread)</td>
+<td>Each clone creates new TaskId; tick counter initialized from perf_event_open at clone</td>
+</tr>
+<tr>
+<td><code>execve</code> with <code>O_CLOEXEC</code> fds</td>
+<td>FdRecord marks cloexec fds as closed at exec boundary in Checkpoint</td>
+</tr>
+<tr>
+<td>CPUID with unknown leaf</td>
+<td>All four output registers recorded verbatim; no semantic interpretation needed</td>
+</tr>
+<tr>
+<td>Very long <code>mem_effects</code> (&gt;1 MB write)</td>
+<td>Chunked into 4 KB MemDelta entries; DataRef chain; no single blob exceeds 1 MB</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

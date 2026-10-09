@@ -1,0 +1,481 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Deoptimization Engine — Architecture · Engineering Blueprints</title><meta name="description" content="Deoptimization Engine, hld: §3 overview + §8 domain model. The Deoptimization Engine is a from-scratch, embeddable speculative-optimization and deoptimization subsystem for a tiered, bytecode-driven managed runtime. It is the safety net underneath an…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/deoptimization-engine/">Deoptimization Engine</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Deoptimization Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~29 weeks</li> <li>1,844 lines</li> <li>blueprint #246</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/deoptimization-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/deoptimization-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/deoptimization-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/deoptimization-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/deoptimization-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/deoptimization-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/deoptimization-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/deoptimization-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/deoptimization-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/deoptimization-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Deoptimization Engine — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>// Deoptimization Engine — architectural seam diagram
++------------------------------------------------------------------+
+|         Tiered-Compilation Manager + Reprofiling/Recompilation   |
+|   (Interpreted -&gt; Profiling -&gt; Tier1 -&gt; Optimized -&gt; Recompiled)  |
++------------------------------+-------------------------------------+
+                               |
+          +--------------------+---------------------+
+          v                                          v
++----------------------+                +---------------------------+
+| Speculation /         |                | Guard / Uncommon-Trap     |
+| Assumption Registry    |&lt;--------------&gt;| Inserter (IR nodes,       |
+| (per-method catalogue) |                | Duboscq 2013)             |
++-----------+------------+                +-------------+-------------+
+            |                                          |
+            v                                          v
++----------------------+                +---------------------------+
+| Dependency Tracker    |                | Safepoint + Debug-Info /  |
+| (assumption -&gt; nmethod|                | State-Map Generator       |
+| set; bulk invalidate) |                +-------------+-------------+
++-----------+------------+                             |
+            |                                          |
+====== OPTIMIZED MACHINE CODE  |  SEAM  |  INTERPRETER ======
+            |                                          v
+            |                             +---------------------------+
+            |   guard fails / class load  | Deoptimizer Runtime        |
+            +-----------------------------&gt;| (capture, lookup, rebuild)  |
+                                          +-------------+-------------+
+                                                        |
+                           +----------------------------+---------------+
+                           v                                            v
+               +----------------------+                     +----------------------+
+               | Rematerialization     |                     | Interpreter-Frame    |
+               | Engine (recipe -&gt;     |--------------------&gt;| Builder               |
+               | virtual object)       |                     +----------+-----------+
+               +----------------------+                                |
+                                                                        v
+                                                           +---------------------------+
+                                                           | OSR-in / OSR-out Machinery |
+                                                           | (loop back-edge &lt;-&gt; deopt) |
+                                                           +---------------------------+</code></pre>
+<p>The <strong>Tiered-Compilation Manager</strong> owns the Interpreted→Profiling→Tier1→Optimized state machine (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-8">§8.8</a>) and the reprofiling/recompilation controller that reacts to deopts by adjusting profile data and re-issuing compiles. It is the only box in this diagram permitted to mutate a method&#39;s <code>Tier</code> (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-13">I13</a>), and every other box&#39;s trigger reaches it as a request, never a direct mutation.</p>
+<p>The <strong>Speculation/Assumption Registry</strong> is the per-method catalogue of active speculative facts (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-1">§8.1</a>) that the optimizer consulted while compiling. It is append-only per method (P11) — an assumption once registered is never silently withdrawn, only explicitly invalidated (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-6">§8.6</a>) or blacklisted (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-8">§8.8</a>).</p>
+<p>The <strong>Guard/Uncommon-Trap Inserter</strong> lowers each registry entry into an IR guard node with an attached trap target (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-7">§8.7</a>). Following Duboscq et al. 2013, the trap target always carries a <code>FrameState</code> snapshot captured at insertion time, never synthesized lazily at trap time.</p>
+<p>The <strong>Dependency Tracker</strong> indexes assumption → dependent-nmethod sets so a class load can find every method to invalidate (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-6">§8.6</a>). It is the sole authority for bulk invalidation (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/trade-offs/#adr-9">ADR-09</a>) and is consulted before, not after, a speculative compile is trusted (P13).</p>
+<p>The <strong>Safepoint + Debug-Info/State-Map Generator</strong> emits, at every safepoint the optimizer creates, a complete mapping from live optimized values to interpreter locations (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-2">§8.2</a>). Its output is checksummed (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-8">I8</a>) and is the single artifact every other box downstream of the seam depends on for correctness.</p>
+<p>The <strong>Deoptimizer Runtime</strong> is invoked at a guard failure or uncommon trap: it captures machine state, looks up debug info, and drives frame reconstruction (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-3">§8.3</a>). It is implemented as a stateless service (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/blueprint/#sec-14-2">§14.2</a>) so its correctness is a pure function of the <code>SafepointId</code> and captured frame it is given.</p>
+<p>The <strong>Rematerialization Engine</strong> consumes <code>RematRecipe</code>s to rebuild scalar-replaced/eliminated objects (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-4">§8.4</a>). It runs strictly between frame construction and GC-root relinking in the deopt procedure (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-3">§8.3</a>, steps 5-6), never before or after.</p>
+<p>The <strong>Interpreter-Frame Builder</strong> turns reconstructed values into real <code>InterpreterFrame</code>s, outermost inline frame first (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/trade-offs/#adr-11">ADR-11</a>). It is the box that ultimately hands control back to canonical bytecode execution.</p>
+<p>The <strong>OSR-in/OSR-out Machinery</strong> is the dual transition crossing the same seam in the opposite direction — entering optimized code from a live interpreter loop, or leaving it via deopt (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-5">§8.5</a>). OSR-out is structurally identical to the Deoptimizer Runtime&#39;s ordinary procedure; OSR-in is its mirror image (P12).</p>
+<p>The central seam — marked in the diagram — is the boundary this entire project exists to make safe: everything above it is optimized machine code trusting speculative facts; everything below it is the interpreter, the ground truth those facts must always reduce back to (P9). No box in this diagram is permitted to cross that seam except through the Deoptimizer Runtime or the OSR machinery — there is no back-channel.</p>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Speculation Catalogue</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Speculation Type</th>
+<th>Assumption</th>
+<th>Guard</th>
+<th>Deopt Trigger / Reason</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Type speculation</td>
+<td>value has runtime type T</td>
+<td>type-check guard at use site</td>
+<td><code>DeoptReason::TypeMismatch</code></td>
+</tr>
+<tr>
+<td>Monomorphic call</td>
+<td>call site always dispatches to method M</td>
+<td>receiver-class guard (inline-cache guard)</td>
+<td><code>DeoptReason::MegamorphicCall</code></td>
+</tr>
+<tr>
+<td>Null-check elision</td>
+<td>reference never null at this point</td>
+<td>null guard hoisted above the elided checks</td>
+<td><code>DeoptReason::NullCheckFailed</code></td>
+</tr>
+<tr>
+<td>Bounds-check elision</td>
+<td>index within array bounds for the region</td>
+<td>range guard hoisted out of loop</td>
+<td><code>DeoptReason::BoundsCheckFailed</code></td>
+</tr>
+<tr>
+<td>Class-hierarchy assumption</td>
+<td>class C has no (further) subclasses</td>
+<td>CHA leaf-class dependency, no runtime guard — invalidated on class load</td>
+<td><code>DeoptReason::ClassHierarchyChanged</code></td>
+</tr>
+<tr>
+<td>Integer-range assumption</td>
+<td>variable stays within a fixed-width range</td>
+<td>range/overflow guard</td>
+<td><code>DeoptReason::IntegerOverflow</code></td>
+</tr>
+</tbody></table></div>
+<p>Each row&#39;s guard is inserted atomically with its speculative transform (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/blueprint/#sec-15-2">§15.2</a>) — the optimizer never has a window where the transform exists without its guard, which is the concrete mechanism behind P1 rather than a documentation convention. The <code>DeoptReason</code> column is the field every downstream telemetry counter in <a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/blueprint/#sec-26">§26</a> keys on, so a new speculation type added after Phase 11 (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/trade-offs/#sec-37">§37</a>&#39;s deferred polymorphic inline-cache generalization, for example) must extend this table before it extends any code.</p>
+<h3 id="sec-8-2">8.2 Debug-Info / State-Map Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SafepointId</code></td>
+<td>unique id of the safepoint/PC this state map describes</td>
+</tr>
+<tr>
+<td><code>BytecodeIndex</code></td>
+<td>interpreter resumption point</td>
+</tr>
+<tr>
+<td><code>InlineFrameChain</code></td>
+<td>ordered logical frames, outermost to innermost</td>
+</tr>
+<tr>
+<td><code>ValueLocation[]</code></td>
+<td>per live value: Register(reg) / Stack(offset) / Constant(value) / Rematerialize(recipe)</td>
+</tr>
+<tr>
+<td><code>LiveRefSet</code></td>
+<td>subset of <code>ValueLocation</code> entries that are GC roots</td>
+</tr>
+</tbody></table></div>
+<p>Worked example — optimized frame with three live SSA values mapped to interpreter locals:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Optimized location</th>
+<th>Value</th>
+<th>Interpreter local</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Register(rax)</code></td>
+<td>v1 (int)</td>
+<td>slot 0</td>
+</tr>
+<tr>
+<td><code>Stack(fp-16)</code></td>
+<td>v2 (int, spilled)</td>
+<td>slot 1</td>
+</tr>
+<tr>
+<td><code>Rematerialize(recipe_Point)</code></td>
+<td>v3 (eliminated <code>Point{x,y}</code>)</td>
+<td>slot 2</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Deoptimization Procedure — Named Steps</h3>
+<ol>
+<li>Hit guard (runtime check fails), or an uncommon trap is taken unconditionally.</li>
+<li>Capture optimized machine state (registers + stack) at the trap PC.</li>
+<li>Look up debug info for that PC via <code>SafepointId</code>.</li>
+<li>Build interpreter frame(s) — one per <code>InlineFrameChain</code> entry, outermost first.</li>
+<li>Rematerialize eliminated/scalar-replaced objects per <code>RematRecipe</code>.</li>
+<li>Relink GC roots into the new interpreter frames.</li>
+<li>Resume in the interpreter at <code>BytecodeIndex</code>.</li>
+</ol>
+<p>Worked end-to-end trace: a monomorphic-call speculation fails (the receiver&#39;s class changed) inside an inlined callee two frames deep.</p>
+<p>Step 1: the receiver-class guard at the call site fails, taking <code>DeoptReason::MegamorphicCall</code>.</p>
+<p>Step 2: the deoptimizer captures rax/rbx/spill-slots at the trap PC.</p>
+<p>Step 3: <code>SafepointId</code> for that PC resolves to a state map describing two <code>InlineFrameChain</code> entries (caller, inlined callee).</p>
+<p>Step 4: the outer caller&#39;s <code>InterpreterFrame</code> is built first from its slice of the state map, then the inlined callee&#39;s.</p>
+<p>Step 5: no eliminated objects on this path — rematerialization is a no-op.</p>
+<p>Step 6: the receiver reference is relinked as a GC root in the new callee frame.</p>
+<p>Step 7: execution resumes in the interpreter at the callee&#39;s <code>BytecodeIndex</code> for the call instruction, which then dispatches virtually instead of monomorphically.</p>
+<h3 id="sec-8-4">8.4 Rematerialization Model</h3>
+<p><code>RematRecipe</code> carries, per virtual object, its <code>ClassId</code> and a field-by-field reconstruction list — each field either a direct <code>ValueLocation</code> or a nested recipe.</p>
+<p>Worked example: a scalar-replaced <code>Point{x, y}</code> where <code>x</code> lives in <code>rax</code> and <code>y</code> is spilled at <code>fp-24</code>. The recipe is <code>{ class: Point, fields: [ (x, Register(rax)), (y, Stack(fp-24)) ] }</code>.</p>
+<p>Rematerialization allocates a new <code>Point</code>, assigns <code>x</code> and <code>y</code> from their locations, and installs the fresh object at the <code>VirtualObjectDescriptor</code>&#39;s slot in the reconstructed frame.</p>
+<p>This is a fresh heap identity, valid because the source language never observed the pre-elimination identity while the object was scalar-replaced (P8) — the identity that matters is the one visible to the program from this point forward, not any hypothetical identity the eliminated allocation would have had.</p>
+<h3 id="sec-8-5">8.5 On-Stack Replacement — Sequence Tables</h3>
+<p>OSR-in (interpreter loop → optimized code at a back-edge):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Interpreter</td>
+<td>back-edge counter for the loop crosses threshold (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/trade-offs/#sec-9">§9</a> <a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/trade-offs/#adr-10">ADR-10</a>)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Tiered-compilation manager</td>
+<td>triggers an OSR-specific compile of the loop body</td>
+</tr>
+<tr>
+<td>3</td>
+<td>OSR machinery</td>
+<td>builds an <code>OsrEntry</code> state map matching current interpreter locals</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Deoptimizer-adjacent OSR entry stub</td>
+<td>transfers live locals into optimized register/stack locations</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Optimized code</td>
+<td>resumes execution at the loop back-edge in optimized form</td>
+</tr>
+</tbody></table></div>
+<p>OSR-out (the deopt itself, from optimized loop back to interpreter):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Optimized loop</td>
+<td>guard fails or uncommon trap taken mid-loop</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Deoptimizer runtime</td>
+<td>runs the standard procedure (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-3">§8.3</a>) at the loop&#39;s safepoint</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Interpreter-frame builder</td>
+<td>rebuilds the loop&#39;s locals into an <code>InterpreterFrame</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td>Interpreter</td>
+<td>resumes the loop body at the corresponding <code>BytecodeIndex</code></td>
+</tr>
+</tbody></table></div>
+<p>Both directions share the same <code>DebugInfo</code>-shaped state map (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-2">§8.2</a>); OSR-in&#39;s step 3 and OSR-out&#39;s step 2 are the only steps that differ in <em>direction</em> of value transfer, not in <em>format</em> — a design choice that lets Phase 7 (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/build/#sec-19">§19</a>) reuse Phase 1&#39;s encoder/decoder wholesale rather than building a parallel OSR-specific format.</p>
+<h3 id="sec-8-6">8.6 Assumption-Dependency and Invalidation Model</h3>
+<pre class="diagram"><code>// assumption -&gt; dependent-nmethod fan-out, invalidated on class load
+Assumption(&quot;Leaf(ClassC)&quot;)
+      |
+      +--&gt; Dependency --&gt; Nmethod(Method A, tier=Optimized)
+      +--&gt; Dependency --&gt; Nmethod(Method B, tier=Optimized)
+      +--&gt; Dependency --&gt; Nmethod(Method C, tier=Optimized)
+
+ClassLoad(Subclass of ClassC)
+      |
+      v
+DependencyTracker.invalidate(&quot;Leaf(ClassC)&quot;)
+      |
+      +--&gt; deopt Nmethod(A)  --&gt; Deoptimized --&gt; Reprofiled
+      +--&gt; deopt Nmethod(B)  --&gt; Deoptimized --&gt; Reprofiled
+      +--&gt; deopt Nmethod(C)  --&gt; Deoptimized --&gt; Reprofiled</code></pre>
+<p>The fan-out shown above is exactly what <a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/trade-offs/#adr-8">ADR-08</a>&#39;s hash-map-keyed structure makes O(1) to look up and O(dependents) to walk (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/blueprint/#sec-31">§31</a>); a per-nmethod-list alternative would require scanning every compiled method&#39;s assumption list on every class load, which does not scale with code-cache size.</p>
+<h3 id="sec-8-7">8.7 Guard / Uncommon-Trap IR Representation</h3>
+<p>Following Duboscq et al. 2013, each guard is an IR node carrying a reference to a <code>FrameState</code> node — a full debug-info snapshot at that program point captured at compile time. The guard&#39;s condition edge falls through on success; its trap edge targets a shared trap-stub keyed by <code>DeoptReason</code> (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/trade-offs/#adr-17">ADR-17</a>), which invokes the deoptimizer runtime with the guard&#39;s attached <code>FrameState</code>. This makes the trap target always reachable (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-6">I6</a>) and always self-describing (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-1">I1</a>) — the <code>FrameState</code> is not derived at trap time, it is carried since compilation.</p>
+<p>Sharing trap stubs by <code>DeoptReason</code> rather than emitting one unique trap per guard (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/trade-offs/#adr-17">ADR-17</a>) means the guard node itself is small — a condition plus two edges — while all of the actual deopt-invocation logic lives once, in the shared stub, rather than being duplicated at every guard site. This is what keeps guard density (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/numbers/#m-8">M8</a>) a code-size-cheap property rather than one that scales with the number of speculations a method carries.</p>
+<h3 id="sec-8-8">8.8 Tiered-Compilation Lifecycle State Machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entry Condition</th>
+<th>Failure Edge</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Interpreted</td>
+<td>method&#39;s first invocation</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Profiling</td>
+<td>invocation counter crosses profiling threshold</td>
+<td>none — always advances or stays</td>
+</tr>
+<tr>
+<td>Tier1 (baseline-compiled)</td>
+<td>profiling data sufficient for a first compile</td>
+<td>compile failure → remain Profiling</td>
+</tr>
+<tr>
+<td>Optimized</td>
+<td>Tier1 invocation/backedge counters cross optimizing threshold</td>
+<td>compile failure → remain Tier1</td>
+</tr>
+<tr>
+<td>Deoptimized</td>
+<td>guard failure, uncommon trap, or invalidation</td>
+<td>— (always reachable from Optimized)</td>
+</tr>
+<tr>
+<td>Reprofiled</td>
+<td>deopt completes, profile counters updated (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/trade-offs/#adr-14">ADR-14</a>)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Recompiled</td>
+<td>reprofiled data triggers a fresh Optimized compile</td>
+<td>repeated deopt on same speculation → Blacklisted</td>
+</tr>
+<tr>
+<td>Blacklisted</td>
+<td>thrashing threshold exceeded (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-11">I11</a>)</td>
+<td>permanent for that speculation; method still runs Tier1</td>
+</tr>
+</tbody></table></div>
+<p>Every arrow in this table is owned exclusively by the tiered-compilation manager (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-3">§3</a>, <a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-13">I13</a>) — no other subsystem in <a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-3">§3</a>&#39;s diagram is permitted to write a <code>Tier</code> value directly, which is what makes the &quot;failure edge&quot; column enforceable as a single-choke-point invariant rather than a convention every caller must independently honor (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/blueprint/#sec-22-2">§22.2</a>).</p>
+<h3 id="sec-8-9">8.9 Malformed / Hard Examples</h3>
+<ul>
+<li>A deopt is attempted at a PC with no debug info — this is a fatal build-time bug (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-9">I9</a>); it must never occur at runtime, and any occurrence aborts with diagnostics rather than attempting silent recovery.</li>
+<li>A rematerialization recipe graph contains a cycle (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-12">I12</a>) — rejected at compile time by the recipe-graph cycle check.</li>
+<li>A deopt storm: a speculation fails on nearly every invocation, driving the method repeatedly through Optimized→Deoptimized→Recompiled — caught by the thrashing guard (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/architecture/#sec-8-8">§8.8</a>, <a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-11">I11</a>) before it becomes a sustained performance collapse.</li>
+<li>OSR-in is attempted into a loop whose live-variable set cannot be expressed in the optimized entry&#39;s expected state map (e.g., a value&#39;s type diverged between iterations) — rejected by <a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-10">I10</a>, the loop remains interpreted.</li>
+<li>A guard references a value the debug info does not describe — a compiler bug caught by the registry-guard cross-check (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-7">I7</a>) before the nmethod is installed.</li>
+<li>Two <code>DeoptCounter</code> entries collide on the same key for unrelated speculations (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-16">I16</a>) — a counter-key derivation bug, caught by the key-collision audit before an unrelated speculation is wrongly blacklisted.</li>
+<li>An exception unwind and a guard-triggered deopt target the same safepoint simultaneously on two different threads sharing a not-yet-invalidated nmethod — must resolve deterministically per-thread rather than racing on shared reconstruction state.</li>
+</ul>
+<h3 id="sec-8-10">8.10 Failure-Path Example</h3>
+<p>A dead-code-elimination bug drops a live value <code>v5</code> from a <code>FrameState</code> after a guard referencing it was already inserted.</p>
+<p>At runtime the guard fails; the deoptimizer looks up the state map and finds no entry for <code>v5</code> where the guard&#39;s snapshot expects one.</p>
+<p>This violates <a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/reliability/#inv-1">I1</a> and is detected by the state-map completeness validator before any register/stack data is trusted.</p>
+<p>The runtime aborts the deopt with a fatal trap rather than reconstructing a partially-wrong frame — a partial, silently-wrong reconstruction is strictly worse than a loud abort, per P2&#39;s observational-equivalence requirement.</p>
+<p>The runtime emits <code>statemap_completeness_gauge</code> telemetry identifying the offending <code>SafepointId</code>.</p>
+<p>The offending nmethod&#39;s compilation is rejected in the next build once the fixture reproducing this failure is added to the permanent regression suite (<a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/blueprint/#sec-12-5">§12.5</a>, <a class="cite" href="/system-design-blueprints/systems/deoptimization-engine/blueprint/#sec-28">§28</a>).</p>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

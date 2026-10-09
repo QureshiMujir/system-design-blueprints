@@ -1,0 +1,339 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>LLM Inference Engine — Architecture · Engineering Blueprints</title><meta name="description" content="LLM Inference Engine, hld: §3 overview + §8 domain model. Build a minimal but production-grade inference runtime for transformer LLMs of the LLaMA/Mistral family: read GGUF model files, run forward passes correctly on CPU (AVX2/AVX-512/NEON) and quickly on…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/llm-inference-engine/">LLM Inference Engine</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>LLM Inference Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">C/C++</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>10 phases</li> <li>~15 weeks</li> <li>1,826 lines</li> <li>blueprint #44</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/llm-inference-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/llm-inference-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/llm-inference-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/llm-inference-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/llm-inference-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/llm-inference-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/llm-inference-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/llm-inference-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/llm-inference-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:LLM Inference Engine — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>┌─────────────────────────────────────────────────────────────────┐
+│ Python Frontend (Phase 8, §20)                                  │
+│  mini.load(&quot;model.gguf&quot;) -&gt; Engine ; FastAPI: /v1/chat/completions│
+└──────────────────────────────┬──────────────────────────────────┘
+                                │ PyBind11 (ADR-12)
+┌──────────────────────────────▼──────────────────────────────────┐
+│ Engine + Scheduler + ContinuousBatcher (Phase 6, §18)            │
+│  queue -&gt; prefill -&gt; decode -&gt; finish ; PrefixCache (xxHash)     │
+└──────┬─────────────────────────────────────────────┬─────────────┘
+       │                                             │
+┌──────▼───────────────┐                 ┌───────────▼────────────┐
+│ Sampler (Phase 7,§19) │                 │ Tokenizer (Phase 2,§14)│
+│ greedy/top-k/top-p/   │                 │ GGUF BPE + byte-fallback│
+│ min-p/rep/pres/freq   │                 └────────────────────────┘
+└───────────────────────┘
+       │
+┌──────▼────────────────────────────────────────────────────────────┐
+│ Transformer Forward Pass (Phases 3–5, §15–§17)                    │
+│  embed -&gt; [RMSNorm-&gt;attn-&gt;+res -&gt; RMSNorm-&gt;SwiGLU-&gt;+res] x N      │
+│         -&gt; RMSNorm -&gt; lm_head -&gt; logits                           │
+└──────┬──────────────────────────────────────────────────────────┬─┘
+       │                                                          │
+┌──────▼──────────────┐                              ┌────────────▼───────┐
+│ KvCache (Phase 6,§18)│                              │ Operators (§15–§17)│
+│ Contiguous/Paged     │                              │ matmul,RMSNorm,RoPE│
+│ per-layer K,V pages  │                              │ GQA,SwiGLU,FA2     │
+└──────────┬───────────┘                              └────────────────────┘
+           │
+┌──────────▼───────────────────────────────────────────────────────┐
+│ Tensor Library (Phase 1, §13)                                    │
+│ Storage/strides/broadcast; Dtype: f32,f16,bf16,q8_0,q4_0,q4_K...; │
+│ Arena per request + weights Arena (never reset)                  │
+└──────┬──────────────────────────────────────────────────┬────────┘
+       │                                                  │
+┌──────▼──────────────────┐                   ┌───────────▼────────────┐
+│ CpuBackend (Phase 3,§15)│                   │ CudaBackend (Phase 4-5)│
+│ AVX2/AVX-512/NEON, OpenMP│                  │ custom kernels, no cuBLAS│
+└──────────────────────────┘                   └────────────────────────┘
+       │                                                  │
+┌──────▼──────────────────────────────────────────────────▼────────┐
+│ gguf::Reader (Phase 1, §13)                                       │
+│ mmap MAP_PRIVATE, header/metadata/tensor parse, bounds-checked    │
+└────────────────────────────────────────────────────────────────────┘</code></pre>
+<p>Three invariant properties of this diagram (referenced throughout): <strong>(1)</strong> the data path is one-way — weights flow up from the loader, requests flow down from HTTP, activations are transient; <strong>(2)</strong> <code>CpuBackend</code>/<code>CudaBackend</code> present one <code>Backend</code> interface (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/design/#sec-11">§11</a>); the engine never branches on backend kind (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-7">I7</a>); <strong>(3)</strong> the <code>Arena</code>/<code>MemoryPool</code> cross-cut is owned by the tensor library alone (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-10">P10</a>) — every other layer calls into it, none reimplements it.</p>
+<p><strong>Box-by-box:</strong> the <strong>Python Frontend</strong> is the only user-facing surface and owns process lifecycle, HTTP framing, and Pydantic validation. The <strong>Engine/Scheduler/ContinuousBatcher</strong> owns request lifecycle and time-slicing between prefill and decode work; it is the only component allowed to reorder work. The <strong>Sampler</strong> is a pure function of logits + <code>SamplingState</code>; it never touches the KV cache. The <strong>Tokenizer</strong> is the sole owner of text↔byte transforms (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-9">P9</a>). The <strong>Transformer Forward Pass</strong> is the fixed sequence of operator calls that both backends implement identically. <strong>KvCache</strong> owns per-request attention state and is reference-counted for prefix sharing. <strong>Operators</strong> are backend-dispatched pure functions over <code>Tensor</code>s. The <strong>Tensor Library</strong> owns all memory (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-10">P10</a>) and dtype metadata. <strong>CpuBackend/CudaBackend</strong> are the two concrete <code>Backend</code> implementations selected once at <code>Engine::create</code>. The <strong>gguf::Reader</strong> is the only module that touches the model file on disk.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model / Data Model</h2>
+<h3 id="sec-8-gguf-binary-layout">GGUF binary layout</h3>
+<pre class="diagram"><code>[Header]
+  magic:            u32   &#39;GGUF&#39; (0x46554747 LE)
+  version:          u32   3
+  tensor_count:     u64
+  metadata_kv_count:u64
+[Metadata KV] x metadata_kv_count
+  key_len:  u64 ; key_bytes: u8[key_len] (not null-terminated)
+  value_type: u32 (enum: u8,i8,u16,i16,u32,i32,f32,bool,string,array,u64,i64,f64)
+  value:    variable, per value_type
+[Tensor Descriptors] x tensor_count
+  name_len: u64 ; name_bytes: u8[name_len]
+  n_dims:   u32 ; dims: u64[n_dims]
+  dtype:    u32 (Dtype enum, §11)
+  offset:   u64 (relative to the start of the data section, alignment-padded)
+[Padding to `general.alignment` (default 32)]
+[Data section] — raw tensor bytes, mmap&#39;d MAP_PRIVATE</code></pre>
+<h3 id="sec-8-quantization-block-formats-dtype-bytes-block-elements-block">Quantization block formats (dtype → bytes/block, elements/block)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Dtype</th>
+<th>Block size (elems)</th>
+<th>Bytes/block</th>
+<th>Layout</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>F32</td>
+<td>1</td>
+<td>4</td>
+<td>IEEE-754 single</td>
+</tr>
+<tr>
+<td>F16</td>
+<td>1</td>
+<td>2</td>
+<td>IEEE-754 half</td>
+</tr>
+<tr>
+<td>Q8_0</td>
+<td>32</td>
+<td>34</td>
+<td>1×fp16 scale + 32×int8</td>
+</tr>
+<tr>
+<td>Q4_0</td>
+<td>32</td>
+<td>18</td>
+<td>1×fp16 scale + 16 bytes packed int4 (symmetric)</td>
+</tr>
+<tr>
+<td>Q4_K</td>
+<td>256</td>
+<td>144</td>
+<td>super-block: fp16 scale+min + 8×6-bit sub-scale/min + 128 bytes packed int4</td>
+</tr>
+<tr>
+<td>Q5_K</td>
+<td>256</td>
+<td>176</td>
+<td>as Q4_K + 32 bytes high-bit extension</td>
+</tr>
+<tr>
+<td>Q6_K</td>
+<td>256</td>
+<td>210</td>
+<td>super-block: 16×8-bit sub-scales + 128+64 bytes packed int6</td>
+</tr>
+<tr>
+<td>Q8_K</td>
+<td>256</td>
+<td>292</td>
+<td>fp32 scale + 256×int8 (accumulator-friendly)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-tokenizer-model-pre-tokenization-ebnf-ish">Tokenizer model (pre-tokenization, EBNF-ish)</h3>
+<pre class="diagram"><code>prompt        := (bos)? segment*
+segment       := text_run | special_token
+text_run      := byte+                       # SentencePiece: &#39; &#39; -&gt; U+2581
+bpe_merge     := loop { pick lowest-priority adjacent pair in vocab; merge }
+                 until no pair in vocab
+byte_fallback := if byte_seq not in vocab: emit &lt;0xNN&gt; per byte
+decode        := token_id* -&gt; bytes -&gt; (U+2581 -&gt; &#39; &#39;) -&gt; utf8 validate</code></pre>
+<h3 id="sec-8-kv-cache-layout">KV-cache layout</h3>
+<pre class="diagram"><code>ContiguousKvCache: per (request_id, layer) -&gt; Tensor[num_kv_heads, max_seq_len, head_dim] x2 (K,V)
+PagedKvCache:      per layer -&gt; page_table[page_id] -&gt; Tensor[num_kv_heads, 16, head_dim] x2 (K,V)
+                    per request -&gt; ordered list&lt;page_id&gt;, refcount per page_id</code></pre>
+<h3 id="sec-8-attention-request-state-machine">Attention / request state machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Entered from</th>
+<th>Exits to</th>
+<th>Guard (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-12">I12</a>)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Queued</code></td>
+<td><code>Engine::submit</code></td>
+<td><code>Prefill</code></td>
+<td>scheduler admits (budget available)</td>
+</tr>
+<tr>
+<td><code>Prefill</code></td>
+<td><code>Queued</code></td>
+<td><code>Decode</code></td>
+<td>one prefill batch completes</td>
+</tr>
+<tr>
+<td><code>Decode</code></td>
+<td><code>Prefill</code>, <code>Decode</code></td>
+<td><code>Decode</code>, <code>Finished</code>, <code>Failed</code>, <code>Cancelled</code></td>
+<td>one decode step completes</td>
+</tr>
+<tr>
+<td><code>Finished</code></td>
+<td><code>Decode</code></td>
+<td>(terminal)</td>
+<td>EOS, stop-string, or <code>max_new_tokens</code> reached</td>
+</tr>
+<tr>
+<td><code>Failed</code></td>
+<td>any</td>
+<td>(terminal)</td>
+<td>unrecoverable error (typed <code>MiniError</code>)</td>
+</tr>
+<tr>
+<td><code>Cancelled</code></td>
+<td>any</td>
+<td>(terminal)</td>
+<td><code>Engine::cancel</code> or timeout</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-worked-example">Worked example</h3>
+<p>TinyLlama-1.1B-Q4_K_M: header <code>{magic=GGUF, version=3, tensor_count=201, metadata_kv_count=24}</code>; metadata includes <code>llama.embedding_length=2048</code>, <code>llama.block_count=22</code>, <code>llama.attention.head_count=32</code>, <code>llama.attention.head_count_kv=4</code> (GQA); tensor <code>blk.0.attn_q.weight</code> has <code>dtype=Q4_K</code>, <code>dims=[2048,2048]</code>, computed byte size <code>= (2048×2048/256) × 144 = 2,359,296</code> bytes — the loader asserts this equals the descriptor&#39;s implied span before the next tensor&#39;s offset.</p>
+<h3 id="sec-8-malformed-example">Malformed example</h3>
+<p>A GGUF with <code>metadata_kv_count=0xFFFFFFFFFFFFFFFF</code> (near-u64-max): the loader&#39;s bounds check (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-9">I9</a>) computes the minimum bytes required for that many KV pairs (each ≥ 9 bytes: 8-byte len + ≥1-byte type) against remaining file size, rejects with <code>MiniError{code=GgufBoundsViolation}</code> before any allocation — never attempts to allocate a KV-pair array sized by the untrusted count.</p>
+<h3 id="sec-8-failure-path-example">Failure-path example</h3>
+<p>Decode-time KV-cache OOM at request 33 (VRAM exhausted, contiguous layout, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/numbers/#sec-4">§4</a> M-constraint breach): <code>KvCache::allocate</code> returns <code>MiniError{code=OutOfMemory}</code> → <code>Engine::submit</code> returns the error synchronously (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-12">P12</a>, no queueing past capacity) → <code>mini_requests_total{status=&quot;rejected_oom&quot;}</code> increments → the caller receives HTTP 503 with a <code>Retry-After</code> header (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/build/#sec-20">§20</a>) → <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#fm-1">FM-1</a> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#sec-23">§23</a>) governs operator remediation.</p>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-1">P1</a> — CPU correctness is the ground truth.</strong> Every operator has a CPU reference; CUDA must match within documented tolerance (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#sec-7">§7</a> <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-1">I1</a>). Violate it: bugs get silently absorbed into &quot;the GPU is just different,&quot; and conformance (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-26">§26</a>) stops meaning anything.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-2">P2</a> — One engine, two backends.</strong> Backends never leak into the engine; one <code>Backend*</code> selected once at construction (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-16">ADR-16</a>). Violate it: the engine grows <code>if (cuda)</code> branches (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-7">I7</a>) and becomes unmaintainable within two phases.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-3">P3</a> — Quantization is the model&#39;s property, not the engine&#39;s.</strong> A model loaded as Q4_K stays Q4_K; dequant is fused into the kernel (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-8">ADR-08</a>). Violate it: eager dequant OOMs at 70B scale.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-4">P4</a> — The KV cache is the request&#39;s property.</strong> Pages are reference-counted; eviction is explicit, never a silent LRU (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-3">I3</a>). Violate it: an active request silently loses context mid-generation.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-5">P5</a> — The HTTP surface is the OpenAI surface.</strong> No parallel API; extensions are documented <code>mini_*</code> fields (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/trade-offs/#adr-11">ADR-11</a>). Violate it: every client SDK integration becomes bespoke.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-6">P6</a> — Determinism is the default.</strong> Greedy + fixed seed ⇒ bit-identical output on the same (backend, hardware) tuple (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-4">I4</a>). Violate it: regression testing and replay debugging both become impossible.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-7">P7</a> — No silent fallbacks.</strong> An unsupported kernel path raises a typed error; the engine never silently downgrades to CPU (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-16">P16</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-11">T11</a>). Violate it: throughput becomes unpredictable and the scheduler&#39;s assumptions break.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-8">P8</a> — The scheduler owns time, not the kernels.</strong> Kernels run at hardware speed; only the scheduler decides which requests get cycles (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-5">I5</a>). Violate it: fairness and continuous batching both become unreasoned-about accidents.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-9">P9</a> — Strings are owned by the tokenizer.</strong> No other module touches UTF-8/Unicode; everything downstream is <code>TokenId</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-6">I6</a>). Violate it: two modules normalize text differently and drift silently.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-10">P10</a> — One memory pool per request, plus a weights arena.</strong> No per-tensor <code>malloc</code>/<code>free</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-8">I8</a>). Violate it: allocator churn dominates the profile at high request rates.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-11">P11</a> — Numbers before speed.</strong> Every operator is conformance-tested (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/blueprint/#sec-26">§26</a>) before it is optimized; a benchmark without a passing conformance bucket is not trusted. Violate it: you optimize a wrong kernel and ship faster incorrect output.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-12">P12</a> — Backpressure is explicit, never implicit.</strong> Over-capacity requests are rejected with a typed error (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-4">T4</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-5">T5</a>), never served by silently truncating context or precision. Violate it: quality degrades invisibly under load.</li><li id="p-13"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-13">P13</a> — Observability is a first-class output.</strong> Every phase ships its own metrics/traces (N.10) before being called done. Violate it: production incidents (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#sec-23">§23</a>) have no forensic trail.</li><li id="p-14"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-14">P14</a> — A GGUF file is untrusted input until proven otherwise.</strong> The loader validates before it trusts (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#inv-9">I9</a>, <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/reliability/#t-2">T2</a>). Violate it: a malformed file becomes a crash or an OOB read.</li><li id="p-15"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-15">P15</a> — One naming authority per concept.</strong> Module/type/file/metric names are chosen once (terminology lock, per <a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-15">P15</a> in this document) and reused verbatim. Violate it: the same thing under two names becomes the single most common blueprint defect.</li><li id="p-16"><strong><a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/architecture/#p-16">P16</a> — Fail fast, fail loud, fail typed.</strong> Every error path returns a typed <code>MiniError</code>/<code>ErrorCode</code> (<a class="cite" href="/system-design-blueprints/systems/llm-inference-engine/design/#sec-11">§11</a>), never a bare crash except for compiled-out debug assertions on already-corrupted state. Violate it: failures surface far from their root cause.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

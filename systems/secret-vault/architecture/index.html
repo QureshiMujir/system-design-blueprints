@@ -1,0 +1,699 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Secret Manager / Vault — Architecture · Engineering Blueprints</title><meta name="description" content="Secret Manager / Vault, hld: §3 overview + §8 domain model. Build, from scratch, in Rust, an encrypted secret-management service structured around an envelope-encryption key hierarchy rooted in a sealed master key: a MasterKey reconstructed only via…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/secret-vault/">Secret Manager / Vault</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Secret Manager / Vault</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~30 weeks</li> <li>2,475 lines</li> <li>blueprint #168</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/secret-vault/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/secret-vault/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/secret-vault/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/secret-vault/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/secret-vault/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/secret-vault/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/secret-vault/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/secret-vault/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/secret-vault/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/secret-vault/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Secret Manager / Vault — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                       Clients (HTTP/mTLS, RFC 8446/8705)
+                                    │
+                          ┌─────────▼─────────┐
+                          │    API Listener    │  protocol boundary
+                          └─────────┬─────────┘
+                                    │
+                 ┌──────────────────┼───────────────────┐
+                 │                  │                    │
+        ┌────────▼───────┐ ┌────────▼────────┐  ┌────────▼────────┐
+        │  Auth Methods   │ │  Token Store    │  │  Policy Engine  │
+        │ token/AppRole/  │ │ (accessor idx)  │  │ deny-by-default │
+        │ mTLS-cert       │ └────────┬────────┘  └────────┬────────┘
+        └────────┬───────┘          │                    │
+                 └──────────────────┴───────────┬─────────┘        trust boundary:
+                                                 │                  auth before read
+                                        ┌────────▼────────┐
+                                        │  Router / Mount  │
+                                        │      Table       │
+                                        └────────┬────────┘
+                    ┌────────────────────────────┼───────────────────────┐
+           ┌────────▼───────┐          ┌─────────▼────────┐    ┌─────────▼────────┐
+           │   KV Engine     │          │ Dynamic Credential │  │  Transit Engine   │
+           │ (versioned)     │          │     Engines        │  │  (EaaS)           │
+           └────────┬───────┘          └─────────┬─────────┘    └─────────┬────────┘
+                    │                             │  queue: lease events   │
+                    │                    ┌─────────▼─────────┐             │
+                    │                    │ Lease / Expiration  │            │
+                    │                    │      Manager        │            │
+                    │                    └─────────┬─────────┘             │
+                    │                             │ revoke                │
+                    │                    ┌─────────▼─────────┐             │
+                    └───────────────────►│ Rotation / Rewrap  │◄────────────┘
+                                         │      Worker         │
+                                         └─────────┬─────────┘
+                                                    │            persistence boundary
+                                          ┌─────────▼─────────┐
+                                          │  Cryptographic     │
+                                          │      Barrier        │
+                                          │ (Key Hierarchy:      │
+                                          │  MK → KEK → DEK)     │
+                                          └─────────┬─────────┘
+                                    ┌────────────────┼───────────────┐
+                          ┌─────────▼────────┐            ┌─────────▼────────┐
+                          │  Storage Backend  │            │  Audit Log        │
+                          │ (file/Postgres/   │            │  (hash-chained,   │
+                          │  etcd/Consul)      │            │  Merkle proofs)   │
+                          └───────────────────┘            └───────────────────┘
+      Seal/Unseal Subsystem + Shamir Share Collector ── feeds ──► Key Hierarchy above
+      Telemetry (metrics/tracing) taps every box; concurrency boundary: leader-only workers
+      marked (Rotation/Rewrap, Sweeper) run singly per cluster via the leader-election lock.</code></pre>
+<p><strong>API Listener</strong> — terminates TLS 1.3, parses HTTP, is the sole protocol boundary; rejects
+malformed requests before they reach auth. <strong>Auth Methods</strong> — pluggable identity verification
+(token, AppRole, mTLS) producing an <code>Identity</code> and, on success, a <code>Token</code>. <strong>Token Store</strong> —
+persists tokens by hashed id and by accessor; the trust boundary where &quot;bearer of this string&quot;
+becomes &quot;this Identity.&quot; <strong>Policy Engine</strong> — evaluates the request path and required capability
+against the token&#39;s attached policies; deny-by-default; runs before any secret material is
+touched (<a class="cite" href="/system-design-blueprints/systems/secret-vault/reliability/#inv-3">I3</a>). <strong>Router/Mount Table</strong> — maps a path prefix to a mounted engine instance;
+concurrency boundary for hot-swapping mounts via <code>ArcSwap</code>. <strong>KV Engine</strong> — static secrets,
+versioned, with metadata and soft-delete/rollback. <strong>Dynamic Credential Engines</strong> — generate
+secrets on demand against an upstream system and register a lease. <strong>Transit Engine</strong> — encrypts
+and signs on behalf of callers without exposing key material; the EaaS path. <strong>Lease/Expiration
+Manager</strong> — tracks every issued lease, sweeps expiries, drives revocation; a queue boundary
+between issuance and cleanup. <strong>Rotation/Rewrap Worker</strong> — leader-only background job moving
+ciphertext across key epochs (<a class="cite" href="/system-design-blueprints/systems/secret-vault/build/#sec-20">§20</a>); reads a persisted <code>RewrapCursor</code> so it resumes after a crash.
+<strong>Cryptographic Barrier</strong> — the sole encrypt/decrypt path to storage; owns the key hierarchy;
+every read/write from any engine passes through it (<a class="cite" href="/system-design-blueprints/systems/secret-vault/reliability/#inv-2">I2</a>). <strong>Storage Backend</strong> — durable, opaque
+to plaintext; also hosts the leader-election lock. <strong>Audit Log</strong> — a queue-fed, append-only,
+hash-chained sink; a write that cannot be audited is refused (P5). <strong>Seal/Unseal Subsystem +
+Shamir Share Collector</strong> — the only path that ever reconstructs the master key in memory, and
+only transiently. <strong>Telemetry</strong> — cross-cutting metrics/tracing that must never carry secret
+fields (<a class="cite" href="/system-design-blueprints/systems/secret-vault/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/secret-vault/trade-offs/#adr-24">ADR-24</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Key Hierarchy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Rooted By</th>
+<th>Wrapped By</th>
+<th>Rotated When</th>
+<th>Rotation Cost</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>MasterKey</code> (MK)</td>
+<td>Shamir shares (k of n)</td>
+<td>never wrapped; exists only transiently in memory</td>
+<td>Rare — disaster or confirmed compromise</td>
+<td>Full re-init and re-share ceremony</td>
+</tr>
+<tr>
+<td><code>KeyEncryptionKey</code> (KEK)</td>
+<td>MK</td>
+<td>MK</td>
+<td>Scheduled (e.g. quarterly) or on suspected compromise</td>
+<td>Rewrap the (small) DEK table only (<a class="cite" href="/system-design-blueprints/systems/secret-vault/build/#sec-20">§20</a>)</td>
+</tr>
+<tr>
+<td><code>DataEncryptionKey</code> (DEK)</td>
+<td>KEK</td>
+<td>active KEK at mint time</td>
+<td>Scheduled (e.g. daily/weekly) or on demand</td>
+<td>Rewrap affected storage records (<a class="cite" href="/system-design-blueprints/systems/secret-vault/build/#sec-20">§20</a>)</td>
+</tr>
+</tbody></table></div>
+<p>Display equations (AEAD-Enc/Dec = ChaCha20-Poly1305, RFC 8439):</p>
+<pre class="diagram"><code>KEK_active            = AEAD-Enc(MK, nonce_k, KEK_material,  AAD = &quot;kek&quot; || kek_epoch_id)
+DEK(e)                = AEAD-Enc(KEK_active_at_mint(e), nonce_d, DEK_material(e), AAD = &quot;dek&quot; || e)
+Ciphertext(path, v)   = AEAD-Enc(DEK(e), nonce_r, plaintext, AAD = mount_id || path)</code></pre>
+<p>Unwrap is the corresponding <code>AEAD-Dec</code>; a failed tag check yields <code>VaultError::TamperedRecord</code>,
+never a &quot;best effort&quot; plaintext (P6).</p>
+<h3 id="sec-8-2">8.2 Barrier Record Byte Layout</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Offset</th>
+<th>Field</th>
+<th>Size</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td><code>version</code></td>
+<td>1 B</td>
+<td>record format version, currently <code>1</code></td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>key_epoch_id</code></td>
+<td>4 B (u32 BE)</td>
+<td><code>KeyEpoch</code> whose DEK encrypted this record</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>nonce</code></td>
+<td>12 B</td>
+<td>AEAD nonce, unique per encryption under this DEK (<a class="cite" href="/system-design-blueprints/systems/secret-vault/reliability/#inv-13">I13</a>)</td>
+</tr>
+<tr>
+<td>17</td>
+<td><code>tag</code></td>
+<td>16 B</td>
+<td>AEAD authentication tag</td>
+</tr>
+<tr>
+<td>33</td>
+<td><code>ciphertext</code></td>
+<td>variable</td>
+<td>AEAD ciphertext of the stored value</td>
+</tr>
+</tbody></table></div>
+<p>AAD is not stored inline: it is <code>mount_id (16 B UUID) || storage_path (UTF-8)</code>, recomputed from
+the lookup key at read time. This binds ciphertext to its location — copying a valid record to a
+different path fails tag verification.</p>
+<h3 id="sec-8-3">8.3 Shamir Share Format And Reconstruction</h3>
+<p>Each 256-bit master key is split byte-plane-wise: for byte <code>i</code> of 32, a degree-<code>(k-1)</code> polynomial
+<code>f_i(x) = s_i + a_1·x + a_2·x^2 + … + a_{k-1}·x^{k-1}</code> is built over GF(2^8) (Rijndael&#39;s reduction
+polynomial <code>x^8+x^4+x^3+x+1</code>), with <code>s_i</code> the secret byte as the constant term and <code>a_1..a_{k-1}</code>
+random. Share <code>j</code> (for <code>n</code> operators) is <code>(x_j, [f_1(x_j), …, f_32(x_j)])</code> — one x-coordinate,
+32 y-values.</p>
+<p>Reconstruction (Lagrange interpolation at <code>x = 0</code>, arithmetic in GF(2^8)):</p>
+<pre class="diagram"><code>s_i = Σ_{j=1}^{k}  y_i,j · Π_{m=1..k, m≠j}  (0 − x_m) / (x_j − x_m)      (all ops in GF(2^8))</code></pre>
+<p>Worked example (k=3, n=5, one byte plane, illustrative values): shares at x = {1,2,3,4,5} carry
+y-values {y1,y2,y3,y4,y5} derived from <code>f(x) = s + a1·x + a2·x²</code>. Given any 3 of the 5 (say
+x=1,3,4), the Lagrange sum above reconstructs <code>s</code> exactly; any 2 shares (k−1) leave <code>s</code>
+information-theoretically undetermined — every possible byte value remains equally likely (<a class="cite" href="/system-design-blueprints/systems/secret-vault/reliability/#inv-11">I11</a>).</p>
+<h3 id="sec-8-4">8.4 Policy Grammar (EBNF)</h3>
+<pre class="diagram"><code>policy          ::= { path_block } ;
+path_block      ::= &quot;path&quot; path_string &quot;{&quot; capability_stmt { capability_stmt } &quot;}&quot; ;
+capability_stmt ::= &quot;capabilities&quot; &quot;=&quot; &quot;[&quot; capability { &quot;,&quot; capability } &quot;]&quot; ;
+capability      ::= &quot;create&quot; | &quot;read&quot; | &quot;update&quot; | &quot;delete&quot; | &quot;list&quot; | &quot;sudo&quot; | &quot;deny&quot; ;
+path_string     ::= &#39;&quot;&#39; segment { &quot;/&quot; segment } &#39;&quot;&#39; ;
+segment         ::= &quot;*&quot; | &quot;+&quot; | literal ;
+literal         ::= ident_char { ident_char } ;
+ident_char      ::= letter | digit | &quot;-&quot; | &quot;_&quot; | &quot;.&quot; ;</code></pre>
+<p><strong>Path-matching precedence</strong> (highest wins, independent of Deny which always overrides):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Match Type</th>
+<th>Specificity Rank</th>
+<th>Example</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Exact literal path</td>
+<td>1 (highest)</td>
+<td><code>secret/data/prod/db</code></td>
+<td>matches only that exact path</td>
+</tr>
+<tr>
+<td>Prefix + trailing <code>*</code></td>
+<td>2</td>
+<td><code>secret/data/prod/*</code></td>
+<td>deepest matching prefix wins among globs</td>
+</tr>
+<tr>
+<td>Single-segment <code>+</code></td>
+<td>3</td>
+<td><code>secret/data/+/db</code></td>
+<td><code>+</code> consumes exactly one path segment</td>
+</tr>
+<tr>
+<td>Root/broad <code>*</code></td>
+<td>4 (lowest)</td>
+<td><code>secret/*</code></td>
+<td>matches everything under the prefix</td>
+</tr>
+<tr>
+<td>any rule with <code>deny</code></td>
+<td>overrides all</td>
+<td>—</td>
+<td>explicit deny always wins regardless of rank</td>
+</tr>
+</tbody></table></div>
+<p><strong>Capability set:</strong> <code>create</code>, <code>read</code>, <code>update</code>, <code>delete</code>, <code>list</code>, <code>sudo</code> (bypass certain
+operator-only checks), <code>deny</code> (explicit negative, always wins).</p>
+<p><strong>Worked authorization trace.</strong> Token policies = <code>[db-readonly, default]</code>. <code>db-readonly</code>: path
+<code>secret/data/prod/db/*</code> → <code>[read, list]</code>. <code>default</code>: path <code>secret/data/*</code> → <code>[read]</code>. Request:
+<code>PUT secret/data/prod/db/creds</code> (new path ⇒ required capability = <code>create</code>). Trace: (1) compute
+required capability = <code>create</code>; (2) match <code>db-readonly</code> rule, rank 2, grants <code>{read, list}</code> — no
+<code>create</code>; (3) match <code>default</code> rule, rank 2, grants <code>{read}</code> — no <code>create</code>; (4) no deny rules
+present; (5) no rule anywhere grants <code>create</code>; (6) deny by default (P4) — <code>403</code>.</p>
+<h3 id="sec-8-5">8.5 Token Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>id</code></td>
+<td>opaque random, ≥256 bits entropy</td>
+<td>the bearer secret; stored hashed</td>
+</tr>
+<tr>
+<td><code>accessor</code></td>
+<td><code>TokenAccessor</code></td>
+<td>safe-to-log identifier, distinct from <code>id</code></td>
+</tr>
+<tr>
+<td><code>parent</code></td>
+<td><code>Option&lt;TokenId&gt;</code></td>
+<td>hierarchical revocation unless orphan</td>
+</tr>
+<tr>
+<td><code>policies</code></td>
+<td><code>Vec&lt;PolicyName&gt;</code></td>
+<td>OR&#39;d for allow, AND&#39;d for deny (<a class="cite" href="/system-design-blueprints/systems/secret-vault/architecture/#sec-8-4">§8.4</a>)</td>
+</tr>
+<tr>
+<td><code>ttl</code> / <code>max_ttl</code></td>
+<td>duration</td>
+<td>renewal cannot push <code>ttl</code> past <code>max_ttl</code></td>
+</tr>
+<tr>
+<td><code>renewable</code></td>
+<td>bool</td>
+<td></td>
+</tr>
+<tr>
+<td><code>orphan</code></td>
+<td>bool</td>
+<td>not revoked when parent is</td>
+</tr>
+<tr>
+<td><code>period</code></td>
+<td><code>Option&lt;Duration&gt;</code></td>
+<td>periodic tokens renew indefinitely while used</td>
+</tr>
+<tr>
+<td><code>num_uses</code></td>
+<td><code>Option&lt;u32&gt;</code></td>
+<td>use-limit; token dies after N uses regardless of TTL</td>
+</tr>
+<tr>
+<td><code>entity_id</code></td>
+<td><code>Option&lt;Uuid&gt;</code></td>
+<td>identity-based policy attachment</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Lease Record Layout</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type/Size</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>lease_id</code></td>
+<td>UUID, 16 B</td>
+<td>primary key</td>
+</tr>
+<tr>
+<td><code>kind</code></td>
+<td>enum, 1 B</td>
+<td><code>Auth</code> or <code>Secret</code></td>
+</tr>
+<tr>
+<td><code>mount_id</code></td>
+<td>UUID, 16 B</td>
+<td>owning engine mount</td>
+</tr>
+<tr>
+<td><code>issue_time</code></td>
+<td>i64, 8 B</td>
+<td>monotonic-clock-anchored (P11)</td>
+</tr>
+<tr>
+<td><code>ttl</code> / <code>max_ttl</code></td>
+<td>u32 secs, 4 B each</td>
+<td>current window / hard cap</td>
+</tr>
+<tr>
+<td><code>renew_count</code></td>
+<td>u32, 4 B</td>
+<td></td>
+</tr>
+<tr>
+<td><code>last_renew</code></td>
+<td><code>Option&lt;i64&gt;</code>, 8 B</td>
+<td></td>
+</tr>
+<tr>
+<td><code>issued_to_token_accessor</code></td>
+<td><code>Option&lt;TokenAccessor&gt;</code>, 16 B</td>
+<td>cascading revocation</td>
+</tr>
+<tr>
+<td><code>secret_ref</code></td>
+<td>variable</td>
+<td>engine-specific pointer to what was issued</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 Dynamic-Credential Generation And Revocation Sequence</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Client</td>
+<td>request <code>GET dynamic-engine/creds/{role}</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>API</td>
+<td>authenticate token, load attached policies</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Policy Engine</td>
+<td>authorize <code>read</code> on the resolved path (<a class="cite" href="/system-design-blueprints/systems/secret-vault/reliability/#inv-3">I3</a>)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Engine</td>
+<td>render creation template with role parameters</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Engine</td>
+<td>call upstream system (e.g. <code>CREATE ROLE …</code>)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Lease Manager</td>
+<td>register lease <code>{ttl, max_ttl, renewable}</code></td>
+</tr>
+<tr>
+<td>7</td>
+<td>Barrier</td>
+<td>persist the lease record (encrypted)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>Audit</td>
+<td>append entry (secret fields HMAC&#39;d)</td>
+</tr>
+<tr>
+<td>9</td>
+<td>API</td>
+<td>return credential + <code>lease_id</code> + <code>ttl</code></td>
+</tr>
+<tr>
+<td>10</td>
+<td>Sweeper or explicit call</td>
+<td>trigger <code>revoke(lease_id)</code></td>
+</tr>
+<tr>
+<td>11</td>
+<td>Lease Manager</td>
+<td>look up lease; call <code>engine.revoke()</code></td>
+</tr>
+<tr>
+<td>12</td>
+<td>Engine</td>
+<td>call upstream revoke (e.g. <code>DROP ROLE …</code>)</td>
+</tr>
+<tr>
+<td>13</td>
+<td>Lease Manager</td>
+<td>remove from index; mark <code>Revoked</code></td>
+</tr>
+<tr>
+<td>14</td>
+<td>Audit</td>
+<td>append revoke-outcome entry</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-8">8.8 Seal/Unseal State Machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Next State</th>
+<th>Failure Edge</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Uninitialized</code></td>
+<td><code>operator init</code> completes</td>
+<td><code>Sealed</code></td>
+<td>init aborted mid-way → remain <code>Uninitialized</code></td>
+</tr>
+<tr>
+<td><code>Sealed</code> (progress &lt; k−1)</td>
+<td>submit valid share</td>
+<td><code>Sealed</code> (progress+1)</td>
+<td>wrong/duplicate share → progress unchanged, error surfaced</td>
+</tr>
+<tr>
+<td><code>Sealed</code> (progress = k−1)</td>
+<td>submit final share</td>
+<td><code>Unsealed</code></td>
+<td>reconstructed key fails verification blob decrypt → <code>Sealed</code>, progress reset to 0, alarm raised</td>
+</tr>
+<tr>
+<td><code>Unsealed</code></td>
+<td>operator <code>seal</code> or integrity violation</td>
+<td><code>Sealed</code> (progress 0)</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>Unsealed</code></td>
+<td>storage backend unreachable</td>
+<td><code>Unsealed</code> (degraded)</td>
+<td>sustained unreachability past threshold → forced <code>Sealed</code></td>
+</tr>
+<tr>
+<td>any state</td>
+<td>process crash/restart</td>
+<td><code>Sealed</code></td>
+<td>—</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-9">8.9 Lease Lifecycle State Machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Next State</th>
+<th>Failure Edge</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Issued</code></td>
+<td>lease registered (<a class="cite" href="/system-design-blueprints/systems/secret-vault/architecture/#sec-8-7">§8.7</a> step 6)</td>
+<td><code>Active</code></td>
+<td>registration fails → issuance rolled back, no credential returned</td>
+</tr>
+<tr>
+<td><code>Active</code></td>
+<td>renew request</td>
+<td><code>RenewalPending</code></td>
+<td><code>ttl+increment &gt; max_ttl</code> → capped, not rejected</td>
+</tr>
+<tr>
+<td><code>RenewalPending</code></td>
+<td>engine renew hook ok</td>
+<td><code>Active</code> (extended)</td>
+<td>upstream renew fails → <code>Active</code> (unchanged TTL), error surfaced</td>
+</tr>
+<tr>
+<td><code>Active</code></td>
+<td><code>ttl</code> elapses, sweeper picks up</td>
+<td><code>RevocationPending</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>RevocationPending</code></td>
+<td>upstream revoke ok</td>
+<td><code>Revoked</code></td>
+<td>upstream revoke fails → <code>RevocationFailed</code></td>
+</tr>
+<tr>
+<td><code>RevocationFailed</code></td>
+<td>retry with backoff</td>
+<td><code>RevocationPending</code></td>
+<td>retry budget exhausted → <code>ManualIntervention</code> (FM-class, <a class="cite" href="/system-design-blueprints/systems/secret-vault/reliability/#sec-25">§25</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-10">8.10 Audit Merkle Chain And Inclusion Proof</h3>
+<p>Leaves: <code>leaf_i = HMAC-SHA256(day_key, canonical(entry_i))</code>. Each entry also stores <code>prev_hash = leaf_{i-1}</code> (hash chain). Every checkpoint window (N entries or a time bound) a Merkle tree is
+built over the window&#39;s leaves; the root is HMAC&#39;d and recorded as a checkpoint.</p>
+<p>Inclusion-proof verification procedure:</p>
+<ol>
+<li>Locate the leaf index for the entry under question.</li>
+<li>Fetch the sibling-hash path from leaf to root (provided by the audit index).</li>
+<li>Recompute parents bottom-up: <code>parent = H(left || right)</code>.</li>
+<li>Compare the recomputed root to the published checkpoint root for that window.</li>
+<li>Accept if equal; otherwise flag the entry and the whole window as tampered (<a class="cite" href="/system-design-blueprints/systems/secret-vault/reliability/#inv-8">I8</a>).</li>
+</ol>
+<h3 id="sec-8-11">8.11 Worked End-To-End Example</h3>
+<p><code>operator init</code> (k=3,n=5) → 5 shares distributed, root token returned → 3 operators run <code>operator unseal &lt;share&gt;</code> → <code>Unsealed</code> → operator mounts <code>secret/</code> (KV engine) → operator writes policy
+<code>db-readonly</code> → operator issues a scoped token with that policy attached → service authenticates
+with AppRole, receives a token → service calls <code>GET secret/data/prod/db</code> → policy check passes
+(read granted by <code>db-readonly</code>) → KV engine fetches, barrier decrypts → response returned, audit
+entry appended.</p>
+<h3 id="sec-8-12">8.12 Malformed-Input Examples</h3>
+<ul>
+<li>A barrier record with a truncated <code>ciphertext</code> field: tag verification fails deterministically
+→ <code>VaultError::TamperedRecord</code>, never partial plaintext (P6).</li>
+<li>A policy rule <code>capabilities = [&quot;read&quot;, &quot;sudo&quot;, &quot;bogus&quot;]</code>: parser rejects unknown capability
+token at parse time, policy write is refused wholesale (no partial-policy install).</li>
+<li>A Shamir share submitted with an <code>x</code>-coordinate colliding with an already-submitted share:
+reconstruction is refused before attempting interpolation (duplicate x-coordinate is
+mathematically degenerate).</li>
+</ul>
+<h3 id="sec-8-13">8.13 Failure-Path Example</h3>
+<p>Rewrap crashes after 40% of a batch has moved from <code>KeyEpoch(4)</code> to <code>KeyEpoch(5)</code>. On restart, the
+persisted <code>RewrapCursor</code> resumes from the last checkpointed offset; records already rewrapped
+decrypt correctly under epoch 5, the remainder still decrypt under epoch 4 (retained in the
+keyring until <code>min_decryption_epoch</code> advances) — no record is ever left undecryptable, satisfying
+<a class="cite" href="/system-design-blueprints/systems/secret-vault/reliability/#inv-6">I6</a>/P14.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

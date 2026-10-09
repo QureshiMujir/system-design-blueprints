@@ -1,0 +1,884 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Chandy–Lamport Global Snapshot from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Chandy–Lamport Global Snapshot from Scratch, hld: §3 overview + §8 domain model. A from-scratch Rust implementation of the Chandy-Lamport distributed snapshot algorithm (ACM TOCS 1985). The system records a consistent global state — each process's local state at the snapshot…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/distributed-systems/">Distributed Systems</a> </li><li> <a href="/system-design-blueprints/systems/chandy-lamport-snapshot/">Chandy–Lamport Global Snapshot from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:268"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/distributed-systems/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Distributed Systems</span></a> </p> <h1>Chandy–Lamport Global Snapshot from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~17 weeks</li> <li>4,651 lines</li> <li>blueprint #376</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/chandy-lamport-snapshot/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/chandy-lamport-snapshot/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/chandy-lamport-snapshot/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/chandy-lamport-snapshot/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/chandy-lamport-snapshot/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/chandy-lamport-snapshot/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/chandy-lamport-snapshot/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/chandy-lamport-snapshot/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/chandy-lamport-snapshot/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Chandy–Lamport Global Snapshot from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Architecture Diagram</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+  %% legend rt: the protocol core: processes, channels, snapshot, recorder
+  %% legend ingest: app driver and run harness (cl-app, cl-sim, cl-cli)
+  %% legend trust: checks run over the global snapshot
+  CLI[&quot;&lt;b&gt;cl-cli&lt;/b&gt;&lt;br/&gt;run / snapshot / detect / verify&quot;]
+  SIM[&quot;&lt;b&gt;cl-sim&lt;/b&gt;&lt;br/&gt;deterministic scheduler, seed&quot;]
+  APP[&quot;&lt;b&gt;cl-app&lt;/b&gt;&lt;br/&gt;token ring / bank transfers&quot;]
+  PROC[&quot;&lt;b&gt;cl-process&lt;/b&gt;&lt;br/&gt;P0..Pn&quot;]
+  CH[&quot;&lt;b&gt;FIFO channels (cl-channel)&lt;/b&gt;&lt;br/&gt;Pi ====App + Marker====&amp;gt; Pj&lt;br/&gt;cl-transport delivers&lt;br/&gt;order preserved&quot;]
+  SNAP[&quot;&lt;b&gt;cl-snapshot PROTOCOL&lt;/b&gt;&lt;br/&gt;initiate(Pi): record own state;&lt;br/&gt;send Marker on ALL outgoing channels&lt;br/&gt;on Marker(s) at Pj from channel c:&lt;br/&gt;first marker for s: record own state;&lt;br/&gt;mark c empty; start RECORDING all&lt;br/&gt;other incoming channels; send Marker&lt;br/&gt;on all outgoing&lt;br/&gt;else: stop recording c&lt;br/&gt;(recorded msgs = those received&lt;br/&gt;since first marker)&quot;]
+  REC[&quot;&lt;b&gt;cl-recorder&lt;/b&gt;&lt;br/&gt;collect ProcessState (state @ first&lt;br/&gt;marker) + per-channel msg lists&quot;]
+  VERIFY[&quot;&lt;b&gt;cl-verify&lt;/b&gt;&lt;br/&gt;consistent-cut check&quot;]
+  DETECT[&quot;&lt;b&gt;cl-detect&lt;/b&gt;&lt;br/&gt;termination / deadlock /&lt;br/&gt;conservation over the snapshot&quot;]
+  CLI --&gt; SIM
+  SIM -. &quot;drives the whole run reproducibly&quot; .-&gt; APP
+  APP -- &quot;drives&quot; --&gt; PROC
+  PROC --&gt; CH
+  CH --&gt; SNAP
+  SNAP --&gt; REC
+  REC -- &quot;GLOBAL SNAPSHOT&quot; --&gt; VERIFY
+  REC -- &quot;GLOBAL SNAPSHOT&quot; --&gt; DETECT
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef trust stroke-width:1.5px
+  class PROC,CH,SNAP,REC rt
+  class CLI,SIM,APP ingest
+  class VERIFY,DETECT trust</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the protocol core: processes, channels, snapshot, recorder</li><li><span class="swatch ingest"></span>app driver and run harness (cl-app, cl-sim, cl-cli)</li><li><span class="swatch trust"></span>checks run over the global snapshot</li></ul><p class="diagram-note">Drawn from the text diagram in §3.1.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>                      CHANDY-LAMPORT GLOBAL SNAPSHOT  (consistent cut, non-blocking)
++------------------------------------------------------------------------------------+
+|   cl-app (token ring / bank transfers)  drives  cl-process P0..Pn                    |
+|        |                                                                            |
+|        v        FIFO channels (cl-channel)                                          |
+|   Pi ====App + Marker====&gt; Pj      (cl-transport delivers; order preserved)          |
+|        |                                                                            |
+|        v                                                                            |
+|   cl-snapshot PROTOCOL:                                                              |
+|     initiate(Pi): record own state; send Marker on ALL outgoing channels            |
+|     on Marker(s) at Pj from channel c:                                              |
+|        if first marker for s: record own state; mark c empty;                       |
+|                               start RECORDING all other incoming channels;          |
+|                               send Marker on all outgoing                           |
+|        else: stop recording c (its recorded msgs = those received since first marker)|
+|        |                                                                            |
+|        v                                                                            |
+|   cl-recorder: collect ProcessState (state @ first marker) + per-channel msg lists   |
+|        |                                  -&gt; GLOBAL SNAPSHOT                         |
+|        v                                                                            |
+|   cl-verify (consistent-cut check)     cl-detect (termination / deadlock /           |
+|        ^                                 conservation over the snapshot)             |
+|        |                                                                            |
+|   cl-sim (deterministic scheduler, seed) drives the whole run reproducibly           |
+|   cl-cli (run / snapshot / detect / verify)                                          |
++------------------------------------------------------------------------------------+</code></pre></details>
+<h3 id="sec-3-2">3.2 Subsystem Descriptions</h3>
+<p><strong>cl-core</strong> — zero-I/O vocabulary crate; the root of the workspace dependency DAG. Defines every shared type: ProcessId(u32), ChannelId{from,to}, SnapshotId{initiator,seq}, Message enum (App(AppPayload) | Marker(SnapshotId)), ProcessState, RecordStatus (NotStarted | Recording | Done), SnapshotState, GlobalSnapshot, Event (Send | Receive | Internal), Cut (per-process frontier), VectorClock (Map&lt;ProcessId,u64&gt;), DeliverySchedule, StableProperty. All other crates import cl-core; cl-core imports nothing from the workspace. A type change in cl-core is a cross-cutting breaking change — treat as a published API boundary.</p>
+<p><strong>cl-channel</strong> — directed, reliable, FIFO message queue between exactly two processes. Internal state: a <code>VecDeque&lt;Message&gt;</code> preserving send order. Interface: <code>enqueue(msg)</code> on send side; <code>dequeue() -&gt; Option&lt;Message&gt;</code> on receive side; <code>drain_recorded() -&gt; Vec&lt;AppPayload&gt;</code> for snapshot channel-state extraction. The FIFO invariant (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-2">I2</a>) is the structural precondition for Chandy-Lamport correctness: a marker must not arrive before messages sent before it on the same channel. cl-channel enforces this by construction — order is determined by insertion order in the deque. No concurrency internally; cl-sim drives all dequeue calls.</p>
+<p><strong>cl-process</strong> — models one logical process: holds AppState (application-defined), a map of outgoing ChannelIds to cl-channel references, a map of incoming ChannelIds, and a per-snapshot <code>HashMap&lt;SnapshotId, ProcessState&gt;</code>. Exposes: <code>send(channel_id, msg)</code> (enqueues into the channel, logs a Send event), <code>on_receive(channel_id, msg, handler)</code> (dispatches to the AppHandler trait, logs a Receive event), <code>internal_transition(handler)</code> (application step, logs Internal event). Snapshot logic is injected by cl-snapshot calling into the process; the process does not implement the protocol itself. Application logic is provided by an <code>AppHandler</code> trait impl (supplied by cl-app). Process boundaries are the trust boundary: no process reads another&#39;s AppState directly.</p>
+<p><strong>cl-transport</strong> — passive registry that maps ChannelId to a (sender-process, receiver-process, channel) triple. Used by cl-process.send to locate the channel and by cl-sim.deliver to route a dequeued message to the receiving process. In the simulated backend, cl-transport holds no message buffers; messages reside in cl-channel&#39;s deque. Interface: <code>register(channel_id, sender, receiver)</code>, <code>send(channel_id, msg)</code> (delegates to cl-channel.enqueue), <code>deliver(channel_id) -&gt; Option&lt;DeliveryToken&gt;</code> (dequeues one message, returns a token cl-sim uses to call cl-process.on_receive). No persistence; no acknowledgement; no retransmit.</p>
+<p><strong>cl-app</strong> — two concrete distributed computations implementing the AppHandler trait: (1) TokenRingApp — a fixed number of tokens circulate around a ring; total tokens across all processes plus all channels is the conservation invariant; (2) BankTransferApp — processes send money amounts on channels; total money across all process balances plus all in-flight transfers is conserved. Both apps provide an <code>invariant_value(state: &amp;AppState) -&gt; u64</code> method that cl-detect uses for conservation checking (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-6">I6</a>). Data flow: cl-app state is embedded in AppState; cl-process snapshots it as part of SnapshotState at first-marker time; cl-detect sums all process and channel contributions.</p>
+<p><strong>cl-sim</strong> — seeded deterministic scheduler. Maintains a pending-delivery set: for each channel with non-empty queue, the next deliverable (channel_id, head_index) pair. Each step: apply a deterministic selection function (seeded PRNG or round-robin) to choose a channel; call transport.deliver(channel_id); append the resulting Event (with updated VectorClock) to the EventLog. Reproducibility invariant (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-9">I9</a>): same seed → same event sequence → same snapshot state → same verifier verdict. cl-sim serializes all process steps: no real parallelism; all interleaving is under cl-sim&#39;s control. cl-sim also supports: <code>inject_snapshot_initiation(pid, snapshot_id, step)</code> to trigger a snapshot at a scheduled step; <code>violate_fifo_at(channel_id, step)</code> for the Phase 14 negative test (reorders two adjacent messages on a channel). cl-sim must not depend on cl-snapshot (avoids coupling scheduling to protocol).</p>
+<p><strong>cl-snapshot</strong> — implements the Chandy-Lamport protocol as rule applications invoked by cl-process&#39;s message dispatch and by an external initiation call. Manages a <code>HashMap&lt;(ProcessId, SnapshotId), PerProcessSnapshotState&gt;</code> where PerProcessSnapshotState contains: <code>local_state_recorded: bool</code>, <code>channel_status: HashMap&lt;ChannelId, RecordStatus&gt;</code>, <code>recorded_msgs: HashMap&lt;ChannelId, Vec&lt;AppPayload&gt;&gt;</code>. Rules: (a) <code>initiate(pid, snapshot_id, process)</code> — if not already started, record process local state, set all incoming channels to NotStarted, set all outgoing channels to Recording, send Marker(snapshot_id) on all outgoing channels before any further app message; (b) <code>on_marker(pid, snapshot_id, from_channel, process, recorder)</code> — if first marker for this snapshot: record local state, mark from_channel Done (empty), set all other incoming channels to Recording, send Marker on all outgoing; else: stop recording from_channel (Done), move its recorded list to SnapshotState; call recorder.maybe_complete(pid, snapshot_id). This is the most semantics-dense crate; the state machine is the core contribution.</p>
+<p><strong>cl-recorder</strong> — collects SnapshotState contributions from processes as they finish (receive marker on every incoming channel). Holds a <code>HashMap&lt;SnapshotId, SnapshotAccumulator&gt;</code> where SnapshotAccumulator tracks: which processes have submitted, the assembled GlobalSnapshot under construction. Interface: <code>submit(snapshot_id, pid, state: SnapshotState)</code> — adds process&#39;s local state + recorded channel messages; <code>is_complete(snapshot_id) -&gt; bool</code> — all P processes have submitted and all C channels have RecordStatus::Done; <code>assemble(snapshot_id) -&gt; GlobalSnapshot</code> — final immutable snapshot. Completion detection is O(P*C) check; acceptable at simulation scale. Concurrency: protected by a Mutex in multi-snapshot scenarios (Phase 11).</p>
+<p><strong>cl-verify</strong> — takes a completed GlobalSnapshot and the VectorClock-annotated EventLog from cl-sim and mechanically checks the consistent-cut invariant (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-1">I1</a>). Algorithm: (a) reconstruct the Cut — per-process event-count at the time of each process&#39;s first-marker recording; (b) for every Receive event in the cut, find the matching Send event using Message identity; (c) assert the Send event is also in the cut (its VectorClock ≤ the Cut frontier at the sender) OR the message appears in the snapshot&#39;s channel-state list; (d) assert no message sent after the cut (sender&#39;s clock &gt; cut frontier) appears in any process&#39;s received set before the cut. Returns <code>VerifyResult::Consistent</code> or <code>VerifyResult::Violated { evidence: Vec&lt;CausalViolation&gt; }</code>. The verifier is the mechanized proof; it must pass on all valid runs and must return Violated on FIFO-violation injections.</p>
+<p><strong>cl-detect</strong> — evaluates stable properties over a completed GlobalSnapshot without re-running the simulation. Three detectors: (a) Termination — all process AppStates report idle (via AppHandler::is_idle) AND all channel states are empty Vec; (b) Deadlock — construct WaitForGraph from AppStates (via AppHandler::wait_for edges); run DFS cycle detection; return the cycle if found; (c) Conservation — for each conserved quantity (tokens, money), sum AppHandler::invariant_value over all process states plus sum AppPayload values over all channel states; compare to initial value; report delta if non-zero. Returns <code>Vec&lt;StablePropertyResult&gt;</code>. The soundness argument (P8, <a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-7">I7</a>): stable properties are monotone — once true, remain true; a consistent snapshot (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-1">I1</a>) captures a reachable state; therefore a stable property true in the snapshot is true in the current execution.</p>
+<p><strong>cl-cli</strong> — top-level entry point. Parses arguments: <code>--processes N</code>, <code>--topology [ring|full|custom]</code>, <code>--app [token-ring|bank-transfer]</code>, <code>--seed U64</code>, <code>--initiate PID@STEP</code>, <code>--output [text|json]</code>. Subcommands: <code>run</code> (execute simulation, print event log), <code>snapshot</code> (run + trigger snapshot + print GlobalSnapshot), <code>detect</code> (snapshot + run cl-detect, print StablePropertyResult), <code>verify</code> (snapshot + run cl-verify, print VerifyResult + evidence). No business logic in cl-cli; all calls delegate to the other crates. Depends on all 10 other crates.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Entity Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Crate</th>
+<th>Role</th>
+<th>Mutability</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>ProcessId(u32)</code></td>
+<td>cl-core</td>
+<td>Node identity; total-ordered</td>
+<td>Immutable</td>
+</tr>
+<tr>
+<td><code>ChannelId { from, to }</code></td>
+<td>cl-core</td>
+<td>Directed FIFO edge; key for channel state maps</td>
+<td>Immutable</td>
+</tr>
+<tr>
+<td><code>SnapshotId { initiator, seq }</code></td>
+<td>cl-core</td>
+<td>One unique snapshot run</td>
+<td>Immutable</td>
+</tr>
+<tr>
+<td><code>Message</code> (App|Marker)</td>
+<td>cl-core</td>
+<td>Only content on a channel</td>
+<td>Immutable once sent</td>
+</tr>
+<tr>
+<td><code>AppPayload</code></td>
+<td>cl-core</td>
+<td>Opaque bytes / token count / transfer amount</td>
+<td>App-defined</td>
+</tr>
+<tr>
+<td><code>ProcessState</code></td>
+<td>cl-process</td>
+<td>Runtime per-process mutable record</td>
+<td>Mutable</td>
+</tr>
+<tr>
+<td><code>RecordStatus</code></td>
+<td>cl-core</td>
+<td>Per-channel recording phase per snapshot</td>
+<td>Mutable per snapshot</td>
+</tr>
+<tr>
+<td><code>SnapshotState</code></td>
+<td>cl-recorder</td>
+<td>Captured local state + channel message lists</td>
+<td>Write-once per sid</td>
+</tr>
+<tr>
+<td><code>GlobalSnapshot</code></td>
+<td>cl-recorder</td>
+<td>Assembled final artefact</td>
+<td>Immutable after assembly</td>
+</tr>
+<tr>
+<td><code>Event</code></td>
+<td>cl-core</td>
+<td>Audit log unit; total-ordered per process</td>
+<td>Append-only</td>
+</tr>
+<tr>
+<td><code>Cut</code></td>
+<td>cl-verify</td>
+<td>Per-process event-count frontier</td>
+<td>Derived</td>
+</tr>
+<tr>
+<td><code>VectorClock</code></td>
+<td>cl-verify</td>
+<td>Causal timestamps; attached to events</td>
+<td>Monotone increment</td>
+</tr>
+<tr>
+<td><code>DeliverySchedule</code></td>
+<td>cl-sim</td>
+<td>Seeded ordered plan of (channel, index) pairs</td>
+<td>Consumed</td>
+</tr>
+<tr>
+<td><code>StableProperty</code></td>
+<td>cl-detect</td>
+<td>Termination | Deadlocked | Conserved(inv)</td>
+<td>Evaluated over snapshot</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Process State Machine</h3>
+<p>Each process P, per snapshot <code>s</code>, tracks <code>RecordStatus</code> for every incoming channel.</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">stateDiagram-v2
+  state &quot;Process-recording phase for (P, s)&quot; as PH {
+    state &quot;IDLE&quot; as IDLE
+    state &quot;ACTIVE&quot; as ACTIVE
+    state &quot;DONE_c&quot; as DONEC
+    state &quot;DONE_all_channels&quot; as DALL
+    state &quot;SNAPSHOT_COMPLETE(P, s)&quot; as SC
+    IDLE --&gt; ACTIVE : first Marker(s) on any c&#39;
+    ACTIVE --&gt; DONEC : Marker(s) on c (channel c finishes)
+    ACTIVE --&gt; ACTIVE : App msg on c while REC (enqueue to channel_msgs[c])
+    DALL --&gt; SC
+  }
+  state &quot;Per-channel RecordStatus, for each c in incoming(P)&quot; as CHS {
+    state &quot;NS (NotStarted)&quot; as NS
+    state &quot;REC (Recording)&quot; as REC
+    state &quot;DONE&quot; as DONE
+    NS --&gt; REC : first Marker(s) received by P on any channel (start recording c unless c was marker channel)
+    NS --&gt; DONE : Marker(s) arrives on THIS channel AND it is the first marker (c empty: no in-flight)
+    REC --&gt; REC : App msg received on c (append msg to SnapshotState.channel_msgs[c])
+    REC --&gt; DONE : Marker(s) arrives on c
+    DONE --&gt; DONE : terminal, no messages from c accepted into recording
+  }</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.2.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>State labels: NS=NotStarted, REC=Recording, DONE=Done
+Transitions per channel c ∈ incoming(P):
+
+  GLOBAL process-recording phase for (P, s):
+    IDLE ──[first Marker(s) on any c&#39;]──&gt; ACTIVE
+    ACTIVE ──[Marker(s) on c]──&gt; DONE_c   (channel c finishes)
+    ACTIVE ──[App msg on c while REC]──&gt; ACTIVE (enqueue to channel_msgs[c])
+    DONE_all_channels ──&gt; SNAPSHOT_COMPLETE(P, s)
+
+Per-channel RecordStatus state machine:
+  NS ──[first Marker(s) received by P on any channel]──&gt; REC (start recording c unless c was marker channel)
+  NS ──[Marker(s) arrives on THIS channel AND it is the first marker]──&gt; DONE (channel c is empty: no in-flight)
+  REC ──[App msg received on c]──&gt; REC (append msg to SnapshotState.channel_msgs[c])
+  REC ──[Marker(s) arrives on c]──&gt; DONE
+  DONE ──[]──&gt; DONE (terminal; no messages from c accepted into recording)</code></pre></details>
+<h4 id="sec-8-2-1">8.2.1 Full per-process phase table</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Trigger</th>
+<th>Pre-condition</th>
+<th>Action</th>
+<th>Post-state</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>initiate(P, s)</code></td>
+<td>P is initiator</td>
+<td>Record <code>local_state</code>; send <code>Marker(s)</code> on all outgoing channels</td>
+<td>All incoming channels: NS→REC (none have arrived yet)</td>
+</tr>
+<tr>
+<td><code>Receive(Marker(s), c)</code> — first for s</td>
+<td>P has no entry for s</td>
+<td>Record <code>local_state</code>; set <code>channel_msgs[c]=[]</code>; set <code>RecordStatus[c]=DONE</code>; set all other incoming <code>RecordStatus=REC</code>; send <code>Marker(s)</code> on all outgoing</td>
+<td>P enters ACTIVE</td>
+</tr>
+<tr>
+<td><code>Receive(App(m), c)</code></td>
+<td><code>RecordStatus[c]==REC</code></td>
+<td>Append m to <code>SnapshotState.channel_msgs[c]</code></td>
+<td>ACTIVE (unchanged)</td>
+</tr>
+<tr>
+<td><code>Receive(App(m), c)</code></td>
+<td><code>RecordStatus[c]==DONE</code></td>
+<td>Deliver to app only; not recorded</td>
+<td>ACTIVE or COMPLETE</td>
+</tr>
+<tr>
+<td><code>Receive(App(m), c)</code></td>
+<td><code>RecordStatus[c]==NS</code></td>
+<td>Deliver to app only</td>
+<td>IDLE</td>
+</tr>
+<tr>
+<td><code>Receive(Marker(s), c)</code> — subsequent</td>
+<td><code>RecordStatus[c]==REC</code></td>
+<td>Set <code>RecordStatus[c]=DONE</code></td>
+<td>ACTIVE or COMPLETE if all channels DONE</td>
+</tr>
+<tr>
+<td>All channels DONE</td>
+<td>All <code>RecordStatus==DONE</code></td>
+<td>Notify cl-recorder; snapshot complete for P</td>
+<td>COMPLETE</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Message Grammar (EBNF)</h3>
+<pre class="diagram"><code>channel-stream  ::= message*
+message         ::= app-message | marker-message
+app-message     ::= APP_TAG payload-bytes
+marker-message  ::= MARKER_TAG snapshot-id
+snapshot-id     ::= uint32 uint64       (* initiator.id, seq *)
+payload-bytes   ::= length-prefixed-bytes
+APP_TAG         ::= 0x01
+MARKER_TAG      ::= 0x02</code></pre>
+<p>Wire layout (little-endian, fixed header):</p>
+<pre class="diagram"><code>Bytes  0     : tag (u8)         — 0x01=App, 0x02=Marker
+Bytes  1–4   : sender ProcessId (u32)
+Bytes  5–8   : seq_no (u32)     — per-channel monotone send counter (FIFO proof)
+--- App message ---
+Bytes  9–12  : payload_len (u32)
+Bytes 13..   : payload (opaque)
+--- Marker message ---
+Bytes  9–12  : initiator ProcessId (u32)
+Bytes 13–20  : snapshot seq (u64)</code></pre>
+<p>FIFO invariant (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-2">I2</a>): <code>seq_no</code> must be exactly <code>prev_seq_no + 1</code> on delivery; out-of-order detected and rejected.</p>
+<h3 id="sec-8-4">8.4 Channel Model</h3>
+<pre class="diagram"><code>Channel(c: ChannelId):
+  queue: VecDeque&lt;(seq_no: u32, msg: Message)&gt;  — ordered, reliable
+  next_send: u32                                 — monotone counter
+  next_recv: u32                                 — expected seq_no
+
+send(m):    enqueue (next_send++, m)
+deliver():  pop front if non-empty; assert seq_no == next_recv++</code></pre>
+<p>Invariant <a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-2">I2</a> enforcement: if delivered <code>seq_no != next_recv</code>, channel is corrupt — panic in simulator, emit error in real transport.</p>
+<h3 id="sec-8-5">8.5 Snapshot Assembly Model</h3>
+<pre class="diagram"><code>GlobalSnapshot:
+  snapshot_id   : SnapshotId
+  process_states: BTreeMap&lt;ProcessId, AppState&gt;        — state at first marker per process
+  channel_states: BTreeMap&lt;ChannelId, Vec&lt;AppPayload&gt;&gt; — in-flight pre-snapshot messages
+  completed_at  : EventIndex                           — simulator time when last process finished
+
+Assembly sequence:
+  1. Each process P contributes: (P, SnapshotState.local_state_at_first_marker)
+  2. Each channel c contributes: (c, SnapshotState.channel_msgs[c])
+  3. Recorder waits for all |processes| completion events before sealing GlobalSnapshot
+  4. Sealed snapshot is immutable; hash-stamped for integrity</code></pre>
+<h3 id="sec-8-6">8.6 Vector Clock Attachment and Cut Derivation</h3>
+<p>Each <code>Event</code> carries a <code>VectorClock</code> snapshot at time of occurrence:</p>
+<pre class="diagram"><code>Event { kind: EventKind, vc: VectorClock, process: ProcessId, channel: Option&lt;ChannelId&gt; }
+EventKind ::= Send(ChannelId, Message) | Receive(ChannelId, Message) | Internal</code></pre>
+<p>Cut derivation from event history:</p>
+<pre class="diagram"><code>Cut[P] = index of last event included in snapshot for process P
+       = index of the FIRST marker receipt event for P (for snapshot s)</code></pre>
+<p>Cut consistency predicate (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-1">I1</a>):</p>
+<pre class="diagram"><code>∀ Receive(c, m) ∈ cut:  ∃ Send(c, m) ∈ cut  OR  m ∈ channel_states[c]
+∀ Send(c, m) ∉ cut AND Send(c, m) happened-before cut[receiver]:  m ∈ channel_states[c]</code></pre>
+<p>VectorClock happened-before: <code>vc_a &lt; vc_b</code> iff <code>∀p: vc_a[p] &lt;= vc_b[p]</code> and <code>∃p: vc_a[p] &lt; vc_b[p]</code>.</p>
+<h3 id="sec-8-7">8.7 Concurrent Snapshot Isolation</h3>
+<p>Per-process runtime recording map keyed by SnapshotId:</p>
+<pre class="diagram"><code>ProcessState.recordings: HashMap&lt;SnapshotId, PerSnapshotRecord&gt;
+PerSnapshotRecord:
+  local_state     : AppState                          — captured at first marker
+  channel_status  : HashMap&lt;ChannelId, RecordStatus&gt;
+  channel_msgs    : HashMap&lt;ChannelId, Vec&lt;AppPayload&gt;&gt;</code></pre>
+<p>Isolation invariant (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-8">I8</a>): operations on <code>recordings[s1]</code> never access <code>recordings[s2]</code> for <code>s1 ≠ s2</code>. Markers carry their <code>SnapshotId</code>; dispatch is keyed strictly by id.</p>
+<h3 id="sec-8-8">8.8 Stable-Property Detection Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Snapshot predicate</th>
+<th>Detection logic</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Terminated</td>
+<td>All processes idle AND all channel states empty</td>
+<td><code>∀P: state[P].idle == true</code> AND <code>∀c: channel_states[c].is_empty()</code></td>
+</tr>
+<tr>
+<td>Deadlocked</td>
+<td>Wait-for cycle in snapshot</td>
+<td>Build wait-for graph from <code>process_states</code>; DFS cycle detect</td>
+</tr>
+<tr>
+<td>Conserved(f)</td>
+<td><code>f(process_states, channel_states) == initial_value</code></td>
+<td>Sum tokens/money across all states + in-flight msgs</td>
+</tr>
+</tbody></table></div>
+<p>Stable-property soundness (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-7">I7</a>): property true in consistent snapshot remains true in real execution — because the snapshot is reachable and the property is monotone-true.</p>
+<h3 id="sec-8-9">8.9 Event History and Trace Layout</h3>
+<p>Trace file format (binary, append-only, per-run):</p>
+<pre class="diagram"><code>TraceHeader: magic(4B) | version(u8) | process_count(u32) | seed(u64)
+TraceRecord: timestamp(u64) | process_id(u32) | event_tag(u8) | vc_bytes(variable) | payload(variable)
+event_tag: 0x10=Send, 0x11=Receive, 0x12=Internal, 0x20=MarkerSend, 0x21=MarkerReceive,
+           0x30=SnapshotBegin, 0x31=SnapshotComplete</code></pre>
+<p>Index file: <code>trace.idx</code> maps <code>(ProcessId, event_seq) → file_offset</code> for O(1) lookup during verification.</p>
+<h3 id="sec-8-10">8.10 Worked Example — Correct Snapshot</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">sequenceDiagram
+  autonumber
+  participant P0
+  participant P1
+  participant P2
+  Note over P0,P2: Topology: P0 → P1 → P2 → P0 (ring), 1 token starts at P0&lt;br/&gt;Initial states: P0={token=1}, P1={token=0}, P2={token=0}&lt;br/&gt;Channels: c01=(P0→P1), c12=(P1→P2), c20=(P2→P0), all empty
+  Note over P0,P1: Step 1: P0 sends token to P1 via c01
+  P0-&gt;&gt;P1: c01: App(token) enqueued
+  Note over P0: Step 2: P0 initiates snapshot s0 = {initiator=P0, seq=0}&lt;br/&gt;records local_state={token=0} (already sent token)
+  P0-&gt;&gt;P1: c01: Marker(s0) (after the token)
+  Note over P1: Step 3: c01 delivers App(token) first (FIFO): P1.token=1
+  P0-&gt;&gt;P1: c01 delivers Marker(s0)
+  Note over P1: First marker for P1: record local_state={token=1}&lt;br/&gt;c01 was marker channel: RecordStatus[c01]=DONE, msgs=[]&lt;br/&gt;Start recording c20 (only other incoming): RecordStatus[c20]=REC
+  P1-&gt;&gt;P2: c12: Marker(s0)
+  Note over P2: Step 4: First marker for P2: record local_state={token=0}&lt;br/&gt;RecordStatus[c12]=DONE, msgs=[]&lt;br/&gt;Start recording c01 (P2 has no other incoming in this ring,&lt;br/&gt;actually c01 not incoming to P2)
+  P2-&gt;&gt;P0: c20: Marker(s0)
+  Note over P0: Step 5: P0 is initiator, already ACTIVE with all outgoing sent&lt;br/&gt;RecordStatus[c20]=DONE, all channels DONE → P0 complete
+  Note over P1: Step 6: c20 delivers Marker(s0) to P1 (P1 was recording c20)&lt;br/&gt;RecordStatus[c20]=DONE, all channels DONE → P1 complete&lt;br/&gt;channel_msgs[c20]=[] (no app msgs arrived on c20 during recording window)
+  Note over P0,P2: GlobalSnapshot s0:&lt;br/&gt;process_states: {P0: {token=0}, P1: {token=1}, P2: {token=0}}&lt;br/&gt;channel_states: {c01: [], c12: [], c20: []}&lt;br/&gt;total tokens = 0+1+0 + 0+0+0 = 1 ✓ conservation holds&lt;br/&gt;consistency: token was in-flight on c01 before snapshot, but P1 recorded&lt;br/&gt;its state AFTER receiving it → token appears in P1.local_state,&lt;br/&gt;not in channel_states → cut is consistent (I1 satisfied)</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.10.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>Topology: P0 → P1 → P2 → P0 (ring); 1 token starts at P0
+
+Initial states: P0={token=1}, P1={token=0}, P2={token=0}
+Channels: c01=(P0→P1), c12=(P1→P2), c20=(P2→P0); all empty
+
+Step 1: P0 sends token to P1 via c01: App(token) enqueued on c01
+Step 2: P0 initiates snapshot s0 = {initiator=P0, seq=0}
+        → P0 records local_state={token=0} (already sent token)
+        → P0 sends Marker(s0) on all outgoing: c01 (after the token)
+Step 3: c01 delivers App(token) to P1 first (FIFO): P1.token=1
+        c01 delivers Marker(s0) to P1:
+        → First marker for P1: record local_state={token=1}
+        → channel c01 was marker channel: RecordStatus[c01]=DONE, msgs=[]
+        → Start recording c20 (only other incoming): RecordStatus[c20]=REC
+        → P1 sends Marker(s0) on c12
+Step 4: c12 delivers Marker(s0) to P2:
+        → First marker for P2: record local_state={token=0}
+        → RecordStatus[c12]=DONE, msgs=[]
+        → Start recording c01 (P2 has no other incoming in this ring; actually c01 not incoming to P2)
+        → P2 sends Marker(s0) on c20
+Step 5: c20 delivers Marker(s0) to P0:
+        → RecordStatus[c20] at P0: P0 is initiator, was already in ACTIVE with all outgoing sent
+        → P0 marks RecordStatus[c20]=DONE; all channels DONE → P0 complete
+Step 6: c20 delivers Marker(s0) to P1 (P1 was recording c20):
+        → RecordStatus[c20]=DONE; all channels DONE → P1 complete
+        → channel_msgs[c20]=[] (no app msgs arrived on c20 during recording window)
+
+GlobalSnapshot s0:
+  process_states: {P0: {token=0}, P1: {token=1}, P2: {token=0}}
+  channel_states: {c01: [], c12: [], c20: []}
+  total tokens = 0+1+0 + 0+0+0 = 1 ✓ conservation holds
+  consistency: token was in-flight on c01 before snapshot; but P1 recorded its state AFTER receiving it
+               → token appears in P1.local_state, not in channel_states → cut is consistent (I1 satisfied)</code></pre></details>
+<h3 id="sec-8-11">8.11 Failure-Path Example — FIFO Violation</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">sequenceDiagram
+  autonumber
+  participant P0
+  participant P1
+  participant V as cl-verify
+  Note over P0,P1: Suppose channel c01 delivers Marker(s0) BEFORE the App(token) it preceded (FIFO broken)
+  P0-&gt;&gt;P1: c01 delivers Marker(s0) first (out of order)
+  Note over P1: Step A: records local_state={token=0} (token not yet arrived)&lt;br/&gt;RecordStatus[c01]=DONE, channel_msgs[c01]=[]
+  P0-&gt;&gt;P1: c01 delivers App(token)
+  Note over P1: Step B: P1.token=1 (after snapshot recorded)&lt;br/&gt;not in recording window (c01 is DONE), not in channel_states
+  Note over P0,P1: Result in GlobalSnapshot s0:&lt;br/&gt;process_states: {P0: {token=0}, P1: {token=0}, P2: {token=0}}&lt;br/&gt;channel_states: all empty&lt;br/&gt;total tokens = 0 ≠ 1 → conservation violated, snapshot is NOT consistent
+  P1-&gt;&gt;V: GlobalSnapshot s0
+  Note over V: Detects: Send(c01, App(token)) appears before P0&#39;s cut index,&lt;br/&gt;but Receive(c01, App(token)) appears after P1&#39;s cut index,&lt;br/&gt;and App(token) is absent from channel_states[c01] → I1 violated
+  Note over V: Emits: CutInconsistency { channel: c01, missing_msg: token }</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.11.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>Suppose channel c01 delivers Marker(s0) BEFORE the App(token) it preceded (FIFO broken):
+
+Step A: c01 delivers Marker(s0) to P1 first (out of order)
+        → P1 records local_state={token=0} (token not yet arrived)
+        → RecordStatus[c01]=DONE; channel_msgs[c01]=[]
+Step B: c01 delivers App(token) to P1: P1.token=1 (after snapshot recorded)
+        → not in recording window (c01 is DONE); not in channel_states
+
+Result in GlobalSnapshot s0:
+  process_states: {P0: {token=0}, P1: {token=0}, P2: {token=0}}
+  channel_states: all empty
+  total tokens = 0 ≠ 1  → conservation violated; snapshot is NOT consistent
+
+cl-verify detects: a Send(c01, App(token)) appears before P0&#39;s cut index,
+  but Receive(c01, App(token)) appears after P1&#39;s cut index,
+  and App(token) is absent from channel_states[c01] → I1 violated.
+cl-verify emits: CutInconsistency { channel: c01, missing_msg: token }</code></pre></details>
+<p>This is the Phase 14 negative test: FIFO-violation mode in cl-sim triggers exactly this path.</p>
+<h3 id="sec-8-12">8.12 Edge Cases</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Edge case</th>
+<th>Description</th>
+<th>Expected behavior</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Initiator receives its own marker via loopback</td>
+<td>Ring topology: P0 sends marker on c_N0; receives it from c_N0</td>
+<td>Treat as a subsequent-marker event; RecordStatus[c_N0]=DONE; msgs recorded in window</td>
+</tr>
+<tr>
+<td>Process with no incoming channels</td>
+<td>Source node; never receives a marker</td>
+<td>Snapshot complete immediately after initiation (zero channels to record)</td>
+</tr>
+<tr>
+<td>Process with no outgoing channels</td>
+<td>Sink node; receives markers; never sends</td>
+<td>Correctly receives all markers; sends no outgoing markers; finishes when all incoming DONE</td>
+</tr>
+<tr>
+<td>Empty channel at snapshot</td>
+<td>No messages in flight on c at snapshot time</td>
+<td>channel_states[c] = [] (valid, not error)</td>
+</tr>
+<tr>
+<td>Concurrent snapshots, overlapping marker windows</td>
+<td>P mid-recording s1 when s2 marker arrives</td>
+<td>Dispatch by SnapshotId; s1 and s2 recording maps are independent (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-8">I8</a>)</td>
+</tr>
+<tr>
+<td>Very late initiator</td>
+<td>Snapshot s initiated after most messages already delivered</td>
+<td>Small or empty channel states; valid consistent cut</td>
+</tr>
+<tr>
+<td>Duplicate marker delivery</td>
+<td>Same (SnapshotId, channel) marker delivered twice (transport bug)</td>
+<td>seq_no check catches duplicate; discard; log error</td>
+</tr>
+<tr>
+<td>Zero-process system</td>
+<td>n=0</td>
+<td>GlobalSnapshot trivially complete; empty maps; no error</td>
+</tr>
+<tr>
+<td>Single-process system</td>
+<td>n=1, no channels</td>
+<td>Snapshot = just local_state; channel_states={}; trivially consistent</td>
+</tr>
+<tr>
+<td>Snapshot initiated simultaneously by two processes</td>
+<td>s_A={P0,1} and s_B={P1,1} both start concurrently</td>
+<td>Two independent recordings; both complete; both consistent (<a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-8">I8</a>, <a class="cite" href="/system-design-blueprints/systems/chandy-lamport-snapshot/reliability/#inv-10">I10</a>)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-13">8.13 Scheduling Semantics (cl-sim)</h3>
+<pre class="diagram"><code>DeliverySchedule: Vec&lt;(ChannelId, send_index: u32)&gt;
+  — generated from seed via seeded PRNG (ChaCha8Rng)
+  — each step: select a non-empty channel uniformly at random (weighted or unweighted)
+  — deliver its head message (FIFO respected: always head of queue)
+  — interleaved with process internal steps and snapshot initiations
+  — snapshot initiation injected at configurable step offsets (or random from seed)
+  — event log records chosen steps for full reproducibility (I9)</code></pre>
+<p>Invariant: scheduler never skips past a channel&#39;s head (FIFO preserved by construction).</p>
+<h3 id="sec-8-14">8.14 AppState and Conservation Invariant</h3>
+<pre class="diagram"><code>AppState (token ring):    { tokens: u32 }
+AppState (bank transfer): { balance: i64 }
+
+Conservation check:
+  token ring:    Σ process_states[P].tokens + Σ |channel_states[c]| * token_value == N_tokens_initial
+  bank transfer: Σ process_states[P].balance + Σ channel_states[c].iter().sum() == total_initial</code></pre>
+<p>cl-detect evaluates this over <code>GlobalSnapshot</code> without re-running any process logic.</p>
+<h3 id="sec-8-15">8.15 Core Type Signatures (cl-core)</h3>
+<pre class="code language-rust" data-lang="rust"><code>// Identities
+pub struct ProcessId(pub u32);
+pub struct ChannelId { pub from: ProcessId, pub to: ProcessId }
+pub struct SnapshotId { pub initiator: ProcessId, pub seq: u64 }
+
+// Message variants
+pub enum Message { App(AppPayload), Marker(SnapshotId) }
+pub struct AppPayload(pub Vec&lt;u8&gt;);  // opaque; app interprets
+
+// Recording bookkeeping
+pub enum RecordStatus { NotStarted, Recording, Done }
+
+// Event history unit
+pub enum EventKind {
+    Send { channel: ChannelId, msg: Message },
+    Receive { channel: ChannelId, msg: Message },
+    Internal,
+}
+pub struct Event { pub kind: EventKind, pub vc: VectorClock, pub process: ProcessId }
+
+// Stable properties
+pub enum StableProperty {
+    Terminated,
+    Deadlocked,
+    Conserved { invariant_name: String },
+}</code></pre>
+<h3 id="sec-8-16">8.16 Core Type Signatures (cl-recorder, cl-snapshot, cl-verify)</h3>
+<pre class="code language-rust" data-lang="rust"><code>// Per-process snapshot record
+pub struct PerSnapshotRecord {
+    pub local_state: Box&lt;dyn Any&gt;,              // AppState captured at first marker
+    pub channel_status: HashMap&lt;ChannelId, RecordStatus&gt;,
+    pub channel_msgs: HashMap&lt;ChannelId, Vec&lt;AppPayload&gt;&gt;,
+}
+
+// Assembled output
+pub struct GlobalSnapshot {
+    pub snapshot_id: SnapshotId,
+    pub process_states: BTreeMap&lt;ProcessId, Box&lt;dyn Any&gt;&gt;,
+    pub channel_states: BTreeMap&lt;ChannelId, Vec&lt;AppPayload&gt;&gt;,
+    pub completed_at: u64,                      // simulator logical time
+}
+
+// Cut and clock types
+pub struct Cut(pub BTreeMap&lt;ProcessId, u64&gt;);   // per-process event index frontier
+pub struct VectorClock(pub BTreeMap&lt;ProcessId, u64&gt;);
+
+// Verifier result
+pub enum ConsistencyResult {
+    Consistent,
+    Inconsistent { violations: Vec&lt;CutViolation&gt; },
+}
+pub struct CutViolation {
+    pub channel: ChannelId,
+    pub msg: AppPayload,
+    pub kind: ViolationKind,
+}
+pub enum ViolationKind { MissingInProcessState, MissingInChannelState }</code></pre>
+<h3 id="sec-8-17">8.17 Recorder Lifecycle State Machine</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">stateDiagram-v2
+  direction LR
+  COLLECTING --&gt; COLLECTING : process P sends completion (pending_count--)
+  COLLECTING --&gt; ASSEMBLING : pending_count == 0
+  ASSEMBLING --&gt; SEALED : all process/channel data merged
+  SEALED --&gt; SEALED : immutable, hash computed
+  note right of ASSEMBLING
+    I5: ASSEMBLING to SEALED only when
+    process_states == n AND channel_states == e
+    (all channels registered at init time)
+  end note
+  note right of SEALED
+    Once SEALED no mutation of GlobalSnapshot
+    is permitted, any write attempt = panic
+  end note</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.17.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>RecorderState for a single snapshot s:
+
+  COLLECTING ──[process P sends completion]──&gt; COLLECTING (pending_count--)
+  COLLECTING ──[pending_count == 0]──────────&gt; ASSEMBLING
+  ASSEMBLING ──[all process/channel data merged]──&gt; SEALED
+  SEALED     ──[]──────────────────────────────&gt; SEALED (immutable; hash computed)
+
+Invariant I5: transition ASSEMBLING→SEALED only when |process_states| == n AND
+              |channel_states| == e (all channels registered at init time).
+Invariant: once SEALED, no mutation of GlobalSnapshot is permitted; any write attempt = panic.</code></pre></details>
+<h3 id="sec-8-18">8.18 Snapshot Initiation Sequence Diagram</h3>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">sequenceDiagram
+  autonumber
+  participant P0 as Initiator P0
+  participant SN as cl-snapshot
+  participant CH as cl-channel (c01,c02)
+  participant P12 as P1, P2
+  P0-&gt;&gt;SN: initiate(s0)
+  SN-&gt;&gt;CH: record P0.state
+  SN-&gt;&gt;CH: send Marker(s0) (c01.enqueue)
+  SN-&gt;&gt;CH: send Marker(s0) (c02.enqueue)
+  Note over P0,P12: app msgs continue freely on all channels
+  CH-&gt;&gt;P12: deliver App(m) to P1 (before marker)
+  CH-&gt;&gt;P12: deliver Marker to P1
+  Note over CH: P1: first marker:&lt;br/&gt;record P1.state&lt;br/&gt;start recording c20&lt;br/&gt;send Marker(s0) c12
+  CH-&gt;&gt;P12: deliver Marker to P2
+  Note over CH: P2: first marker:&lt;br/&gt;record P2.state&lt;br/&gt;send Marker(s0) c20
+  CH--&gt;&gt;SN: c20 deliver
+  SN--&gt;&gt;P0: Marker(s0)
+  Note over P0: P0: RecordStatus[c20]=DONE&lt;br/&gt;P0 COMPLETE
+  SN-&gt;&gt;CH: notify recorder
+  P12--&gt;&gt;CH: Marker(s0) (P1, via c20 to P1)
+  Note over CH: P1 COMPLETE
+  SN-&gt;&gt;P12: assemble GlobalSnapshot
+  SN-&gt;&gt;P12: seal + hash</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.18.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>Initiator P0       cl-snapshot        cl-channel (c01,c02)   P1, P2
+    |                   |                    |                   |
+    |--initiate(s0)----&gt;|                    |                   |
+    |                   |--record P0.state--&gt;|                   |
+    |                   |--send Marker(s0)--&gt;| c01.enqueue       |
+    |                   |--send Marker(s0)--&gt;| c02.enqueue       |
+    |                   |                    |                   |
+    |               (app msgs continue freely on all channels)   |
+    |                   |                    |                   |
+    |                   |                    |--deliver App(m)--&gt;P1 (before marker)
+    |                   |                    |--deliver Marker--&gt;P1
+    |                   |                    P1: first marker:   |
+    |                   |                    record P1.state     |
+    |                   |                    start recording c20 |
+    |                   |                    send Marker(s0) c12 |
+    |                   |                    |                   |
+    |                   |                    |--deliver Marker--&gt;P2
+    |                   |                    P2: first marker:   |
+    |                   |                    record P2.state     |
+    |                   |                    send Marker(s0) c20 |
+    |                   |                    |                   |
+    |&lt;--Marker(s0)-------|&lt;---c20 deliver-----|                   |
+    | P0: RecordStatus   |                    |                   |
+    |   [c20]=DONE       |                    |                   |
+    | P0 COMPLETE        |--notify recorder--&gt;|                   |
+    |                   |                    |&lt;--Marker(s0)------P1 (via c20 to P1)
+    |                   |                    P1 COMPLETE         |
+    |                   |--assemble GlobalSnapshot--------------&gt;|
+    |                   |--seal + hash--------------------------&gt;|</code></pre></details>
+<h3 id="sec-8-19">8.19 Wait-For Graph Model (Deadlock Detection)</h3>
+<pre class="diagram"><code>WaitForGraph:
+  Nodes: ProcessId ∈ GlobalSnapshot.process_states
+  Edges: (Pi, Pj) iff state[Pi].waiting_for == Some(Pj) (blocked on message from Pj)
+  Cycle: Pi → Pj → Pk → Pi  ⟹ deadlock detected (I7: stable if cut is consistent)
+
+Derived from process_states:
+  Each AppState exposes: fn blocked_waiting_for(&amp;self) -&gt; Option&lt;ProcessId&gt;
+  cl-detect builds adjacency list; runs DFS; collects back-edges as deadlock cycles
+  Outputs: DeadlockReport { cycles: Vec&lt;Vec&lt;ProcessId&gt;&gt; }</code></pre>
+<h3 id="sec-8-20">8.20 Memory and Ownership Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Object</th>
+<th>Owner</th>
+<th>Lifetime</th>
+<th>Sharing</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>VecDeque</code> channel queue</td>
+<td><code>cl-channel::Channel</code></td>
+<td>Per-channel instance</td>
+<td><code>Arc&lt;Mutex&lt;Channel&gt;&gt;</code> shared between sender process and simulator scheduler</td>
+</tr>
+<tr>
+<td><code>PerSnapshotRecord</code></td>
+<td><code>cl-process::ProcessState.recordings</code></td>
+<td>Per snapshot until recorder seals</td>
+<td>No sharing; moved to recorder on completion</td>
+</tr>
+<tr>
+<td><code>GlobalSnapshot</code></td>
+<td><code>cl-recorder::Recorder</code></td>
+<td>Created at assembly; caller takes ownership</td>
+<td>Passed by value to cl-verify and cl-detect; immutable thereafter</td>
+</tr>
+<tr>
+<td><code>Event</code> log entries</td>
+<td><code>cl-sim::EventLog</code></td>
+<td>Append-only; never mutated after write</td>
+<td>Read by cl-verify via index; <code>Arc&lt;EventLog&gt;</code> shared</td>
+</tr>
+<tr>
+<td><code>DeliverySchedule</code></td>
+<td><code>cl-sim::Scheduler</code></td>
+<td>Created from seed; consumed step-by-step</td>
+<td>Single owner; no sharing needed</td>
+</tr>
+<tr>
+<td><code>AppState</code> clone at snapshot</td>
+<td><code>PerSnapshotRecord.local_state</code></td>
+<td>Snapshot lifetime</td>
+<td>Deep clone taken at first-marker receipt; original continues mutating in process</td>
+</tr>
+</tbody></table></div>
+<p>Invariant: no <code>&amp;mut</code> reference to <code>GlobalSnapshot</code> fields is ever handed outside <code>Recorder</code>; post-seal access is read-only (<code>&amp;GlobalSnapshot</code>).</p>
+<h3 id="sec-8-21">8.21 Transport Delivery Semantics</h3>
+<pre class="diagram"><code>cl-transport delivery contract (simulated mode):
+  1. Scheduler calls: transport.deliver_next(channel_id) -&gt; Option&lt;Message&gt;
+  2. Transport pops head of channel_id.queue (FIFO)
+  3. Calls target_process.on_receive(channel_id, message)
+  4. on_receive dispatches:
+       Message::App(p)    -&gt; app_handler(p); Event::Receive logged
+       Message::Marker(s) -&gt; cl-snapshot.handle_marker(process, s, channel_id)
+  5. All side effects (state mutations, marker sends) complete before scheduler
+     selects the next delivery step (single-threaded sim: no interleaving within a step)
+
+Real transport (cl-transport network backend, future):
+  - TCP streams per channel; seq_no header enforces FIFO at receiver
+  - Out-of-order: buffer and re-order up to MAX_REORDER_BUFFER (default 64 msgs)
+  - Loss: not modelled (reliable delivery is a precondition of Chandy-Lamport; P3/P7)</code></pre>
+<h3 id="sec-8-22">8.22 Snapshot Completion Detection</h3>
+<pre class="diagram"><code>completion_detector for snapshot s:
+  pending: BTreeSet&lt;ProcessId&gt;  — initialized to all processes at initiation
+  on process P signals COMPLETE for s:
+    pending.remove(P)
+    if pending.is_empty():
+      recorder.assemble_and_seal(s)
+      emit Event { tag: SnapshotComplete, snapshot_id: s }
+
+Invariant I5: recorder.assemble_and_seal called exactly once per s.
+Race-free in simulator: single-threaded; in multi-threaded transport, guarded by Mutex&lt;CompletionDetector&gt;.</code></pre>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

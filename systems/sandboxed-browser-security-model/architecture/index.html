@@ -1,0 +1,409 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Sandboxed Browser Security Model from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Sandboxed Browser Security Model from Scratch, hld: §3 overview + §8 domain model. Build the security model of a modern multi-process browser: the privilege separation, sandboxing, IPC trust boundary, and web-platform isolation policies (same-origin, site isolation, CORP/COOP/COEP)…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/web-browsers-collaboration/">Web, Browsers &amp; Collaboration</a> </li><li> <a href="/system-design-blueprints/systems/sandboxed-browser-security-model/">Sandboxed Browser Security Model from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:255"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/web-browsers-collaboration/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Web, Browsers &amp; Collaboration</span></a> </p> <h1>Sandboxed Browser Security Model from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">docker-linux</li> <li>12 phases</li> <li>~44 weeks</li> <li>1,964 lines</li> <li>blueprint #337</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/sandboxed-browser-security-model/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/sandboxed-browser-security-model/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/sandboxed-browser-security-model/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/sandboxed-browser-security-model/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/sandboxed-browser-security-model/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/sandboxed-browser-security-model/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/sandboxed-browser-security-model/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/sandboxed-browser-security-model/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Sandboxed Browser Security Model from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>                         ┌──────────────────────────────────────────────┐
+                         │ BROWSER / BROKER PROCESS  (PRIVILEGED, trusted)│
+                         │  bsm-broker: deny-by-default policy engine     │
+                         │  owns: real file/net/GPU access, process mgmt, │
+                         │        site→process allocation, origin policy  │
+                         └───────┬───────────────────────┬────────────────┘
+            capability-passing IPC│ (bsm-ipc, typed, fd/handle passing)    │ privileged ops on request
+        ┌─────────────────────────▼──────┐   ┌──────────────────────────────▼─────────┐
+        │ RENDERER PROCESS (UNTRUSTED)    │   │ NETWORK PROCESS (semi-trusted)          │
+        │  runs #305/#266 + attacker JS   │   │  origin checks; CORP/COOP/COEP; fetch    │
+        │  SANDBOX: seccomp-bpf + userns  │   │  SANDBOX: narrower (net syscalls only)   │
+        │  + Landlock (no fs); no ambient │   │  hands bytes to renderer per policy      │
+        │  authority — only IPC handles   │   └──────────────────────────────────────────┘
+        │  ONE site-instance per process  │
+        └───────┬─────────────────────────┘
+                │ all syscalls filtered ──► seccomp denies → broker request via IPC
+        ┌───────▼───────────────────────────────────────────────────────────────────────┐
+        │ bsm-sandbox  OS SANDBOX POLICY  seccomp-bpf allowlist | userns | Landlock/fs    │
+        │  (Os seam: win job-object/AppContainer, mac Seatbelt)                           │
+        └───────────────────────────────────────────────────────────────────────────────┘
+        ┌───────────────────────────────────────────────────────────────────────────────┐
+        │ bsm-origin / bsm-policy  SECURITY POLICY                                        │
+        │  Origin + SiteInstance model; Same-Origin Policy; site-isolation process map;   │
+        │  CORP/COOP/COEP; capability grants (deny-by-default least authority)            │
+        └───────────────────────────────────────────────────────────────────────────────┘
+                │ trust boundary (red line) = renderer↔broker ; renderer↔network
+        ┌───────▼───────────────────────────────────────────────────────────────────────┐
+        │ GPU / UTILITY PROCESSES  (varying trust)  sandboxed per role; brokered access   │
+        └───────────────────────────────────────────────────────────────────────────────┘</code></pre>
+<p><strong>Per-box:</strong> <strong>Browser/broker (privileged)</strong> — the only process with real authority (files, sockets, GPU, spawning); runs no untrusted content; enforces policy on every child request (deny-by-default). <strong>Renderer (untrusted)</strong> — runs the web payload (#305) + attacker-controlled JS; <strong>assume it is compromised</strong>; it has <em>no ambient authority</em> — it can only do what its sandbox allows (compute) + what it can request over IPC (mediated). <strong>Network process (semi-trusted)</strong> — performs fetches, enforces origin/CORS/CORP/COOP/COEP so cross-origin bytes never reach a renderer that shouldn&#39;t see them. <strong>Sandbox policy</strong> — the OS-level cage: a seccomp-bpf syscall allowlist, user namespaces, and Landlock filesystem restriction (with an <code>Os</code> seam for Windows/macOS). <strong>Security policy</strong> — the web-platform layer: Origin/SiteInstance model, Same-Origin Policy, the site→process allocation that makes site isolation real, and the cross-origin resource policies. <strong>GPU/utility</strong> — additional roles, each least-authority + brokered. The <strong>trust boundary</strong> (renderer↔broker, renderer↔network) is the red line every message crosses and every check defends.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<p>The domain has <strong>two layers</strong>: (a) the <strong>web-platform security model</strong> — <code>Origin</code>/<code>Site</code>/<code>SiteInstance</code>, Same-Origin Policy, CORP/CORB-ORB/COOP/COEP — enforced on the trusted side; (b) the <strong>OS/process security model</strong> — <code>ProcessRole</code>, the sandbox cage, and capability-passing IPC across the renderer↔broker trust boundary. The renderer is the adversary; everything below is the containment contract.</p>
+<h3 id="sec-8-1">8.1 Origin / Site / SiteInstance (the isolation key)</h3>
+<pre class="diagram"><code>Origin   = (scheme, host, port)                      (RFC 6454 tuple origin)   — SOP key
+Site     = (scheme, registrable-domain)              (eTLD+1 via PSL)          — isolation key
+SiteInstance = a Site + a BrowsingInstance id        — one renderer process    (I4)
+BrowsingInstance = set of windows that can script each other (window.open, frames)</code></pre>
+<ul>
+<li><strong>Origin</strong> is finer than <strong>Site</strong>: <code>https://a.example.com</code> and <code>https://b.example.com</code> are <em>same-site, cross-origin</em>. SOP uses Origin; <strong>site isolation</strong> uses Site (so related subdomains can share a process when they can already script each other).</li>
+<li>One <strong>SiteInstance per renderer process</strong> (<a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/#inv-4">I4</a>). A cross-site iframe ⇒ <em>out-of-process iframe</em> (OOPIF) ⇒ separate process. The <code>SiteInstance→Process</code> map is the broker&#39;s allocation table.</li>
+<li><strong>opaque origin</strong> (sandboxed iframe, <code>data:</code>/<code>blob:</code> with no inheritor): a unique, unequal-to-everything origin; never same-origin with any other.</li>
+</ul>
+<h3 id="sec-8-2">8.2 Policy grammar (EBNF — <code>bsm-policy</code> config that the broker loads)</h3>
+<pre class="diagram"><code>policy        ::= { rule } ;
+rule          ::= role-clause &quot;{&quot; { grant } &quot;}&quot; ;
+role-clause   ::= &quot;role&quot; role-name ;
+role-name     ::= &quot;browser&quot; | &quot;broker&quot; | &quot;renderer&quot; | &quot;network&quot; | &quot;gpu&quot; | &quot;utility&quot; ;
+grant         ::= capability-grant | syscall-grant | fs-grant | net-grant ;
+capability-grant ::= &quot;allow&quot; cap-kind [ constraint ] &quot;;&quot; ;     (* deny-by-default: no grant ⇒ deny *)
+cap-kind      ::= &quot;file.read&quot; | &quot;file.write&quot; | &quot;net.connect&quot; | &quot;gpu.submit&quot; | &quot;ipc.bind&quot; ;
+constraint    ::= &quot;where&quot; predicate ;
+predicate     ::= &quot;origin&quot; &quot;==&quot; origin | &quot;path&quot; &quot;under&quot; path | &quot;port&quot; &quot;in&quot; port-set | &quot;site&quot; &quot;==&quot; site ;
+syscall-grant ::= &quot;syscall&quot; &quot;{&quot; syscall-name { &quot;,&quot; syscall-name } &quot;}&quot; ;   (* seccomp allowlist *)
+fs-grant      ::= &quot;fs&quot; ( &quot;ro&quot; | &quot;rw&quot; ) path ;                              (* Landlock ruleset *)
+net-grant     ::= &quot;net&quot; &quot;{&quot; addr-family { &quot;,&quot; addr-family } &quot;}&quot; ;
+origin        ::= scheme &quot;://&quot; host [ &quot;:&quot; port ] ;                        (* canonicalized first, I9 *)</code></pre>
+<ul>
+<li>Compiles to: a per-role <strong>seccomp-bpf program</strong>, a <strong>Landlock ruleset</strong>, and a <strong>capability grant table</strong>. Every line is a positive grant; the empty set ⇒ deny-all (principle 3, <a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/#inv-3">I3</a>).</li>
+<li>Parser is total: malformed policy ⇒ load fails closed (no process spawns) — never a partial/permissive policy (principle 7).</li>
+</ul>
+<h3 id="sec-8-3">8.3 Capability model (unforgeable authority)</h3>
+<pre class="diagram"><code>Capability = (id: u64 nonce, kind: CapKind, resource: ResourceRef, rights: Rights, epoch: u64)
+  - minted only by the broker; held as an entry in a per-process CapTable
+  - transferred only over IPC by handle index (never by name) — I6
+  - backing object: an OS handle (fd on Linux, HANDLE on Windows) passed via SCM_RIGHTS
+  - rights: subset-only delegation (a renderer cannot widen rights it was given)
+  - epoch: bumped on revoke ⇒ stale capability use ⇒ deny</code></pre>
+<p>A capability is a <em>reference + permission</em> that cannot be guessed or forged (the <code>id</code> is a broker-side table index, not a value the renderer chooses). Ambient authority (cwd, env, uid, a path string) is <strong>never</strong> a capability (principle 4).</p>
+<h3 id="sec-8-4">8.4 IPC message schema (typed, length-prefixed, fd-carrying)</h3>
+<pre class="diagram"><code>IpcFrame  = | len: u32 (LE, ≤ MAX_FRAME=64KiB) | channel: u32 | seq: u64 | kind: u16 | nfds: u8 | flags: u8 | payload[len] |
+            + ancillary: SCM_RIGHTS array of nfds file descriptors (≤ MAX_FDS=8 per frame)
+Request   = BrokerRequest { op, args, requested_rights }                (renderer→broker)
+Response  = BrokerResponse { verdict: Verdict, cap?: CapHandle, err? }  (broker→renderer)
+Interface = a bound (channel, message-set) pair; binding requires a capability (no ambient channels)</code></pre>
+<ul>
+<li><strong>Validation order at the broker boundary</strong> (every field is hostile, <a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/#inv-2">I2</a>/<a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/#inv-7">I7</a>): <code>len ≤ MAX_FRAME</code> → <code>nfds ≤ MAX_FDS</code> → <code>kind</code> in role&#39;s allowed set → <code>channel</code> bound to caller → decode payload (bounded) → canonicalize args (<a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/#inv-9">I9</a>) → policy check (<a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/#inv-3">I3</a>) → mediate op. Any failure ⇒ <code>Verdict::Deny</code> (+ optional kill), <strong>never grant</strong> (<a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/#inv-7">I7</a>, principle 7).</li>
+<li>Wire format is explicit-endian, fixed-layout; no language-native serialization with ambient type confusion. Unknown <code>kind</code> ⇒ deny (forward-compat = additive kinds only).</li>
+</ul>
+<h3 id="sec-8-5">8.5 Process / trust-boundary state machine</h3>
+<pre class="diagram"><code>            spawn(role,policy)        sandbox_install (seccomp+userns+Landlock)
+  [Unborn] ───────────────────► [Launching] ───────────────────────────────► [Sandboxed]
+                                     │ install fails                                │ bind initial cap (IPC chan to broker)
+                                     ▼                                              ▼
+                                 [Aborted]                                    [Running]
+                                                                                   │ malformed IPC / policy violation / crash
+                                                                                   ▼
+                                                                              [Quarantined] ──kill──► [Dead] ──respawn tab──► [Launching]</code></pre>
+<ul>
+<li>A renderer can only ever be <strong>Sandboxed→Running</strong>; it has no path that grants authority outside brokered requests. <strong>Quarantined</strong> is the fail-closed sink (principle 7): the broker stops honoring its requests and kills it. A <code>[Dead]</code> renderer never affects the broker or siblings (<a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/#inv-11">I11</a>, principle 12).</li>
+<li>Transition <code>Launching→Sandboxed</code> is the <strong>point of no return</strong>: after seccomp install the child cannot un-sandbox itself (filters are inherited + irrevocable; <code>no_new_privs</code> set).</li>
+</ul>
+<h3 id="sec-8-6">8.6 SOP / CORP / COOP / COEP decision tables</h3>
+<p><strong>Same-Origin Policy (DOM/script/storage access):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Subject origin</th>
+<th>Object origin</th>
+<th>Access (DOM/storage)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>O</td>
+<td>O (equal tuple)</td>
+<td>allow</td>
+</tr>
+<tr>
+<td>O</td>
+<td>O′ (diff scheme/host/port)</td>
+<td><strong>deny</strong> (<a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/#inv-5">I5</a>)</td>
+</tr>
+<tr>
+<td>O</td>
+<td>opaque</td>
+<td>deny</td>
+</tr>
+<tr>
+<td>opaque</td>
+<td>anything</td>
+<td>deny</td>
+</tr>
+</tbody></table></div>
+<p><strong>Cross-Origin-Resource-Policy (response gating in network process):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th><code>Cross-Origin-Resource-Policy</code></th>
+<th>requester relationship</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>same-origin</code></td>
+<td>cross-origin</td>
+<td><strong>block</strong> (<a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/reliability/#inv-5">I5</a>)</td>
+</tr>
+<tr>
+<td><code>same-site</code></td>
+<td>cross-site</td>
+<td>block</td>
+</tr>
+<tr>
+<td><code>same-site</code></td>
+<td>same-site cross-origin</td>
+<td>allow</td>
+</tr>
+<tr>
+<td><code>cross-origin</code></td>
+<td>any</td>
+<td>allow</td>
+</tr>
+<tr>
+<td>absent + ORB-eligible type (HTML/JSON/XML)</td>
+<td>cross-origin no-cors</td>
+<td><strong>block</strong> (ORB)</td>
+</tr>
+<tr>
+<td>absent + opaque-safe (image/media)</td>
+<td>cross-origin no-cors</td>
+<td>allow (opaque)</td>
+</tr>
+</tbody></table></div>
+<p><strong>COOP (process/browsing-context isolation, top-level):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th><code>Cross-Origin-Opener-Policy</code></th>
+<th>opener relationship</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>same-origin</code></td>
+<td>cross-origin opener</td>
+<td>sever opener; new BrowsingInstance (new process)</td>
+</tr>
+<tr>
+<td><code>same-origin-allow-popups</code></td>
+<td>cross-origin popup</td>
+<td>sever incoming</td>
+</tr>
+<tr>
+<td><code>unsafe-none</code> (default)</td>
+<td>—</td>
+<td>keep opener</td>
+</tr>
+</tbody></table></div>
+<p><strong>COEP (embedding gate, enables cross-origin isolation + <code>SharedArrayBuffer</code>):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th><code>Cross-Origin-Embedder-Policy</code></th>
+<th>subresource CORP/CORS</th>
+<th>result</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>require-corp</code></td>
+<td>resource lacks CORP/CORS</td>
+<td><strong>block</strong></td>
+</tr>
+<tr>
+<td><code>require-corp</code></td>
+<td>resource has CORP/CORS</td>
+<td>allow</td>
+</tr>
+<tr>
+<td><code>credentialless</code></td>
+<td>no-cors</td>
+<td>sent without credentials</td>
+</tr>
+<tr>
+<td><code>unsafe-none</code></td>
+<td>—</td>
+<td>normal</td>
+</tr>
+</tbody></table></div>
+<p>Cross-origin isolation = COOP <code>same-origin</code> <strong>AND</strong> COEP <code>require-corp</code> ⇒ document is isolated ⇒ <code>crossOriginIsolated===true</code> ⇒ <code>SharedArrayBuffer</code> + high-res timers permitted (the Spectre-safe gate, <a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#sec-6">§6</a> principle 6).</p>
+<h3 id="sec-8-7">8.7 Worked example — cross-origin <code>fetch</code> blocked</h3>
+<pre class="diagram"><code>1. Renderer (origin https://app.example) runs attacker JS: fetch(&quot;https://bank.example/statement&quot;, {mode:&quot;no-cors&quot;})
+2. Renderer has NO net capability → issues BrokerRequest{op:NetFetch, url, init, initiator=https://app.example} over IPC
+3. Network process (trusted) performs the fetch; response carries Cross-Origin-Resource-Policy: same-origin
+4. Origin check: initiator (app.example) ≠ resource origin (bank.example); CORP=same-origin ⇒ BLOCK (I5, table §8.6)
+5. Response bytes are DROPPED at the network process; renderer receives an opaque/network error — never the bytes
+   ⇒ even a fully-compromised renderer cannot read bank.example&#39;s response body (no co-residency, no leak)</code></pre>
+<h3 id="sec-8-8">8.8 Worked example — brokered file-open (TOCTOU-safe)</h3>
+<pre class="diagram"><code>1. Renderer needs to read a user-picked file (file chooser handled in browser UI, NOT renderer)
+2. Browser shows chooser; user selects /home/u/doc.pdf → browser mints Capability{file.read, fd=open(doc.pdf,O_RDONLY)}
+3. Broker passes the fd to the renderer via SCM_RIGHTS (handle, not path) — I6
+4. Renderer reads via the fd capability ONLY; it cannot open(&quot;/etc/passwd&quot;) (seccomp denies open*; no path authority — I8)
+   ⇒ the renderer never names a path to the broker for opening; the trusted side opened it. No TOCTOU window (the fd
+     is already bound to the inode the user chose; a later rename/symlink-swap cannot redirect it). I9 + principle 10.</code></pre>
+<h3 id="sec-8-9">8.9 Worked example — site-isolation process split (OOPIF)</h3>
+<pre class="diagram"><code>1. Tab loads https://news.example (top-level) → SiteInstance A → Process P1
+2. Page embeds &lt;iframe src=&quot;https://ads.example&quot;&gt; (cross-site)
+3. Allocator: ads.example is a different Site ⇒ new SiteInstance B ⇒ new Process P2 (OOPIF) — I4
+4. P1 (news) and P2 (ads) share NO address space; cross-frame DOM access mediated by SOP across the process boundary
+   ⇒ a Spectre gadget in P2 (ads) can only speculatively read P2&#39;s own memory — news.example data is not co-resident
+     (principle 6 — the Spectre defense). Compositing of the two frames happens in the trusted GPU/browser process.</code></pre>
+<h3 id="sec-8-10">8.10 Malformed / attack examples (defense in action)</h3>
+<pre class="diagram"><code>- Forged origin:     renderer sends BrokerRequest{initiator:&quot;https://bank.example&quot;} (lying about who it is)
+                     → broker IGNORES renderer-claimed origin; uses the SiteInstance the broker assigned at spawn
+                       (origin is broker-tracked state, never a renderer-supplied value) — I2, principle 5. Deny mismatch.
+- Path traversal:    renderer requests file.read where path=&quot;../../etc/passwd&quot; or &quot;/home/u/doc/../../../etc/shadow&quot;
+                     → broker canonicalizes (realpath, resolve symlinks) BEFORE policy check; result escapes the granted
+                       Landlock subtree ⇒ Deny (I9). (And renderers don&#39;t even get path-based open — §8.8.)
+- Handle forge:      renderer crafts BrokerRequest referencing cap id=0x4141414141414141 it never received
+                     → broker CapTable lookup miss (id is a server-side table key, not a guessable value) ⇒ Deny (I6).
+                     Stale (revoked) cap: epoch mismatch ⇒ Deny.
+- Malformed IPC:     frame len=0xFFFFFFFF (claims 4GiB), or nfds=200, or kind=0xDEAD (unknown), or truncated payload
+                     → bounded checks (len≤64KiB, nfds≤8, kind∈role-set) fail ⇒ Deny + drop; repeated ⇒ Quarantine→kill.
+                       Parser NEVER allocates from attacker length, NEVER grants on malformed (I7, principle 7).
+- Syscall escape:    compromised renderer executes open(&quot;/etc/passwd&quot;), socket(), ptrace(), execve()
+                     → not in the seccomp allowlist ⇒ SIGSYS / EPERM (I8). It can only compute + use passed capabilities.
+- Co-residency:      attacker forces two cross-site documents into one process (e.g., via a redirect race)
+                     → allocator re-checks Site on every commit; cross-site commit in a single-site process ⇒ process swap
+                       (BrowsingInstance/SiteInstance re-evaluation) before the document is committed (I4).</code></pre>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-1">P1</a> — Assume the renderer is fully compromised.</strong> Design every boundary as if attacker code already runs arbitrary instructions in the renderer. <em>Violation:</em> trusting any renderer-supplied value (origin claims, paths, handles) → instant escape/UXSS.</li><li id="p-2"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-2">P2</a> — Least authority (POLA).</strong> Each process gets the minimum capability for its role; the renderer gets <em>none</em> ambiently. <em>Violation:</em> a renderer with a stray file capability turns a memory bug into file theft.</li><li id="p-3"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-3">P3</a> — Deny-by-default, complete mediation.</strong> The broker denies every request not explicitly allowed by policy; every privileged op is mediated + checked. <em>Violation:</em> an unmediated path = an open door.</li><li id="p-4"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-4">P4</a> — Capabilities, not ambient authority.</strong> Authority is an unforgeable handle passed over IPC, not something derived from identity/env. <em>Violation:</em> ambient authority (cwd, env, uid) is reachable by compromised code.</li><li id="p-5"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-5">P5</a> — The trust boundary is the renderer↔broker IPC.</strong> All security checks live on the <em>broker</em> side; the renderer&#39;s claims are untrusted input. <em>Violation:</em> checking in the renderer = no check.</li><li id="p-6"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-6">P6</a> — Site isolation: cross-origin data is never co-resident.</strong> A renderer process only ever holds data for one site; cross-site content lives in another process. <em>Violation:</em> Spectre/UXSS reads another origin&#39;s secrets from the same address space.</li><li id="p-7"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-7">P7</a> — Fail safe + fail closed.</strong> A policy error, a malformed IPC message, or a broker uncertainty denies the request (and may kill the renderer), never grants. <em>Violation:</em> fail-open turns a bug into a breach.</li><li id="p-8"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-8">P8</a> — Sandboxes are layered (defense in depth).</strong> seccomp + namespaces + Landlock + capability IPC + site isolation — no single mechanism is the only line. <em>Violation:</em> one bypassed layer = full compromise.</li><li id="p-9"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-9">P9</a> — Minimize + audit the privileged surface.</strong> The broker is small, simple, and memory-safe; the attack surface a renderer can reach is enumerated + tested. <em>Violation:</em> a fat broker is a fat target.</li><li id="p-10"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-10">P10</a> — Validate at the boundary, canonically.</strong> IPC messages + origins + paths are parsed/canonicalized on the trusted side before any decision. <em>Violation:</em> path-traversal/origin-confusion via un-canonicalized input.</li><li id="p-11"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-11">P11</a> — Determinism + auditability of decisions.</strong> Every allow/deny is a pure function of (policy, request) and is logged. <em>Violation:</em> non-reproducible, unauditable security decisions.</li><li id="p-12"><strong><a class="cite" href="/system-design-blueprints/systems/sandboxed-browser-security-model/architecture/#p-12">P12</a> — A renderer crash is contained, not fatal.</strong> Killing/crashing a renderer affects only its tab; the broker + other renderers survive. <em>Violation:</em> one site DoSes the browser.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

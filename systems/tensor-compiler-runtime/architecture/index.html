@@ -1,0 +1,672 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Tensor Compiler + Runtime — Architecture · Engineering Blueprints</title><meta name="description" content="Tensor Compiler + Runtime, hld: §3 overview + §8 domain model. Build a from-scratch, TVM-style deep-learning tensor compiler + execution runtime in Rust: import a model → Graph IR → graph passes → operator fusion → tensor/loop IR (TIR) → schedule → CPU kernel…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/tensor-compiler-runtime/">Tensor Compiler + Runtime</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>Tensor Compiler + Runtime</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>14 phases</li> <li>~32 weeks</li> <li>4,976 lines</li> <li>blueprint #307</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/tensor-compiler-runtime/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/tensor-compiler-runtime/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/tensor-compiler-runtime/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/tensor-compiler-runtime/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/tensor-compiler-runtime/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/tensor-compiler-runtime/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/tensor-compiler-runtime/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/tensor-compiler-runtime/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/tensor-compiler-runtime/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/tensor-compiler-runtime/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Tensor Compiler + Runtime — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 System Diagram + Trust / Concurrency / Persistence Boundaries</h3>
+<pre class="diagram"><code>                 ┌──────────────────────────────────────── TRUST BOUNDARY ────────────────────────────┐
+                 │  UNTRUSTED: model bytes (ONNX-subset / textual graph) + UNTRUSTED: input tensors    │
+                 └─────────────────────────────────────────────────────────────────────────────────────┘
+    model (ONNX-subset / textual graph)        [untrusted; size-bounded, op-allowlisted, shape-validated]
+            |  import  (tc-graph::import)
+            v
+    ┌───────────────────────────────────────────────────────┐
+    │ tc-graph : Graph IR                                    │   GraphNode/GraphOp, TensorType/Shape/DType
+    │   functional dataflow graph of whole-tensor ops        │   Arena&lt;GraphNode&gt;, NodeId, op registry
+    └───────────────────────────────────────────────────────┘
+            |  tc-pass: shape infer -&gt; type check -&gt; const fold -&gt; CSE -&gt; DCE -&gt; simplify -&gt; layout
+            v   (PassManager drives ordered Pass list to fixed point; verifier: every node typed)
+    ┌───────────────────────────────────────────────────────┐
+    │ tc-fuse : FusionGroups                                 │   FusionPass, dominator analysis
+    │   dominator-based grouping -&gt; fused subgraphs          │   FusionGroup -&gt; 1 PrimFunc each
+    └───────────────────────────────────────────────────────┘
+            |  lower each group  (tc-fuse -&gt; tc-ir builder)
+            v
+    ┌───────────────────────────────────────────────────────┐
+    │ tc-ir : PrimFunc / Stmt / Expr / Buffer / IterVar      │   imperative loop-nest IR over Buffers
+    │   TensorExpr (WHAT) + naive nested-loop body           │   no_std + alloc
+    └───────────────────────────────────────────────────────┘
+            |  tc-schedule: split/reorder/fuse/tile/vectorize/unroll/parallel/compute_at/inline
+            v   (HOW; numeric-result-preserving by construction)
+    ┌───────────────────────────────────────────────────────┐
+    │ Schedule (scheduled TIR)  { func: PrimFunc, stages }   │
+    └───────────────────────────────────────────────────────┘
+            |  tc-codegen: CBackend (C source) / SimdBackend (portable SIMD) -&gt; Kernel
+            v
+    ┌─────────────────────── PERSISTENCE BOUNDARY ──────────────────────────────────────┐
+    │ Module { kernels: Vec&lt;Kernel&gt;, graph: Graph, plan: MemoryPlan }                    │
+    │   = the serialized compiled artifact; weights/params persist embedded with it      │
+    └────────────────────────────────────────────────────────────────────────────────────┘
+            |  load
+            v
+    ┌─────────────────────── CONCURRENCY BOUNDARY ──────────────────────────────────────┐
+    │  compile path: SINGLE-THREADED over the mutable IR (no shared-IR data races)       │
+    │  ───────────────────────────────────────────────────────────────────────────────  │
+    │  run path: tc-runtime GraphExecutor (static)  |  tc-vm Interpreter (dynamic)       │
+    │    PARALLEL kernels over a thread pool (parallel axis -&gt; tiles); async dispatch;    │
+    │    NDArray Storage is REF-COUNTED (shared zero-copy views, atomic refcount)         │
+    └────────────────────────────────────────────────────────────────────────────────────┘
+            |
+            v
+        output tensors  ---&gt;  validated vs the NumPy-style reference oracle (rtol 1e-5, atol 1e-6 f32)</code></pre>
+<p>Boundary summary:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Boundary</th>
+<th>Edge</th>
+<th>Rule</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Trust</td>
+<td>model bytes + input tensors</td>
+<td>Untrusted. Importer enforces op-allowlist (ONNX-subset), size caps, no unbounded recursion; shape inference rejects ill-typed graphs before any codegen. cc-invoked C source is generated by us, never from the model.</td>
+</tr>
+<tr>
+<td>Concurrency</td>
+<td>compile vs run</td>
+<td>Compilation single-threaded over <code>Arena</code>-backed IR (typed ids, no aliasing). Runtime parallelizes kernel execution (thread pool, <code>parallel</code> axis → tiles) + async op dispatch; <code>Storage</code> refcount is atomic so zero-copy <code>NDArray</code> views cross threads safely.</td>
+</tr>
+<tr>
+<td>Persistence</td>
+<td><code>Module</code></td>
+<td>The compiled <code>Module</code> (kernels + graph + <code>MemoryPlan</code>) is the on-disk artifact; constant weights (<code>GraphOp::Const(TensorData)</code>) persist embedded; loading rehydrates without recompilation.</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-3-2">3.2 Per-Box Responsibilities</h3>
+<h4 id="sec-3-tc-graph-high-level-graph-ir-relay-like">tc-graph — high-level Graph IR (Relay-like)</h4>
+<p>Responsibility: the functional dataflow graph of whole-tensor operators and the import surface. Owns <code>Graph { nodes: Arena&lt;GraphNode&gt;, outputs, inputs }</code>, <code>GraphNode { op, args: Vec&lt;NodeId&gt;, ty }</code>, the <code>GraphOp</code> enum (Input/Const/Add/Mul/MatMul/Conv2d/Relu/Reshape/Transpose/Reduce/Call), <code>TensorType { shape, dtype }</code>, <code>Shape(Vec&lt;Dim&gt;)</code> with <code>Dim::Static|Dynamic</code>, <code>DType</code>, the extensible op registry, and the two importer entry points (textual graph format + ONNX-subset). <code>no_std + alloc</code>. Input: untrusted model bytes. Output: a typed-once-inferred <code>Graph</code>. Key invariant: nodes are SSA-like dataflow values referenced by <code>NodeId</code> into the arena — no cycles, single-assignment, args reference only earlier-defined nodes; <code>ty</code> is <code>None</code> until shape inference fills it. Later phases: Phase 1 builds the IR + importers; every downstream crate consumes <code>Graph</code>; the final <code>Module</code> carries the post-pass <code>Graph</code> for the executor.</p>
+<h4 id="sec-3-tc-pass-pass-infrastructure-graph-passes">tc-pass — pass infrastructure + graph passes</h4>
+<p>Responsibility: <code>PassManager</code> + <code>Pass</code> trait driving an ordered sequence of analysis and transform passes. Owns shape inference, type checking, constant folding, CSE, DCE, algebraic simplification (canonicalization), layout transform, and the verifier. Depends on tc-graph + tc-ir. Input: a <code>Graph</code> (possibly untyped). Output: a typed, optimized, canonical <code>Graph</code>. Key invariant: shape inference runs to a FIXED POINT propagating <code>TensorType</code> forward; the verifier guarantees every reachable node is typed before fusion; transform passes preserve graph semantics (numerically equivalent dataflow). Pass ordering is fixed and documented (Phase 2 establishes infra + inference; Phase 3 the optimization set; Phase 5 layout). Later phases: tc-fuse and tc-codegen assume a fully typed, simplified graph; dynamic dims (<code>Dim::Dynamic</code>) survive as symbolic, resolved at runtime by tc-vm.</p>
+<h4 id="sec-3-tc-fuse-operator-fusion">tc-fuse — operator fusion</h4>
+<p>Responsibility: <code>FusionPass</code> + <code>FusionGroup</code> + the dominator-based fusion analysis. Groups an injective/elementwise chain plus at most one reduce into a single kernel, eliminating intermediate tensor materialization (the dominant CPU win). Depends on tc-graph + tc-ir. Input: typed optimized <code>Graph</code>. Output: a set of <code>FusionGroup</code>s, each lowered to one <code>PrimFunc</code>. Key invariant: a fusion group has a single dominator boundary — every internal value is consumed only within the group except the group output; fusion never crosses a non-injective multi-consumer boundary that would force recompute beyond the cost threshold. Later phases: Phase 4 implements it; Phase 6 lowers each group; the executor dispatches one kernel per group.</p>
+<h4 id="sec-3-tc-ir-low-level-tensor-loop-ir-tir-like">tc-ir — low-level tensor/loop IR (TIR-like)</h4>
+<p>Responsibility: the imperative loop-nest IR. Owns <code>PrimFunc { params: Vec&lt;Buffer&gt;, body: Stmt }</code>, <code>Stmt</code> (For/Store/Block/IfThenElse/Allocate), <code>Expr</code> (Load/Var/Const/Bin/Call), <code>Buffer { id, shape: Vec&lt;Expr&gt;, dtype, scope }</code>, <code>IterVar { var, kind }</code> (Data/Reduce/Thread-deferred), <code>Scope</code> (Global/Local/Shared-deferred), <code>TensorExpr</code>, and the IR builder. <code>no_std + alloc</code>. Input: a <code>FusionGroup</code>. Output: a default naive nested-loop <code>PrimFunc</code> realizing the group&#39;s <code>TensorExpr</code>. Key invariant: the <code>TensorExpr</code> defines WHAT is computed and is the immutable semantic anchor; the loop nest is a faithful realization; buffer indices are affine in <code>IterVar</code>s. Later phases: Phase 6 builds it; tc-schedule transforms the loop structure over it without touching the <code>TensorExpr</code>; tc-codegen emits from it.</p>
+<h4 id="sec-3-tc-schedule-the-schedule-space">tc-schedule — the schedule space</h4>
+<p>Responsibility: <code>Schedule { func: PrimFunc, stages: Vec&lt;Stage&gt; }</code>, <code>Stage</code>, and the primitives <code>split</code>/<code>reorder</code>/<code>fuse</code>/<code>tile</code>/<code>vectorize</code>/<code>unroll</code>/<code>parallel</code>/<code>compute_at</code>/<code>inline</code> (signatures over <code>AxisId</code>/<code>StageId</code>). Depends on tc-ir. Input: a <code>PrimFunc</code>. Output: a <code>Schedule</code> (scheduled TIR) with transformed loop nests. Key invariant (compute/schedule separation, Halide model): applying ANY schedule primitive MUST NOT change the numerical result — only loop order, tiling, lane assignment, and parallelism. <code>split(ax,factor) -&gt; (outer,inner)</code>, <code>fuse(a,b) -&gt; axis</code>, <code>tile</code> = split×2 + reorder. Later phases: Phase 7 (split/reorder/fuse/tile/compute_at/inline), Phase 8 (vectorize/unroll/parallel + buffer-scope interaction), Phase 12 (auto-tuner searches this space).</p>
+<h4 id="sec-3-tc-codegen-lowering-scheduled-tir-to-target-code">tc-codegen — lowering scheduled TIR to target code</h4>
+<p>Responsibility: <code>Target { arch, features }</code>, the <code>CodeGen</code> trait (<code>fn emit(&amp;self, sched, target) -&gt; Kernel</code>), the <code>CBackend</code> (portable C source emission), the <code>SimdBackend</code> (portable SIMD path), <code>Kernel { name, source, signature: KernelSig }</code>, and <code>Module { kernels, graph, plan }</code>. Depends on tc-ir + tc-schedule. Input: a <code>Schedule</code> + <code>Target</code>. Output: a <code>Kernel</code> per fused group, packaged into a <code>Module</code>. Key invariant: each <code>Kernel</code> exposes a stable <code>KernelSig</code> (data pointers + shapes + strides) so the runtime binds <code>NDArray</code>s positionally; <code>vectorize</code> maps an axis to SIMD lanes, <code>parallel</code> maps an axis to thread-pool tiles. Emitted C is an OUTPUT artifact compiled via the system <code>cc</code>. Example emitted signature:</p>
+<pre class="code language-c" data-lang="c"><code>void k_fused_add_relu(const float* a, const float* b, float* out,
+                      int64_t n0, int64_t s_a0, int64_t s_b0, int64_t s_out0);</code></pre>
+<p>Later phases: Phase 9 builds both backends + cc integration; tc-runtime loads the <code>Module</code>; Phase 13 validates emitted kernels vs the oracle.</p>
+<h4 id="sec-3-tc-runtime-the-runtime-static-path">tc-runtime — the runtime (static path)</h4>
+<p>Responsibility: <code>NDArray { storage, shape, strides, dtype, offset }</code> (strided, zero-copy slices/reshape), <code>Storage { ptr, bytes, device }</code> (ref-counted), <code>Device</code> (Cpu/Gpu-deferred), <code>Allocator</code> trait (<code>alloc</code>/<code>free</code>), <code>MemoryPlan</code> (liveness-based buffer reuse), and <code>GraphExecutor</code> (topological op dispatch over a <code>Module</code> + <code>NDArray</code> bindings) plus async dispatch. Depends on tc-codegen. Input: a <code>Module</code> + input <code>NDArray</code>s (untrusted, shape-validated against the graph). Output: result <code>NDArray</code>s. Key invariants: <code>NDArray</code> views never copy unless materialization is required; <code>Storage</code> refcount governs lifetime; <code>MemoryPlan</code> reuses one buffer for two tensors only when their liveness intervals are disjoint over the executor&#39;s topological order (register-allocation-on-tensors). GraphExecutor requires STATIC shapes. Later phases: Phase 10 builds it; Phase 12 measures kernels through it; Phase 13 benchmarks GFLOP/s.</p>
+<h4 id="sec-3-tc-vm-the-bytecode-vm-dynamic-path">tc-vm — the bytecode VM (dynamic path)</h4>
+<p>Responsibility: <code>VmInstruction</code> (LoadConst/AllocTensor/InvokeKernel/If/Goto/Call/Ret), <code>VmFunc { instrs, num_regs }</code>, the <code>Interpreter</code> (register file of <code>NDArray</code>/objects + call stack), <code>Closure</code>, and the register/object model. Depends on tc-runtime. Input: a <code>Module</code> whose graph has control flow / dynamic dims + runtime inputs. Output: result <code>NDArray</code>s. Key invariant: the VM dispatches the SAME compiled <code>Kernel</code>s as the GraphExecutor — it differs only by allocating at runtime (<code>AllocTensor</code> resolves <code>Dim::Dynamic</code>) and branching (<code>If</code>/<code>Goto</code>/<code>Call</code>). Numerical results must match the static path where both apply. Later phases: Phase 11 builds it; handles models the GraphExecutor&#39;s static assumption rejects.</p>
+<h4 id="sec-3-tc-cli-the-tcc-binary">tc-cli — the <code>tcc</code> binary</h4>
+<p>Responsibility: the user-facing driver. Subcommands: <code>compile</code> (model → <code>Module</code>), <code>run</code> (execute on inputs), <code>dump</code> (graph/tir/scheduled/c/module), <code>tune</code> (schedule search), <code>check</code> (vs oracle), <code>bench</code>. Depends on all crates. Input: CLI args + model + input files. Output: <code>Module</code> files, result tensors, dump text, tuning logs, pass/fail + benchmark reports. Key invariant: each subcommand is a thin orchestration over the library crates — no compiler logic lives in the binary; <code>dump</code> exposes every IR stage for inspection/conformance. Later phases: present from Phase 0 (smoke) and extended each phase as new capabilities land; <code>check</code>/<code>bench</code> drive Phase 13 conformance + performance gates.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Graph IR, TIR, and the Schedule</h2>
+<p>This is the semantic core: two IRs (<code>tc-graph</code>, <code>tc-ir</code>), the compute/schedule
+separation (Halide model), fusion (TVM dominator model), shape inference,
+memory planning. Every transform below preserves numerical result; only
+performance moves. Invariant <strong>NUM-INVARIANT</strong>: for any schedule <code>S</code>,
+<code>eval(apply(S, primfunc)) == eval(primfunc)</code> within tolerance (f32 rtol 1e-5,
+atol 1e-6) — see <a class="cite" href="/system-design-blueprints/systems/tensor-compiler-runtime/build/#sec-13">§13</a> oracle.</p>
+<h3 id="sec-8-1">8.1 Graph IR (<code>tc-graph</code>) — the functional dataflow layer</h3>
+<p>Whole-tensor dataflow DAG. Nodes are values (SSA-like), edges are <code>args</code>.
+No mutation, no aliasing at this layer — that appears only after lowering to TIR.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Role</th>
+<th>Key fields</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Graph</code></td>
+<td>the DAG</td>
+<td><code>nodes: Arena&lt;GraphNode&gt;</code>, <code>inputs: Vec&lt;NodeId&gt;</code>, <code>outputs: Vec&lt;NodeId&gt;</code></td>
+</tr>
+<tr>
+<td><code>GraphNode</code></td>
+<td>one value</td>
+<td><code>op: GraphOp</code>, <code>args: Vec&lt;NodeId&gt;</code>, <code>ty: Option&lt;TensorType&gt;</code></td>
+</tr>
+<tr>
+<td><code>GraphOp</code></td>
+<td>operator tag</td>
+<td><code>Input/Const/Add/Mul/MatMul/Conv2d/Relu/Reshape/Transpose/Reduce(ReduceKind)/Call(String)</code></td>
+</tr>
+<tr>
+<td><code>TensorType</code></td>
+<td>value type</td>
+<td><code>shape: Shape</code>, <code>dtype: DType</code></td>
+</tr>
+<tr>
+<td><code>Shape</code></td>
+<td>dims</td>
+<td><code>Vec&lt;Dim&gt;</code>; <code>Dim::Static(i64)</code> | <code>Dim::Dynamic(String)</code></td>
+</tr>
+<tr>
+<td><code>DType</code></td>
+<td>scalar</td>
+<td><code>F32/F64/I32/I64/I8/Bool</code></td>
+</tr>
+</tbody></table></div>
+<ul>
+<li><code>NodeId</code> = arena index (typed <code>u32</code> newtype); <code>Arena</code> is generational, no
+dangling, O(1) deref. DAG is <strong>acyclic by construction</strong> — <code>add_node</code> only
+references already-inserted ids → topological order = insertion order.</li>
+<li><code>ty</code> starts <code>None</code>; shape-inference (<a class="cite" href="/system-design-blueprints/systems/tensor-compiler-runtime/architecture/#sec-8-6">§8.6</a>) fills it to a fixed point.</li>
+<li><code>Const(TensorData)</code> carries an owned host buffer (folded constants live here).</li>
+<li><code>Call(String)</code> = named subfunction / external op; resolved by op registry.</li>
+</ul>
+<h4 id="sec-8-1-1">8.1.1 Op-registry contract</h4>
+<p>Each <code>GraphOp</code> variant (and each <code>Call</code> name) registers an <code>OpDef</code>:</p>
+<pre class="diagram"><code>OpDef {
+  name:        &amp;&#39;static str,
+  n_inputs:    Arity,                 // Fixed(n) | Variadic
+  infer_type:  fn(&amp;[TensorType], &amp;Attrs) -&gt; Result&lt;TensorType, TypeError&gt;,
+  lower:       fn(&amp;[TensorExpr], &amp;Attrs) -&gt; TensorExpr,   // -&gt; TIR compute
+  fuse_pattern: FusePattern,          // Injective | Elementwise | Reduce | Opaque
+}</code></pre>
+<p>Registry invariants:</p>
+<ul>
+<li><strong>R1</strong> every <code>GraphOp</code> constructible in a <code>Graph</code> has an <code>OpDef</code> (verifier checks).</li>
+<li><strong>R2</strong> <code>infer_type</code> is pure + monotone (never narrows a resolved <code>Static</code> to <code>Dynamic</code>).</li>
+<li><strong>R3</strong> <code>lower</code> emits exactly one <code>TensorExpr</code> output; multi-output ops are
+modeled as a tuple-producing op + projections (deferred ops note this).</li>
+<li><strong>R4</strong> <code>fuse_pattern</code> drives <a class="cite" href="/system-design-blueprints/systems/tensor-compiler-runtime/architecture/#sec-8-5">§8.5</a>; <code>Opaque</code> = a hard fusion boundary.</li>
+</ul>
+<p><code>FusePattern</code> taxonomy: <code>Elementwise</code> (Add/Mul/Relu, shape-preserving, 1:1),
+<code>Injective</code> (Reshape/Transpose, index-remap, no reduce), <code>Reduce</code>
+(Reduce/MatMul/Conv2d, contracts an axis — a fusion group has ≤1 reduce),
+<code>Opaque</code> (Call to unknown extern).</p>
+<h4 id="sec-8-1-2">8.1.2 Textual graph format (importer + <code>tcc dump graph</code>)</h4>
+<p>A <code>.tcg</code> round-trippable textual form (the non-ONNX frontend). EBNF:</p>
+<pre class="code language-ebnf" data-lang="ebnf"><code>graph     ::= &quot;graph&quot; ident &quot;{&quot; sig stmt* &quot;}&quot;
+sig       ::= &quot;in&quot;  &quot;(&quot; binding (&quot;,&quot; binding)* &quot;)&quot;
+              &quot;out&quot; &quot;(&quot; ident   (&quot;,&quot; ident)*   &quot;)&quot;
+binding   ::= ident &quot;:&quot; tensortype
+stmt      ::= &quot;%&quot; ident &quot;=&quot; op &quot;(&quot; arglist? &quot;)&quot; (&quot;:&quot; tensortype)?
+op        ::= ident attrs?
+attrs     ::= &quot;[&quot; attr (&quot;,&quot; attr)* &quot;]&quot;
+attr      ::= ident &quot;=&quot; literal
+arglist   ::= (&quot;%&quot; ident) (&quot;,&quot; &quot;%&quot; ident)*
+tensortype::= dtype &quot;[&quot; dim (&quot;,&quot; dim)* &quot;]&quot;
+dim       ::= int | &quot;?&quot; ident          (* &quot;?n&quot; = Dim::Dynamic(&quot;n&quot;) *)
+dtype     ::= &quot;f32&quot;|&quot;f64&quot;|&quot;i32&quot;|&quot;i64&quot;|&quot;i8&quot;|&quot;bool&quot;</code></pre>
+<p>Example (a fused-conv corpus fixture):</p>
+<pre class="diagram"><code>graph net {
+  in(x: f32[1,3,224,224], w: f32[64,3,7,7], b: f32[64])
+  out(y)
+  %c = Conv2d[stride=2, pad=3](x, w) : f32[1,64,112,112]
+  %d = Add(%c, b)                     : f32[1,64,112,112]
+  %y = Relu(%d)                       : f32[1,64,112,112]
+}</code></pre>
+<p>Types after <code>:</code> are optional in source; the importer leaves them <code>None</code> and
+shape-inference fills them. On re-dump they are always printed (canonical form).</p>
+<h3 id="sec-8-2">8.2 TIR (<code>tc-ir</code>) — the imperative loop-nest layer</h3>
+<p>After fusion, each <code>FusionGroup</code> lowers to one <code>PrimFunc</code>: an imperative
+loop nest over <code>Buffer</code>s. This is where loop order, indexing, and storage
+become explicit and schedulable.</p>
+<h4 id="sec-8-2-1">8.2.1 TIR grammar (EBNF)</h4>
+<pre class="code language-ebnf" data-lang="ebnf"><code>primfunc  ::= &quot;primfn&quot; &quot;(&quot; buffer (&quot;,&quot; buffer)* &quot;)&quot; &quot;{&quot; stmt &quot;}&quot;
+stmt      ::= for | store | block | ifte | alloc
+for       ::= &quot;for&quot; itervar &quot;in&quot; &quot;[&quot; expr &quot;,&quot; expr &quot;)&quot; &quot;{&quot; stmt &quot;}&quot;   (* min, extent *)
+store     ::= buffer_id &quot;[&quot; expr &quot;]&quot; &quot;=&quot; expr &quot;;&quot;
+block     ::= &quot;{&quot; stmt* &quot;}&quot;
+ifte      ::= &quot;if&quot; &quot;(&quot; expr &quot;)&quot; stmt (&quot;else&quot; stmt)?
+alloc     ::= &quot;alloc&quot; buffer_id &quot;;&quot;
+expr      ::= load | var | const | bin | call
+load      ::= buffer_id &quot;[&quot; expr &quot;]&quot;
+var       ::= var_id
+const     ::= float
+bin       ::= expr binop expr
+binop     ::= &quot;+&quot;|&quot;-&quot;|&quot;*&quot;|&quot;/&quot;|&quot;%&quot;|&quot;&lt;&quot;|&quot;==&quot;|&quot;max&quot;|&quot;min&quot;
+call      ::= intrin &quot;(&quot; (expr (&quot;,&quot; expr)*)? &quot;)&quot;        (* exp, sqrt, fma, ... *)
+buffer    ::= buffer_id &quot;:&quot; dtype &quot;&lt;&quot; expr (&quot;,&quot; expr)* &quot;&gt;&quot; scope
+itervar   ::= var_id &quot;:&quot; iterkind                       (* Data | Reduce *)
+scope     ::= &quot;global&quot;|&quot;local&quot;|&quot;shared&quot;                 (* shared = GPU-deferred *)</code></pre>
+<p>Maps 1:1 to the LOCKED Rust enums: <code>Stmt::{For,Store,Block,IfThenElse,Allocate}</code>,
+<code>Expr::{Load,Var,Const,Bin,Call}</code>, <code>Buffer{id,shape,dtype,scope}</code>,
+<code>IterVar{var,kind}</code> (<code>IterKind::{Data,Reduce}</code>; <code>Thread</code> deferred).</p>
+<p>TIR invariants:</p>
+<ul>
+<li><strong>T1</strong> every <code>Buffer</code> referenced by <code>Load</code>/<code>Store</code> is a <code>param</code> or appears in
+an enclosing <code>Allocate</code>.</li>
+<li><strong>T2</strong> a <code>Store</code> index expression is affine in enclosing <code>IterVar</code>s (required
+for schedule legality + bounds proofs); non-affine → <code>Opaque</code>, not scheduled.</li>
+<li><strong>T3</strong> a <code>Reduce</code> <code>IterVar</code> may only index <code>Load</code>s on the RHS, never the
+store axis of its own output (else the reduction is ill-formed).</li>
+<li><strong>T4</strong> <code>Scope::{Shared}</code> and <code>IterKind::Thread</code> are reserved (GPU-deferred);
+the CPU codegen rejects them.</li>
+</ul>
+<h4 id="sec-8-2-2">8.2.2 TensorExpr and default-PrimFunc lowering</h4>
+<p><code>TensorExpr</code> = the <em>declarative</em> compute (Halide &quot;what&quot;): an output shape + a
+pure lambda over output indices. Lowering = wrap each output axis in a <code>For</code>
+(<code>Data</code> kind) and each contracted axis in a <code>For</code> (<code>Reduce</code> kind), innermost,
+emitting the body as a <code>Store</code>.</p>
+<pre class="diagram"><code>TensorExpr {
+  name:   String,
+  shape:  Vec&lt;Expr&gt;,                 // output extents
+  axes:   Vec&lt;IterVar&gt;,              // Data axes (output) + Reduce axes
+  body:   fn(indices) -&gt; Expr,       // pure; reads input Buffers via Load
+}</code></pre>
+<p><code>lower_default(te) -&gt; PrimFunc</code> rule: nest <code>Data</code> axes outer→inner in declared
+order, then <code>Reduce</code> axes, init the store cell before the reduce loop, accumulate
+inside. Result is the <strong>naive nested-loop</strong> baseline; all performance comes from
+the schedule (<a class="cite" href="/system-design-blueprints/systems/tensor-compiler-runtime/architecture/#sec-8-3">§8.3</a>).</p>
+<h3 id="sec-8-3">8.3 Compute/schedule separation — worked matmul</h3>
+<p><strong>Compute</strong> (<code>C[i,j] = Σ_k A[i,k]*B[k,j]</code>, M=N=K=1024, f32) as <code>TensorExpr</code>:</p>
+<pre class="diagram"><code>te_matmul = TensorExpr {
+  name: &quot;matmul&quot;,
+  shape: [M, N],
+  axes:  [i:Data, j:Data, k:Reduce],
+  body:  |i,j| reduce(k, A[i,k] * B[k,j], init=0.0),
+}</code></pre>
+<p>Naive PrimFunc from <code>lower_default</code> — <code>matmul(A: f32&lt;M,K&gt; global, B: f32&lt;K,N&gt; global, C: f32&lt;M,N&gt; global)</code>: a 3-deep loop nest over <code>i ∈ [0,M)</code>, <code>j ∈ [0,N)</code>, <code>k ∈ [0,K)</code>; each output <code>C[i,j]</code> is zero-initialized then accumulated as the reduction <code>Σ_k A[i,k]·B[k,j]</code>. Row-major index algebra: <code>C[i*N+j]</code>, <code>A[i*K+k]</code>, <code>B[k*N+j]</code>. No tiling, vectorization, or parallelism yet.</p>
+<p><strong>Schedule</strong> — identical numerics, optimized loops; built from <code>Schedule::new(primfn)</code>:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Directive</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><code>split i, 64 → (i_o, i_i)</code></td>
+<td>tile rows</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>split j, 64 → (j_o, j_i)</code></td>
+<td>tile cols</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>split k, 256 → (k_o, k_i)</code></td>
+<td>tile contraction</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>reorder [i_o, j_o, k_o, i_i, k_i, j_i]</code></td>
+<td>cache-blocked iteration order</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>vectorize j_i</code></td>
+<td>innermost → 8× f32 AVX2 SIMD lanes</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>unroll k_i</code></td>
+<td>unroll the reduce tail</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>parallel i_o</code></td>
+<td>thread-pool over row tiles</td>
+</tr>
+</tbody></table></div>
+<p>Transformed loop nest (schedule applied → scheduled TIR): a <code>parallel</code> outer loop over <code>i_o ∈ [0,M/64)</code>, nested <code>j_o ∈ [0,N/64)</code> and <code>k_o ∈ [0,K/256)</code> tiles, then <code>i_i ∈ [0,64)</code>, an <code>unroll</code>ed <code>k_i ∈ [0,256)</code>, and a <code>vectorize</code>d <code>j_i ∈ [0,64)</code> mapped to 8-lane SIMD FMA/store. The accumulation <code>C[(i_o·64+i_i)·N + j_o·64+j_i] += A[(i_o·64+i_i)·K + k_o·256+k_i] · B[(k_o·256+k_i)·N + j_o·64+j_i]</code> reuses the naive nest&#39;s index algebra.</p>
+<p>Index algebra unchanged → <strong>NUM-INVARIANT</strong> holds; only iteration order +
+vector/parallel mapping differ. Targets: naive ~1–2 GFLOP/s; scheduled
+≥30 GFLOP/s single-thread avx2, ≥60% of OpenBLAS sgemm multi-thread (<a class="cite" href="/system-design-blueprints/systems/tensor-compiler-runtime/build/#sec-13">§13</a> bench).</p>
+<p>Schedule legality (checked by <code>tc-schedule</code> before apply):</p>
+<ul>
+<li><strong>L1</strong> <code>split(ax,f)</code> requires <code>extent(ax) % f == 0</code> OR emits a guarded tail
+loop (<code>IfThenElse</code>); never silently truncates.</li>
+<li><strong>L2</strong> <code>reorder</code> must keep every <code>Reduce</code> axis inside the <code>Data</code> axes that
+index its output cell (else partial sums leak across cells).</li>
+<li><strong>L3</strong> <code>vectorize(ax)</code> requires <code>ax</code> is the <strong>innermost</strong> axis and the <code>Store</code>
+index is unit-stride in <code>ax</code>; otherwise <code>Err(IllegalSchedule::NotInnermost)</code>.</li>
+<li><strong>L4</strong> <code>compute_at(stage,ax)</code>/<code>inline</code> must not move a producer below a
+consumer that reads it (dependency-preserving).</li>
+</ul>
+<h3 id="sec-8-4">8.4 (Schedule primitives summary)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Primitive</th>
+<th>Signature</th>
+<th>Effect</th>
+<th>Legality</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>split</td>
+<td><code>split(ax,f)-&gt;(o,i)</code></td>
+<td>one loop → two</td>
+<td>L1</td>
+</tr>
+<tr>
+<td>reorder</td>
+<td><code>reorder(&amp;[ax])</code></td>
+<td>permute loop order</td>
+<td>L2</td>
+</tr>
+<tr>
+<td>fuse</td>
+<td><code>fuse(a,b)-&gt;ax</code></td>
+<td>two loops → one</td>
+<td>adjacency, same body</td>
+</tr>
+<tr>
+<td>tile</td>
+<td><code>tile(ax,ay,fx,fy)</code></td>
+<td>split+split+reorder</td>
+<td>L1×2</td>
+</tr>
+<tr>
+<td>vectorize</td>
+<td><code>vectorize(ax)</code></td>
+<td>axis → SIMD lanes</td>
+<td>L3</td>
+</tr>
+<tr>
+<td>unroll</td>
+<td><code>unroll(ax)</code></td>
+<td>replicate body</td>
+<td>static extent</td>
+</tr>
+<tr>
+<td>parallel</td>
+<td><code>parallel(ax)</code></td>
+<td>axis → thread pool</td>
+<td>no loop-carried dep</td>
+</tr>
+<tr>
+<td>compute_at</td>
+<td><code>compute_at(st,ax)</code></td>
+<td>move producer inward</td>
+<td>L4</td>
+</tr>
+<tr>
+<td>inline</td>
+<td><code>inline(st)</code></td>
+<td>fold producer into consumer expr</td>
+<td>producer used once-affine</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-5">8.5 Operator fusion via dominator analysis</h3>
+<p>Goal: eliminate intermediate materialization. A <code>FusionGroup</code> is a connected
+subgraph fusable into one <code>PrimFunc</code>. Rule: an <code>Elementwise</code>/<code>Injective</code> chain
+plus at most one <code>Reduce</code> at the group head can fuse iff each member is
+<strong>dominated</strong> by the group&#39;s exit in the reverse dataflow (every path to outputs
+passes through it → safe to inline, no external reader of the intermediate).</p>
+<p>Algorithm (<code>FusionPass</code>):</p>
+<ol>
+<li>build dominator tree over the dataflow DAG (Lengauer-Tarjan, O(E·α)).</li>
+<li>seed groups at <code>Reduce</code>/<code>Opaque</code> boundaries.</li>
+<li>greedily absorb a node <code>n</code> into its dominated <code>Elementwise</code>/<code>Injective</code>
+successors while <code>fuse_pattern</code> compatible and group has ≤1 reduce.</li>
+<li>emit each <code>FusionGroup</code> → composed <code>TensorExpr</code> → <code>lower_default</code> → <code>PrimFunc</code>.</li>
+</ol>
+<p>Worked subgraph — <code>Conv2d -&gt; Add(bias) -&gt; Relu</code>:</p>
+<pre class="diagram"><code>BEFORE (3 GraphNodes, 2 intermediate tensors materialized):
+  %c = Conv2d(x,w)   -&gt; f32[1,64,112,112]   (~3.2 MB)
+  %d = Add(%c,b)     -&gt; f32[1,64,112,112]   (~3.2 MB)   &lt;- materialized
+  %y = Relu(%d)      -&gt; f32[1,64,112,112]               &lt;- materialized
+
+dominators: %y dom-by %d dom-by %c; %d,%c have no external reader
+-&gt; FusionGroup{ reduce: Conv2d, elemwise: [Add, Relu] }</code></pre>
+<p>AFTER fusion (1 PrimFunc, 0 intermediate tensors): a single loop nest over output coordinates <code>(oc, oh, ow)</code> with an inner reduction over <code>(ic, kh, kw)</code> accumulating <code>acc += x[..]·w[..]</code> (the conv reduce); the bias add (<code>acc + b[oc]</code>) and ReLU (<code>max(acc, 0)</code>) are fused into the same nest, before the lone store to <code>y[oc,oh,ow]</code>.</p>
+<p>Win: 2 fewer 3.2 MB writes + reads + 2 fewer kernel launches; the bias/relu
+ride the conv&#39;s already-hot accumulator. Fusion is the dominant CPU speedup.
+Boundary: a second consumer of <code>%c</code> (a residual add) → <code>%c</code> is <strong>not</strong>
+dominated by <code>%y</code> → fusion stops, <code>%c</code> materializes.</p>
+<h3 id="sec-8-6">8.6 Shape inference to a fixed point</h3>
+<p><code>infer_shapes</code> (a <code>tc-pass</code> analysis) propagates <code>TensorType</code> forward in
+topological order, calling each <code>OpDef::infer_type</code>. Iterate until no <code>ty</code>
+changes (a fixed point); a pure-monotone lattice (R2) → terminates in one pass
+for a DAG, ≤2 for graphs with <code>Reshape</code> back-constraints.</p>
+<p>Worked example (<code>.tcg</code> fixture above, conv branch):</p>
+<pre class="diagram"><code>iter 0:  x:f32[1,3,224,224]✓  w:f32[64,3,7,7]✓  b:f32[64]✓  c,d,y: None
+iter 1:  c = Conv2d.infer(x,w; stride=2,pad=3)
+            -&gt; [1,64, (224+2*3-7)/2+1=112, 112] = f32[1,64,112,112] ✓
+         d = Add.infer(c,b)  -&gt; broadcast b[64]-&gt;[1,64,1,1] -&gt; f32[1,64,112,112] ✓
+         y = Relu.infer(d)   -&gt; f32[1,64,112,112] ✓
+iter 2:  no change -&gt; FIXED POINT. verifier: every node.ty == Some(_).</code></pre>
+<p>Dynamic dims: <code>Dim::Dynamic(&quot;n&quot;)</code> stays symbolic; arithmetic keeps it
+(<code>n*2</code>, <code>n+pad</code>) and the node is marked <code>dynamic</code> → routed to the VM (<a class="cite" href="/system-design-blueprints/systems/tensor-compiler-runtime/architecture/#sec-8">§8</a>.7g),
+not the static <code>GraphExecutor</code>.</p>
+<h3 id="sec-8-7">8.7 MemoryPlan — liveness-based buffer reuse</h3>
+<p>After fusion + lowering, the <code>GraphExecutor</code> runs kernels in topological order.
+<code>MemoryPlan</code> computes per-tensor <strong>live ranges</strong> <code>[first_def, last_use]</code> and
+reuses storage for non-overlapping tensors — register allocation on tensors.</p>
+<p>Worked example (5 intermediates, topo order t1..t5):</p>
+<pre class="diagram"><code>tensor  bytes   live range        assigned slot
+t1      4 MB    [0, 2]            S0
+t2      4 MB    [1, 3]            S1
+t3      2 MB    [2, 2]            S2   (dies at 2)
+t4      2 MB    [3, 4]            S2   (reuses S0? no: S0 live till 2; reuse S2: free at 2) -&gt; S2
+t5      4 MB    [4, 4]            S0   (S0 free after t1 dies at 2) -&gt; S0
+peak: max simultaneously-live = slots {S0,S1,S2} at step 2 = 4+4+2 = 10 MB
+naive (no reuse) = 16 MB ; saving 37.5%</code></pre>
+<p>Algorithm: sort by <code>first_def</code>; greedy interval coloring with a free-list keyed
+by byte-size class; output <code>MemoryPlan{ tensor-&gt;StorageSlot }</code>. Aliased tensors
+(zero-copy <code>Reshape</code>/<code>Transpose</code> views, <a class="cite" href="/system-design-blueprints/systems/tensor-compiler-runtime/design/#sec-10">§10</a> NDArray) share a slot by definition
+and are excluded from coloring (their storage = producer&#39;s).</p>
+<h3 id="sec-8-8">8.8 Malformed inputs and edge cases — modeled response</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>#</th>
+<th>Condition</th>
+<th>Where caught</th>
+<th>Modeled response</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>a</td>
+<td>Shape mismatch at import (<code>Add(f32[4], f32[5])</code> non-broadcastable)</td>
+<td>importer / <code>infer_type</code></td>
+<td><code>Err(ShapeError{node,lhs,rhs})</code>; abort compile, no partial module</td>
+</tr>
+<tr>
+<td>b</td>
+<td>Untypable node (<code>Call(&quot;unknown&quot;)</code>, no <code>OpDef</code>)</td>
+<td>shape-infer fixed point + verifier</td>
+<td><code>Err(TypeError::Unresolved(node))</code>; verifier fails (R1)</td>
+</tr>
+<tr>
+<td>c</td>
+<td>Cyclic graph (importer fed a back-edge)</td>
+<td><code>Graph</code> build / topo sort</td>
+<td>rejected at construction (arena forbids fwd-ref) or <code>Err(CyclicGraph)</code> from topo</td>
+</tr>
+<tr>
+<td>d</td>
+<td>Illegal schedule: <code>vectorize</code> non-innermost / non-unit-stride</td>
+<td><code>tc-schedule</code> apply, L3</td>
+<td><code>Err(IllegalSchedule::NotInnermost)</code>; schedule unchanged, NUM-INVARIANT safe</td>
+</tr>
+<tr>
+<td>e</td>
+<td>Dynamic shape on static path (<code>Dim::Dynamic</code>)</td>
+<td>executor selection</td>
+<td>route to <code>tc-vm</code> Interpreter; <code>GraphExecutor::compile</code> returns <code>Err(DynamicShape)</code></td>
+</tr>
+<tr>
+<td>f</td>
+<td>Divide-by-zero in const fold (<code>Div(c, Const 0.0)</code>)</td>
+<td><code>const_fold</code> pass</td>
+<td>f32 → emit IEEE <code>inf</code>/<code>nan</code> (no panic, matches oracle); int → <code>Err(ConstFold::DivByZero)</code>, fold skipped, op kept</td>
+</tr>
+<tr>
+<td>g</td>
+<td><code>split</code> factor not dividing extent</td>
+<td><code>tc-schedule</code>, L1</td>
+<td>emit guarded tail loop (<code>IfThenElse</code>); never silent truncation</td>
+</tr>
+<tr>
+<td>h</td>
+<td>Reduce axis indexing its own store cell</td>
+<td>TIR verifier, T3</td>
+<td><code>Err(IllFormedReduce)</code></td>
+</tr>
+</tbody></table></div>
+<p>All errors are typed (<code>thiserror</code>), carry the offending <code>NodeId</code>/<code>AxisId</code>, and
+<strong>never</strong> produce a numerically-wrong module — fail closed.</p>
+<h3 id="sec-8-9">8.9 End-to-end compile+run sequence</h3>
+<pre class="diagram"><code> tcc        tc-graph   tc-pass    tc-fuse    tc-ir     tc-schedule  tc-codegen  tc-runtime
+  |  import     |          |          |         |           |           |           |
+  |------------&gt;| Graph    |          |         |           |           |           |
+  |             |  infer/fold/cse/dce/simplify/layout       |           |           |
+  |             |---------&gt;|          |         |           |           |           |
+  |             |          |--&gt;groups |         |           |           |           |
+  |             |          |          |-lower--&gt;| PrimFunc  |           |           |
+  |             |          |          |         |--schedule&gt;| sched TIR |           |
+  |             |          |          |         |           |--emit----&gt;| Kernel    |
+  |             |          |          |         |           |           |  cc-&gt;.so  |
+  |             |          |          |         |           |           |--Module--&gt;|
+  |  run(inputs)|          |          |         |           |           |           | plan mem
+  |--------------------------------------------------------------------------------&gt;| dispatch
+  |             |          |          |         |           |           |           |  kernels
+  |&lt;--------------------------------- output NDArray -------------------------------| (topo)
+  |  check vs oracle (rtol 1e-5 / atol 1e-6)                                        |</code></pre>
+<p>Static shapes → <code>GraphExecutor</code>; any <code>Dim::Dynamic</code> → <code>tc-vm</code> <code>Interpreter</code>
+allocates at runtime and dispatches the same compiled <code>Kernel</code>s. The terminal
+<code>check</code> gate enforces NUM-INVARIANT against the NumPy-style reference oracle.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

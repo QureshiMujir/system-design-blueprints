@@ -1,0 +1,411 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Distributed Key-Value Store — Architecture · Engineering Blueprints</title><meta name="description" content="Distributed Key-Value Store, hld: §3 overview + §8 domain model. Build a production-grade, strongly-consistent, replicated key-value store — an etcd/Consul-class coordination substrate — in Go: gRPC + JSON-HTTP-gateway APIs, MVCC with per-key revision history…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/distributed-kv-store/">Distributed Key-Value Store</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Distributed Key-Value Store</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Go</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~37 weeks</li> <li>3,029 lines</li> <li>blueprint #38</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/distributed-kv-store/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/distributed-kv-store/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/distributed-kv-store/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/distributed-kv-store/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/distributed-kv-store/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/distributed-kv-store/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/distributed-kv-store/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/distributed-kv-store/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/distributed-kv-store/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Distributed Key-Value Store — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+%% legend side: clients and peer nodes (external)
+%% legend rt: KV server components and the Raft library
+%% legend trust: request pipeline (trust boundary)
+%% legend ingest: API front ends, proposer, watcher hub, lease manager
+%% legend store: MVCC apply layer and backend (persistence)
+CL([&quot;&lt;b&gt;Clients&lt;/b&gt;&lt;br/&gt;kvctl, Go/TS SDK,&lt;br/&gt;Kubernetes-shaped controllers&quot;])
+subgraph SRV[&quot;KV Server — one process per node (cmd/kvd)&quot;]
+  direction TB
+  GRPC[&quot;&lt;b&gt;gRPC API&lt;/b&gt;&lt;br/&gt;(server)&quot;]
+  HTTP[&quot;&lt;b&gt;HTTP gateway&lt;/b&gt;&quot;]
+  AUTH[&quot;&lt;b&gt;Auth / RBAC&lt;/b&gt;&quot;]
+  RATE[&quot;&lt;b&gt;Rate limit &amp;amp; quota&lt;/b&gt;&lt;br/&gt;(rate/)&quot;]
+  PIPE[&quot;&lt;b&gt;Request Pipeline&lt;/b&gt;&lt;br/&gt;id, authn, authz, route&lt;br/&gt;[Trust boundary]&quot;]
+  PROP[&quot;&lt;b&gt;Proposer&lt;/b&gt;&lt;br/&gt;(raftnode.Node)&quot;]
+  WATCH[&quot;&lt;b&gt;Watcher hub&lt;/b&gt;&lt;br/&gt;(api/watch)&quot;]
+  LEASE[&quot;&lt;b&gt;Lease manager&lt;/b&gt;&lt;br/&gt;(api/lease)&quot;]
+  MVCC[&quot;&lt;b&gt;MVCC Apply Layer&lt;/b&gt; (internal/mvcc)&lt;br/&gt;the StateMachine: revision.go,&lt;br/&gt;key_index.go, tree.go, apply.go,&lt;br/&gt;compactor.go, reader.go&lt;br/&gt;[Concurrency boundary:&lt;br/&gt;single apply goroutine]&quot;]
+  BE[(&quot;&lt;b&gt;Backend interface&lt;/b&gt;&lt;br/&gt;(internal/backend)&lt;br/&gt;bbolt (default) | pebble | btree67&lt;br/&gt;[Persistence boundary]&quot;)]
+  GRPC --&gt; PIPE
+  HTTP --&gt; PIPE
+  AUTH --&gt; PIPE
+  RATE --&gt; PIPE
+  PIPE --&gt; PROP
+  PIPE --&gt; WATCH
+  PIPE --&gt; LEASE
+  PROP --&gt; MVCC
+  MVCC -- &quot;Notify()&quot; --&gt; WATCH
+  MVCC -- &quot;Attach/Revoke&quot; --&gt; LEASE
+  MVCC --&gt; BE
+end
+RAFT[&quot;&lt;b&gt;Raft library&lt;/b&gt;&lt;br/&gt;(rank #39 Raft-Consensus)&lt;br/&gt;one instance per node&quot;]
+PEERS([&quot;&lt;b&gt;peer nodes&lt;/b&gt;&lt;br/&gt;same topology&quot;])
+CL -- &quot;gRPC (default)&quot; --&gt; GRPC
+CL -- &quot;JSON HTTP (gateway)&quot; --&gt; HTTP
+RAFT -- &quot;StateMachine + LogStorage + StableStore&lt;br/&gt;+ Snapshotter + Transport&lt;br/&gt;[Protocol boundary / cross-project seam, §11.7]&quot; --&gt; SRV
+RAFT -- &quot;gRPC (RaftBridgeService)&lt;br/&gt;or cgo, mTLS&quot; --&gt; PEERS
+classDef rt stroke-width:1.5px
+classDef ingest stroke-width:1.5px
+classDef trust stroke-width:1.5px
+classDef side stroke-width:1.5px
+classDef store stroke-width:1.5px
+class RAFT rt
+class GRPC,HTTP,PROP,WATCH,LEASE ingest
+class AUTH,RATE,PIPE trust
+class CL,PEERS side
+class MVCC,BE store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch side"></span>clients and peer nodes (external)</li><li><span class="swatch rt"></span>KV server components and the Raft library</li><li><span class="swatch trust"></span>request pipeline (trust boundary)</li><li><span class="swatch ingest"></span>API front ends, proposer, watcher hub, lease manager</li><li><span class="swatch store"></span>MVCC apply layer and backend (persistence)</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>+-------------------------------------------------------------------------+
+|  Clients (kvctl, Go/TS SDK, Kubernetes-shaped controllers)              |
++------------------------------+--------------------+---------------------+
+                               | gRPC (default)      | JSON HTTP (gateway)
+                               v                      v
++---------------------------------------------------------------------+
+|  KV Server — one process per node (cmd/kvd)                          |
+|                                                                       |
+|  +-----------+   +------------+   +---------+   +-----------------+  |
+|  | gRPC API  |   | HTTP        |   | Auth /  |   | Rate limit &amp;    |  |
+|  | (server)  |   | gateway     |   | RBAC    |   | quota (rate/)   |  |
+|  +-----+-----+   +-----+------+   +----+----+   +--------+--------+  |
+|        |               |               |                 |           |
+|        v               v               v                 v           |
+|  +-------------------------------------------------------------+     |
+|  |  Request Pipeline (id, authn, authz, route)  [Trust boundary]|     |
+|  +-----+-----------------+----------------+----------------------+   |
+|        |                 |                |                          |
+|        v                 v                v                          |
+|  +----------+   +----------------+   +-------------+                 |
+|  | Proposer |   | Watcher hub    |   | Lease       |                 |
+|  | (raftnode|   | (api/watch)    |   | manager     |                 |
+|  |  .Node)  |   |                |   | (api/lease) |                 |
+|  +----+-----+   +-------+--------+   +------+------+                 |
+|       |                 ^                   ^                        |
+|       v                 |  Notify()         |  Attach/Revoke          |
+|  +----+---------------------------------------+-----+   [Concurrency  |
+|  |     MVCC Apply Layer (internal/mvcc) — the        |    boundary:    |
+|  |     StateMachine: revision.go, key_index.go,      |    single       |
+|  |     tree.go, apply.go, compactor.go, reader.go    |    apply        |
+|  +-----------------------+----------------------------+   goroutine]   |
+|                          |                                            |
+|                          v                        [Persistence        |
+|       +------------------+---------------------+   boundary]         |
+|       |  Backend interface (internal/backend)   |                     |
+|       |  bbolt (default) | pebble | btree67     |                     |
+|       +------------------------------------------+                    |
+|                          ^                                            |
++--------------------------+---------------------------------------------+
+                           |  StateMachine + LogStorage + StableStore
+                           |  + Snapshotter + Transport   [Protocol
+                           |                               boundary /
+                           v                               cross-project
++---------------------------------------------------------------------+  seam, §11.7]
+|  Raft library (rank #39 Raft-Consensus) — one instance per node       |
++---------------------------------------------------------------------+
+                           |
+                           v  gRPC (RaftBridgeService) or cgo, mTLS
+                    [ peer nodes, same topology ]</code></pre></details>
+<p><strong>Clients.</strong> <code>kvctl</code>, the Go/TS SDKs, and higher-level controllers issue gRPC calls directly or via
+the JSON-HTTP gateway; the gateway is generated, never hand-written (P6, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/#adr-4">ADR-04</a>).</p>
+<p><strong>Request Pipeline.</strong> Every inbound call passes through request-id assignment, authentication
+(mTLS CN or token, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-21">§21</a>), authorization (RBAC, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-21">§21</a>), and routing (writes and linearizable reads to
+the leader; serializable reads locally) before reaching a handler (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-3">I3</a>).</p>
+<p><strong>Proposer (<code>raftnode.Node</code>).</strong> Wraps writes/txns/config-changes into an <code>ApplyEnvelope</code>, calls the
+rank-39 library&#39;s propose API, and correlates the eventual <code>Apply</code> callback back to the waiting
+caller via a per-proposal channel (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-16">§16</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-13">I13</a>).</p>
+<p><strong>Watcher hub (<code>api/watch.Hub</code>).</strong> A single per-server hub; the MVCC apply layer&#39;s <code>Notify</code> posts
+every committed event to it; each watcher owns a bounded outbox and a dedicated goroutine (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-15">§15</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-4">I4</a>,
+<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/study/#sec-34">MM3</a>).</p>
+<p><strong>Lease manager (<code>api/lease.Manager</code>).</strong> A follower-replicated map of TTL&#39;d leases; only the current
+leader runs the expiry-scanning goroutine, but the map itself is written via the same Raft proposal
+path as any other mutation (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-19">§19</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/study/#sec-34">MM4</a>).</p>
+<p><strong>MVCC Apply Layer (<code>internal/mvcc</code>).</strong> The <code>StateMachine</code> implementation the Raft library calls
+into. Owns the revision counter, the in-memory key index, the bbolt-backed history store, and the
+background compactor (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/build/#sec-14">§14</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-9">I9</a>).</p>
+<p><strong>Backend interface (<code>internal/backend</code>).</strong> A narrow, swappable persistence contract; <code>bbolt</code> is the
+locked default, <code>pebble</code> and the rank-67 B-Tree engine are build-tag alternates (P10, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/#adr-5">ADR-05</a>).</p>
+<p><strong>Raft library (rank #39).</strong> Owns log replication, leader election, joint-consensus membership,
+ReadIndex computation, and snapshot chunked transport; consumed across the five-trait boundary in
+<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-7">§11.7</a> (P11, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/trade-offs/#adr-2">ADR-02</a>).</p>
+<p>All later sections (Core Schema &amp; Types <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/design/#sec-11">§11</a>, every phase, Appendix A) name the same modules, types,
+and files shown in this diagram — no renaming.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain / Data Model</h2>
+<h3 id="sec-8-1">8.1 The KV data model</h3>
+<p>A key is an opaque <code>[]byte</code>; a value is an opaque <code>[]byte</code>; every
+mutation is timestamped with a <code>Revision{Main, Sub}</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-1">§11.1</a>). A <code>KeyValue</code> record additionally
+carries <code>CreateRevision</code> (the revision at which the key first appeared in its current generation),
+<code>ModRevision</code> (the revision of the most recent write), <code>Version</code> (a per-generation write counter
+reset to 0 on delete), and an optional <code>Lease</code> attachment (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-3">§11.3</a>).</p>
+<h3 id="sec-8-2">8.2 MVCC generations</h3>
+<p>Each key&#39;s <code>KeyIndex</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-11-1">§11.1</a>) holds a list of <code>generation</code>s; a generation
+begins at a <code>Put</code> on a previously-absent (or previously-tombstoned) key and ends at a <code>Delete</code>
+(recording a <code>Tombstone</code> revision). Historical reads at revision <code>R</code> resolve to the generation whose
+<code>[Created, Tombstone)</code> interval contains <code>R</code>, or &quot;not found&quot; if no generation covers it or <code>R</code>
+predates the compaction floor (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-7">I7</a>).</p>
+<h3 id="sec-8-3">8.3 Wire format</h3>
+<p>All request/response/event/txn messages are <code>proto3</code> (RFC: Protocol Buffers
+Language Guide, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/study/#sec-5">§5</a>); every message reserves field numbers for forward compatibility (this project&#39;s
+schema-evolution policy is stated fully in <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/blueprint/#sec-29">§29</a> Compatibility &amp; Versioning). The five top-level
+services are <code>KV</code>, <code>Watch</code>,
+<code>Lease</code>, <code>Cluster</code>, <code>Auth</code> (<code>api/proto/kv/v1/*.proto</code>), plus the internal <code>RaftBridgeService</code>
+(<code>api/proto/raftbridge/v1/raftbridge.proto</code>).</p>
+<h3 id="sec-8-4">8.4 Storage record layout (bbolt)</h3>
+<p>Bucket <code>key</code>: keys are 16-byte big-endian
+<code>(revision_main uint64, revision_sub uint64)</code> tuples so byte-order iteration is revision order;
+values are the serialized <code>KeyValue</code>. Bucket <code>meta</code>: singleton keys <code>finishedCompactRev</code>,
+<code>consistentIndex</code>, <code>clusterID</code>. Bucket <code>lease</code>: <code>LeaseID → Lease</code> plus a <code>lease-key</code> bucket mapping
+<code>LeaseID → [keys]</code> for O(lease size) revocation (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-5">I5</a>). Big-endian keys are chosen so bbolt&#39;s natural
+byte-order iteration is also revision order — no secondary sort step.</p>
+<h3 id="sec-8-5">8.5 State machine (<code>ApplyEnvelope</code> dispatch)</h3>
+<p>One proto <code>oneof</code> routes every committed Raft
+entry to exactly one handler:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Envelope variant</th>
+<th>Handler</th>
+<th>Effect</th>
+<th>Invariant touched</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Put</code></td>
+<td><code>mvcc.Apply.ApplyPut</code></td>
+<td>new revision, new/updated generation, watch notify</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-9">I9</a></td>
+</tr>
+<tr>
+<td><code>Delete</code></td>
+<td><code>mvcc.Apply.ApplyDelete</code></td>
+<td>tombstone revision, generation closed</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-7">I7</a></td>
+</tr>
+<tr>
+<td><code>Txn</code></td>
+<td><code>mvcc.Apply.ApplyTxn</code></td>
+<td>evaluate <code>Compare</code>, dispatch <code>Then</code>/<code>Else</code> atomically</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-6">I6</a></td>
+</tr>
+<tr>
+<td><code>LeaseGrant</code></td>
+<td><code>lease.Manager.Grant</code></td>
+<td>new <code>Lease</code> entry, replicated</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-5">I5</a></td>
+</tr>
+<tr>
+<td><code>LeaseRevoke</code></td>
+<td><code>lease.Manager.Revoke</code></td>
+<td>delete attached keys + lease entry, one proposal</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-6">I6</a></td>
+</tr>
+<tr>
+<td><code>ConfigChange</code></td>
+<td><code>raftnode</code> joint-consensus callback</td>
+<td>membership table update</td>
+<td><a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-10">I10</a></td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-6">8.6 Worked example — Put with lease then Get at revision</h3>
+<p>Client issues <code>Put(key=&quot;/svc/a&quot;, value=&quot;10.0.0.5:9090&quot;, lease=77)</code>. Leader proposes; on commit at <code>Main=42</code>, <code>ApplyPut</code> writes
+<code>(42,0) → KeyValue{Key:&quot;/svc/a&quot;, Value:&quot;10.0.0.5:9090&quot;, CreateRevision:42, ModRevision:42, Version:1, Lease:77}</code> and attaches the key to lease 77&#39;s index. A subsequent <code>Range(key=&quot;/svc/a&quot;, Revision=42)</code> resolves via the key index to generation covering 42, returns the record above. A
+<code>Range</code> at <code>Revision=41</code> (before the key existed) returns not-found.</p>
+<h3 id="sec-8-7">8.7 Malformed-input example</h3>
+<p><code>RangeRequest{Key: &quot;/svc/a&quot;, RangeEnd: &quot;/svc/&quot;}</code> — <code>RangeEnd</code> lexically
+precedes <code>Key</code>, which the domain model defines as empty range, not an error (etcd-compatible
+semantics); the handler must special-case <code>RangeEnd &lt; Key</code> as &quot;return zero rows&quot;, not propagate a
+negative-length slice. A <code>PutRequest{IgnoreValue: true, IgnoreLease: true}</code> (refresh nothing) is
+rejected at validation with <code>INVALID_ARGUMENT</code> before it ever reaches the proposer.</p>
+<h3 id="sec-8-8">8.8 Failure-path example</h3>
+<p>A <code>Txn</code> proposal commits on a 3-node cluster, but the client&#39;s
+connection drops before the response is delivered (leader received the RPC, proposed, committed,
+but the response frame never reaches the client). The client retries with the same <code>(client_id, sequence)</code> (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-13">I13</a>); the apply layer recognizes the duplicate and returns the cached <code>ApplyResult</code>
+without re-executing <code>Then</code>/<code>Else</code> a second time — critical for txns with side-effecting compares
+(e.g., a counter increment) where naive re-application would double-count.</p>
+<h3 id="sec-8-9">8.9 State-transition table — lease lifecycle</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>From</th>
+<th>Event</th>
+<th>To</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>(absent)</td>
+<td><code>LeaseGrant(ttl)</code></td>
+<td><code>Active</code></td>
+<td>replicated via Raft; TTL clock starts at commit</td>
+</tr>
+<tr>
+<td><code>Active</code></td>
+<td><code>LeaseKeepAlive</code></td>
+<td><code>Active</code></td>
+<td>leader resets TTL deadline; no new revision</td>
+</tr>
+<tr>
+<td><code>Active</code></td>
+<td>TTL deadline passes (leader&#39;s expiry scan)</td>
+<td><code>Expiring</code></td>
+<td>leader proposes <code>LeaseRevoke</code></td>
+</tr>
+<tr>
+<td><code>Expiring</code></td>
+<td><code>LeaseRevoke</code> commits</td>
+<td><code>Revoked</code></td>
+<td>attached keys deleted atomically (<a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/distributed-kv-store/reliability/#inv-6">I6</a>)</td>
+</tr>
+<tr>
+<td><code>Active</code></td>
+<td><code>LeaseRevoke</code> (manual, via API)</td>
+<td><code>Revoked</code></td>
+<td>same atomic deletion path</td>
+</tr>
+<tr>
+<td><code>Revoked</code></td>
+<td>(terminal)</td>
+<td>—</td>
+<td>lease id never reused</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

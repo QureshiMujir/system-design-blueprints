@@ -1,0 +1,450 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Global Traffic Routing System — Architecture · Engineering Blueprints</title><meta name="description" content="Global Traffic Routing System, hld: §3 overview + §8 domain model. - Build a from-scratch GSLB / global traffic manager: endpoint/pool/health model → distributed health checking (vantage consensus + flap damping) → decision/policy engine → three steering data planes…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/">Infrastructure, DevOps &amp; Observability</a> </li><li> <a href="/system-design-blueprints/systems/global-traffic-routing-system/">Global Traffic Routing System</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:98"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/infrastructure-devops-observability/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Infrastructure, DevOps &amp; Observability</span></a> </p> <h1>Global Traffic Routing System</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~54 weeks</li> <li>1,864 lines</li> <li>blueprint #358</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/global-traffic-routing-system/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/global-traffic-routing-system/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/global-traffic-routing-system/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/global-traffic-routing-system/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/global-traffic-routing-system/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/global-traffic-routing-system/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/global-traffic-routing-system/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/global-traffic-routing-system/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/global-traffic-routing-system/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/global-traffic-routing-system/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Global Traffic Routing System — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Diagram (control plane + one edge PoP shown; edges replicated globally)</h3>
+<pre class="diagram"><code>   operator / #326 / C ─►┌──────────────────────────────────────────────────────────────┐
+   (gtrctl, policy YAML)  │  gtrd (control-plane facade) :: author · decide · propagate    │
+                          └───────────────┬──────────────────────────────────────────────┘
+                                          ▼
+        ┌──────────────────────────────────────────────────────────────────────────────────┐
+        │                                   gtr-core                                          │
+        │  Endpoint · Pool · HealthCheck · HealthState · Policy · SteeringDecision · ClientCtx │
+        └───┬──────────────────────┬─────────────────────────┬───────────────────────┬───────┘
+            ▼                      ▼                          ▼                       ▼
+   ┌──────────────────┐  ┌───────────────────┐    ┌────────────────────┐   ┌─────────────────┐
+   │      health      │  │       geo         │    │     latencymap     │   │      policy     │
+   │ probers HTTP/TCP │  │ IP→loc prefix-trie│    │ RUM ingest+aggregate│  │ failover·weight │
+   │ /ICMP · passive  │  │ ECS·geoproximity  │    │ net→endpoint latency│  │ latency·geo·MV  │
+   │ consensus·damping│  │                   │    │ latency lookup      │   │ composite (det) │
+   └────────┬─────────┘  └─────────┬─────────┘    └──────────┬─────────┘   └────────┬────────┘
+            │ health state          │ location/ECS            │ latency est.        │ decision
+            ▼                       ▼                          ▼                     ▼
+        ┌──────────────────────────────────────────────────────────────────────────────────┐
+        │                                  propagate                                          │
+        │ versioned (generation) health+config state · fan-out to edges · staleness bounds     │
+        └───────────────────────────────────────────────┬──────────────────────────────────┘
+                                                         ▼  (control→edge channel; eventual)
+   ════════════════════════════════════ EDGE PoP (one of many) ════════════════════════════════
+        ┌──────────────────────────────────────────────────────────────────────────────────┐
+        │                            gtr-edge (responder)                                     │
+        │   query → ClientCtx(geo,ECS) → policy::decide → answer                              │
+        └───┬───────────────────────────────┬──────────────────────────────┬─────────────────┘
+            ▼                                ▼                              ▼
+   ┌──────────────────┐            ┌───────────────────┐          ┌─────────────────────┐
+   │       dns        │            │     anycast       │          │   http-redirect     │
+   │ A/AAAA/CNAME     │            │ announce/withdraw │          │  302/307 + Location │
+   │ ECS-scoped · TTL │            │ per-PoP health    │          │  per-request precise│
+   │ (plugs into #162)│            │ → BGP control sink│          └─────────────────────┘
+   └──────────────────┘            └───────────────────┘
+                ▲ resolver (#65) queries                ▲ BGP fabric (#157/#355)
+
+   side: runtime (CP/edge/prober lifecycle, regional leader+epoch) · cabi (C/Python) ·
+         bench (answer latency, propagation) · conformance (policy oracle, ECS/DNS, fault-inject)</code></pre>
+<h3 id="sec-3-2">3.2 Box Narratives</h3>
+<ul>
+<li><strong><code>gtrd</code> control-plane facade.</strong> Entry points: author/load policies + pools, run the decision engine in <em>compute-the-plan</em> mode, aggregate health from probers, drive propagation to edges. Owns the authoritative config + the global health view. Thin orchestration over the crates below; regionally replicated with a leader (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/build/#sec-22">§22</a>).</li>
+<li><strong><code>gtr-core</code>.</strong> The vocabulary every crate speaks. <code>Endpoint</code> = a steerable target (IP/addr, location, weight, pool membership). <code>Pool</code> = a set of endpoints with a policy + health-check config. <code>HealthCheck</code> = a probe spec (protocol, interval, thresholds). <code>HealthState</code> = the consensus health of an endpoint (Healthy/Degraded/Unhealthy + score). <code>Policy</code> = a routing-policy AST (failover/weighted/latency/geo/multi-value/composite). <code>SteeringDecision</code> = the resolved set of endpoints to return + why. <code>ClientContext</code> = the per-query inputs (source IP, ECS subnet, resolved location, requested record type).</li>
+<li><strong><code>health</code>.</strong> The distributed health subsystem. Active probers (HTTP/HTTPS status+body, TCP connect, ICMP echo) run from N <strong>vantage points</strong>; passive signals (edge-observed errors/latency) feed in too. The <strong>consensus</strong> layer fuses per-vantage verdicts into one <code>HealthState</code> (quorum / weighted by vantage reliability) — one broken vantage cannot flap an endpoint. <strong>Flap damping</strong> suppresses oscillation (penalty accrues on each flip, decays over time; an endpoint must &quot;earn back&quot; UP). The most operationally subtle subsystem: the false-positive/reactivity dial lives here.</li>
+<li><strong><code>geo</code>.</strong> IP→location via a <strong>prefix trie</strong> over a geo DB (longest-prefix-match on the client subnet). Parses + applies <strong>ECS</strong>: if the query carries a client subnet, that subnet (not the resolver IP) drives geo; the answer is scoped to a returned <code>SCOPE PREFIX-LENGTH</code>. Computes <strong>geoproximity</strong> distance (great-circle + a per-endpoint bias) for geo-routing policies.</li>
+<li><strong><code>latencymap</code>.</strong> The RUM / latency database. Ingests <strong>real-user-measurement</strong> samples (client-network → endpoint latency) and aggregates them into a <code>client_network → endpoint → latency_estimate</code> table (the &quot;latency map&quot;). Lookup powers <strong>latency-based routing</strong>: steer a client&#39;s network to its lowest-latency healthy endpoint. Handles sparse/missing data (fall back to geoproximity) and staleness (decay old samples).</li>
+<li><strong><code>policy</code>.</strong> The decision engine. Evaluates a <code>Policy</code> AST against a <code>ClientContext</code> + the current <code>HealthState</code> + latency/geo data → a <code>SteeringDecision</code>. Policy kinds: <strong>failover</strong> (primary, then secondaries by health), <strong>weighted RR</strong> (distribute by weight), <strong>latency</strong> (latencymap lookup), <strong>geolocation</strong> (continent/country/subdivision match), <strong>geoproximity</strong> (nearest by distance + bias), <strong>multi-value answer</strong> (return up to N healthy, client picks), and <strong>composite/nested</strong> (a geo policy whose leaves are failover pools, etc.). <strong>Deterministic</strong>: same inputs → same decision (modulo the seeded weighted/MV shuffle) — the oracle property.</li>
+<li><strong><code>dns</code>.</strong> Authoritative answer generation: assemble the A/AAAA/CNAME RRset for the decided endpoints, encode <strong>ECS</strong> in the response (echo subnet + <code>SCOPE</code>), set the <strong>TTL</strong> per the TTL strategy, handle negative answers (NXDOMAIN/NODATA). Produces the per-query RRset that the authoritative server (<strong>#162</strong>) serializes onto the wire — we own the <em>answer</em>, not the zone/server.</li>
+<li><strong><code>anycast</code>.</strong> Announcement steering: from per-PoP health, decide which PoPs should <strong>announce</strong> vs <strong>withdraw</strong> an anycast prefix (a dead PoP withdraws → BGP convergence steers clients to the next-nearest live PoP). Emits announce/withdraw intents to a <strong>BGP control sink</strong> (a real BGP-4 speaker is deferred — <a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/blueprint/#sec-22-2">§22.2</a>; we ship a file/simulated sink + the decision logic). Coarse-grained (per-PoP, not per-client) but reacts at routing speed, not TTL speed.</li>
+<li><strong><code>http-redirect</code>.</strong> A minimal HTTP responder that answers with <strong>302/307 + <code>Location</code></strong> pointing at the decided endpoint. Per-request precise (no caching, no resolver in the loop) at the cost of a full RTT + a TCP/TLS setup to the redirector. Used where DNS granularity is too coarse and anycast control too blunt.</li>
+<li><strong><code>propagate</code>.</strong> Distributes the control plane&#39;s decisions (resolved pool→endpoint plans + <code>HealthState</code>) to all edge responders. <strong>Versioned</strong> by a monotonic <strong>generation number</strong>; edges apply generations in order and report their applied generation; <strong>staleness bounds</strong> define how far behind an edge may be before it is flagged. The eventual-consistency engine — its correctness (ordered, bounded-stale, no split decision) is what makes a global failover safe.</li>
+<li><strong><code>runtime</code>.</strong> Process/role lifecycle: control-plane (with <strong>regional leader + epoch</strong> fencing so two leaders never propagate conflicting generations), edge responder, prober agent; config loading; the control→edge channel setup; health/propagation membership.</li>
+<li><strong><code>bench</code> / <code>conformance</code>.</strong> Answer-latency + propagation-latency harness; the <strong>deterministic policy oracle</strong> (a reference evaluator — given inputs, the one correct decision); <strong>ECS/DNS conformance</strong> (wire-format + scope correctness vs the relevant RFCs); <strong>fault injection</strong> (kill vantages, flap endpoints, partition propagation, stale edges, malformed ECS).</li>
+</ul>
+<h3 id="sec-3-3">3.3 Boundaries</h3>
+<ul>
+<li><strong>Trust boundary:</strong> the <strong>public DNS/HTTP query path</strong> (untrusted clients/resolvers — malformed packets, spoofed ECS, query floods), the <strong>health-probe responses</strong> (an endpoint can return anything), the <strong>BGP control sink</strong> (announcements affect global routing — privileged), and the <strong>C ABI</strong>. All wire input is length-checked + bounds-validated; ECS is sanity-checked (subnet length caps, address-family).</li>
+<li><strong>Concurrency boundary:</strong> control plane (probers, aggregation, decision-plan compute, propagation fan-out) vs edge (per-query answer generation — read-mostly against a snapshot of propagated state). The edge hot path is lock-free against an atomically-swapped state generation; the control plane is sharded by pool.</li>
+<li><strong>Consistency boundary:</strong> <strong>propagation</strong> is the one eventual-consistency seam — the control plane is the source of truth, edges are eventually-consistent replicas bounded by a staleness target (I-class invariant). Within an edge, a single query reads one consistent generation snapshot (no torn reads across generations).</li>
+<li><strong>Coordination boundary:</strong> the <strong>regional leader + epoch</strong> is the only coordination point (who is allowed to advance the propagation generation); the data plane (edge answers) is fully local once state is propagated.</li>
+</ul>
+<h3 id="sec-3-4">3.4 Data-flow walk — one DNS query steered by geo + health (the canonical path)</h3>
+<ol>
+<li>A client behind resolver R asks R for <code>app.example.com</code>; R (a recursive resolver, #65) forwards to the authoritative server (#162) which invokes <code>gtr-edge</code> at the nearest PoP (anycast-routed to the edge).</li>
+<li><code>gtr-edge</code> builds a <code>ClientContext</code>: source = R&#39;s IP; if R sent <strong>ECS</strong>, the client subnet (e.g. <code>203.0.113.0/24</code>) overrides R&#39;s IP for geo (I-ECS); <code>geo::locate</code> does a longest-prefix lookup → client location = &quot;EU/DE&quot;.</li>
+<li><code>policy::decide</code> evaluates the pool&#39;s policy (say <em>geolocation: EU→eu-pool, US→us-pool, default→us-pool</em>) against the location → selects <code>eu-pool</code>; <code>eu-pool</code>&#39;s inner policy is <em>failover(primary=eu-west-1, secondary=eu-central-1)</em>.</li>
+<li>The current propagated <code>HealthState</code> (generation G, staleness &lt; bound, I-PROP) says <code>eu-west-1</code> = Unhealthy (consensus across vantages, I-CONS), <code>eu-central-1</code> = Healthy → failover picks <code>eu-central-1</code>.</li>
+<li><code>dns::answer</code> assembles an A record for <code>eu-central-1</code>&#39;s IP, sets TTL per the TTL strategy (short during an active failover — <a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/architecture/#sec-8-7">§8.7</a>), echoes the ECS subnet with <code>SCOPE = /24</code>, and returns the RRset to #162 to serialize.</li>
+<li>R caches the answer for the TTL and serves all its clients in <code>203.0.113.0/24</code> that endpoint until the TTL expires (eventual consistency — Consequence 1, <a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/blueprint/#sec-2-7">§2.7</a>); a <code>DecisionTrace</code> recorded policy path, location, chosen endpoint, health, generation, ECS scope.</li>
+<li>When <code>eu-west-1</code> recovers, the prober vantages re-reach consensus (after flap-damping confirms stability), the control plane advances the generation, propagation pushes G+1 to edges, and <em>new</em> queries (after TTL) steer back — the failover RTO is <code>detect + damp + propagate + TTL</code> (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/numbers/#sec-4">§4</a>).</li>
+</ol>
+<h3 id="sec-3-5">3.5 Per-role concurrency model (control plane, edge, prober)</h3>
+<ul>
+<li><strong>Prober agent:</strong> an async pool of probe tasks (one per (endpoint, check) scheduled at its interval); results batched + reported upstream over a control channel; isolated per-vantage so a slow probe never blocks others.</li>
+<li><strong>Control plane:</strong> sharded by pool — a health-aggregation task per pool fuses vantage reports into <code>HealthState</code> (consensus + damping); a decision-plan compute task recomputes resolved plans on health/config change; a propagation task fans generations out to edges; a regional-leader task holds the epoch lease. No global lock; shards are independent.</li>
+<li><strong>Edge responder:</strong> the hot path is <strong>read-mostly</strong> — each query reads an <code>Arc</code>-swapped immutable <code>EdgeState</code> snapshot (current generation&#39;s pools + health + latency/geo data) → answer generation touches no locks (principle 9). State updates from propagation build a new snapshot and atomically swap the <code>Arc</code> (RCU-style); in-flight queries finish on the old snapshot (no torn reads).</li>
+<li><strong>Synchronization:</strong> the only cross-task coordination is the generation epoch (leader) and the atomic snapshot swap at edges. The answer path is allocation-light and lock-free, which is what permits the sub-ms tail (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/numbers/#sec-4">§4</a>).</li>
+<li>This separation (probe ≠ aggregate ≠ decide ≠ propagate ≠ answer) is what lets the data plane stay fast and lock-free while the control plane does the heavy stateful work.</li>
+</ul>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Endpoints, Health, Policy, ECS/DNS, Propagation</h2>
+<h3 id="sec-8-1">8.1 Endpoint / pool model</h3>
+<ul>
+<li>An <code>Endpoint</code> is a steerable target: <code>{ id, addr (IPv4/IPv6 or CNAME target), location (lat,lon,country,continent), weight, healthcheck_ref, pool_ref }</code>.</li>
+<li>A <code>Pool</code> groups endpoints under one <code>Policy</code> + one <code>HealthCheck</code> spec: <code>{ id, name, endpoints: Vec&lt;EndpointId&gt;, policy: Policy, healthcheck: HealthCheck, ttl }</code>.</li>
+<li>A <code>PolicySet</code> (Route-53-&quot;traffic-policy&quot;-style) is the top-level: a name → a (possibly nested) <code>Policy</code> whose leaves resolve to pools/endpoints.</li>
+<li>Endpoints can be shared across pools; <strong>health is computed once per endpoint</strong> (per its check), not per pool (I-PROBE-BUDGET).</li>
+</ul>
+<h3 id="sec-8-2">8.2 Health-check model + consensus</h3>
+<ul>
+<li>A <code>HealthCheck</code> = <code>{ kind: Http{path,expect_status,expect_body?} | Tcp{port} | Icmp, interval, timeout, k_fail, k_pass }</code>.</li>
+<li>Each <strong>vantage point</strong> runs the check independently → a per-vantage verdict <code>{Up|Down, rtt, ts}</code>.</li>
+<li><strong>Consensus:</strong> the control plane fuses vantage verdicts into one <code>HealthState ∈ {Healthy, Degraded, Unhealthy}</code> using a <strong>quorum</strong> (≥ ⌈(V+1)/2⌉ agree) optionally weighted by per-vantage reliability (I-CONS). <code>Degraded</code> = quorum-Up but elevated RTT / partial failures → eligible but de-preferred.</li>
+<li><strong>State transitions</strong> require <code>k_fail</code> consecutive failing intervals to go Up→Down and <code>k_pass</code> to go Down→Up (hysteresis), <em>and</em> quorum at each step.</li>
+</ul>
+<h3 id="sec-8-3">8.3 Flap damping (the stability mechanism)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Event</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Endpoint flips state (Up↔Down)</td>
+<td>penalty += <code>flip_cost</code></td>
+</tr>
+<tr>
+<td>Each interval with no flip</td>
+<td>penalty *= <code>decay</code> (exponential decay)</td>
+</tr>
+<tr>
+<td>penalty ≥ <code>suppress_threshold</code></td>
+<td>endpoint <strong>damped</strong>: held in current (usually Down) state, not eligible to re-steer</td>
+</tr>
+<tr>
+<td>penalty &lt; <code>reuse_threshold</code> (after decay)</td>
+<td>damping released; endpoint re-eligible</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>Borrowed from BGP route-flap damping. Prevents an oscillating endpoint from re-steering global traffic every interval (I-DAMP). The thresholds are the reactivity-vs-stability dial (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/numbers/#sec-4-3">§4.3</a>); too aggressive → a recovering endpoint is held down too long; too lax → thrash.</li>
+</ul>
+<h3 id="sec-8-4">8.4 The routing-policy AST (EBNF sketch)</h3>
+<pre class="diagram"><code>Policy   := Failover | Weighted | Latency | Geolocation | Geoproximity | MultiValue | Composite
+Failover := &quot;failover&quot; &quot;{&quot; &quot;primary&quot; Target (&quot;secondary&quot; Target)* &quot;}&quot;
+Weighted := &quot;weighted&quot; &quot;{&quot; (Target &quot;weight&quot; INT)+ &quot;}&quot;
+Latency  := &quot;latency&quot; &quot;{&quot; Target+ &quot;}&quot;                          // pick lowest-latency healthy (latencymap)
+Geolocation := &quot;geolocation&quot; &quot;{&quot; (Region &quot;-&gt;&quot; Target)+ (&quot;default&quot; &quot;-&gt;&quot; Target)? &quot;}&quot;
+Geoproximity := &quot;geoproximity&quot; &quot;{&quot; (Target &quot;bias&quot; INT)+ &quot;}&quot;     // nearest by distance + bias
+MultiValue := &quot;multivalue&quot; &quot;{&quot; Target+ &quot;max&quot; INT &quot;}&quot;            // return up to N healthy
+Composite := &lt;any Policy whose Target is itself a Policy or a Pool&gt;   // nesting
+Target   := EndpointRef | PoolRef | Policy
+Region   := &quot;continent&quot; STR | &quot;country&quot; STR | &quot;subdivision&quot; STR</code></pre>
+<ul>
+<li><strong>Evaluation</strong> (<code>policy::decide</code>) is a deterministic AST walk against <code>(ClientContext, HealthSnapshot, LatencyMap, GeoDb)</code> → <code>SteeringDecision</code> (I-DET). Health filters first (unhealthy targets removed); then the policy selects among healthy; fallback (I-FAILSAFE) if none.</li>
+</ul>
+<h3 id="sec-8-5">8.5 Worked policy evaluation (composite: geo → failover)</h3>
+<pre class="diagram"><code>Policy: geolocation { continent &quot;EU&quot; -&gt; Pool eu ; continent &quot;NA&quot; -&gt; Pool us ; default -&gt; Pool us }
+  Pool eu: failover { primary eu-west-1 ; secondary eu-central-1 }
+  Pool us: weighted { us-east-1 weight 70 ; us-west-2 weight 30 }
+Client ctx: ECS 203.0.113.0/24 → geo = EU/DE.   Health: eu-west-1=Unhealthy, eu-central-1=Healthy.
+Eval: geolocation matches &quot;EU&quot; → Pool eu → failover → primary eu-west-1 filtered (Unhealthy) →
+      secondary eu-central-1 (Healthy) → SteeringDecision { endpoints:[eu-central-1], ttl:30s(failover),
+      ecs_scope:/24, trace: geo(EU)→failover→eu-central-1 }.</code></pre>
+<h3 id="sec-8-6">8.6 ECS handling + scope (RFC 7871)</h3>
+<ul>
+<li>The OPT pseudo-RR (EDNS0) may carry an <strong>ECS option</strong>: <code>{ FAMILY (1=IPv4,2=IPv6), SOURCE PREFIX-LENGTH, SCOPE PREFIX-LENGTH, ADDRESS }</code>.</li>
+<li>On <strong>query</strong>: <code>SCOPE = 0</code>; <code>SOURCE PREFIX-LENGTH</code> + <code>ADDRESS</code> carry the client subnet the resolver chose to reveal (e.g. /24).</li>
+<li>We <strong>validate</strong> (I-ECS-SAFE): family ∈ {1,2}; <code>SOURCE</code> ≤ caps (default 24 for v4, 56 for v6); address bits beyond <code>SOURCE</code> zeroed.</li>
+<li>Geo uses that subnet for LPM (I-ECS) instead of the resolver IP.</li>
+<li>On <strong>response</strong>: echo the option with <code>SCOPE PREFIX-LENGTH</code> = the granularity at which the answer is valid (the coarsest prefix that still yields this answer — <a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/numbers/#sec-4-2">§4.2</a> cache-vs-accuracy). <code>SCOPE 0</code> = answer applies to all subnets (no ECS tailoring).</li>
+<li>Caching: the resolver keys its cache on <code>(name, type, ECS scope)</code> → the scope we return controls cache fragmentation (principle 10).</li>
+</ul>
+<h3 id="sec-8-7">8.7 TTL + negative-caching strategy</h3>
+<ul>
+<li><strong>Steady-state TTL:</strong> configurable per pool (default 300 s) — balances reactivity vs resolver/auth load (principle 7).</li>
+<li><strong>During an active failover / unstable health:</strong> TTL is <strong>shortened</strong> (default 30 s) so the eventual-consistency window narrows when it matters (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/numbers/#sec-4-1">§4.1</a>).</li>
+<li><strong>TTL floor:</strong> a minimum (e.g. 5 s) to prevent pathological re-query storms (I-TTL).</li>
+<li><strong>Negative caching (RFC 2308):</strong> NXDOMAIN/NODATA carry the SOA-minimum TTL (we supply it to #162); a transient all-unhealthy must <em>not</em> be cached as NXDOMAIN long — we prefer I-FAILSAFE (return last-known) over an NXDOMAIN that resolvers cache.</li>
+<li><strong>Anycast vs DNS reactivity:</strong> for latency-critical pools, pair a longer DNS TTL with anycast withdrawal (routing-speed reaction) so the TTL floor does not gate failover (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/architecture/#sec-8-8">§8.8</a>).</li>
+</ul>
+<h3 id="sec-8-8">8.8 Anycast / BGP announcement control</h3>
+<ul>
+<li>A set of PoPs announce the <em>same</em> anycast prefix; the routing fabric (modeled by #355, real session by #157) delivers each client to its nearest-by-BGP PoP (catchment).</li>
+<li><strong>Steering = announce/withdraw:</strong> an unhealthy PoP <strong>withdraws</strong> the prefix → BGP converges → its catchment shifts to the next-nearest live PoP. Reacts at <em>convergence</em> speed (seconds), <strong>no TTL floor</strong>, but <strong>per-PoP, not per-client/per-endpoint</strong> (coarse).</li>
+<li>We emit <code>Announce(prefix, pop)</code> / <code>Withdraw(prefix, pop)</code> <strong>intents</strong> to a <strong>BGP control sink</strong>. A real BGP-4 speaker is deferred (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/blueprint/#sec-22-2">§22.2</a>, <code>PhaseDeferred</code>); <a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/architecture/#p-8">P8</a> ships the decision logic + a file/simulated sink + a hook to #157.</li>
+<li>Hazards: withdrawing a PoP shifts its load onto neighbors → a <strong>thundering herd</strong> / cascade if a large PoP withdraws (a neighbor now over-capacity). The control plane models catchment load (coarsely) and supports gradual/partial withdrawal.</li>
+</ul>
+<h3 id="sec-8-9">8.9 Steering-mechanism comparison (the core tradeoff, <a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/blueprint/#sec-2-7">§2.7</a>)</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>Granularity</th>
+<th>Reactivity</th>
+<th>Cost</th>
+<th>Use when</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>DNS answer</strong></td>
+<td>per-resolver / per-ECS-subnet</td>
+<td>TTL-floored (slow)</td>
+<td>cheap; cache-amplified by ECS</td>
+<td>default geo/latency/weighted steering</td>
+</tr>
+<tr>
+<td><strong>Anycast withdraw</strong></td>
+<td>per-PoP (coarse)</td>
+<td>BGP convergence (~s); no TTL floor</td>
+<td>needs BGP control; load-shift hazard</td>
+<td>latency-critical failover; DDoS shedding</td>
+</tr>
+<tr>
+<td><strong>HTTP 3xx redirect</strong></td>
+<td>per-request (precise)</td>
+<td>instant per request</td>
+<td>+1 RTT + TCP/TLS to redirector</td>
+<td>fine control when DNS too coarse</td>
+</tr>
+</tbody></table></div>
+<ul>
+<li>No single best mechanism (principle 1). Many real systems layer them: DNS for coarse geo, anycast for fast regional failover, redirect for per-request precision.</li>
+</ul>
+<h3 id="sec-8-10">8.10 Worked example — latency-based routing via the latency map</h3>
+<ul>
+<li>Goal: steer client network <code>198.51.100.0/24</code> to its <strong>lowest-latency healthy</strong> endpoint among <code>{us-east-1, us-west-2, eu-west-1}</code>.</li>
+<li>The <code>latencymap</code> holds RUM-aggregated estimates: <code>198.51.100.0/24 → {us-east-1: 22 ms, us-west-2: 65 ms, eu-west-1: 95 ms}</code> (decayed real-user samples).</li>
+<li><code>policy::decide</code> (Latency policy): filter by health (all Healthy) → look up the client network in the latency map → pick <code>us-east-1</code> (22 ms).</li>
+<li><strong>Sparse-data fallback:</strong> if the client network has no RUM samples, fall back to <strong>geoproximity</strong> (nearest by great-circle distance) → and emit <code>latency_fallback=geoproximity</code> in the trace.</li>
+<li><strong>Staleness:</strong> samples decay (an endpoint that got slower must lose its old low estimate) → the map is re-aggregated on a window; stale entries below a confidence threshold trigger the geoproximity fallback.</li>
+<li>Contrast with <a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/architecture/#sec-8-5">§8.5</a> geolocation: geolocation is a <em>static</em> region→pool map (no measurement); latency is <em>measured</em> and adapts to real network conditions — but needs data and is noisier.</li>
+</ul>
+<h3 id="sec-8-11">8.11 DNS query/answer sequence (ECS path)</h3>
+<pre class="diagram"><code>client → resolver R (#65)              R → auth (#162) → gtr-edge                 gtr-edge → R
+  │ A? app.example.com ───────────────►│                                            │
+  │   (R chooses to send ECS /24) ─────►│ OPT{ECS: 203.0.113.0/24, SCOPE 0} ───────► │
+  │                                     │   validate ECS (I-ECS-SAFE)               │
+  │                                     │   geo::locate(203.0.113.0/24) → EU/DE     │
+  │                                     │   policy::decide → eu-central-1 (I-DET)   │
+  │                                     │   dns::answer: A=…, TTL=30, ECS SCOPE=/24 │
+  │ ◄─ A app.example.com 30 IN A … ─────┤ ◄── RRset + OPT{ECS SCOPE /24} ───────────┤
+  │   R caches under (name,A,ECS /24)   │   DecisionTrace recorded (I11)            │</code></pre>
+<ul>
+<li>The edge holds one snapshot (I-SNAP); the answer path is lock-free (principle 2); the <code>DecisionTrace</code> is emitted on completion.</li>
+</ul>
+<h3 id="sec-8-12">8.12 Propagation + consistency model</h3>
+<ul>
+<li>The control plane is the <strong>source of truth</strong>: it computes a <code>ResolvedPlan</code> (pools, endpoints, current <code>HealthState</code>, latency-map deltas, policy versions) and stamps it with a monotonic <strong>generation number</strong> <code>G</code> (advanced only by the leader, I-LEADER).</li>
+<li><strong>Propagation:</strong> push <code>G</code> (full or delta) to all edges; each edge applies in order (I-ORDER), atomically swaps its snapshot (I-SNAP), and <strong>acks</strong> its applied generation.</li>
+<li><strong>Staleness:</strong> the control plane tracks <code>leader_gen − edge_gen</code> per edge; an edge beyond <code>N</code> generations / <code>T</code> seconds is <strong>stale</strong> (I-PROP) → flagged, re-pushed, possibly quarantined (stop sending it new clients via anycast).</li>
+<li><strong>Eventual consistency:</strong> edges converge to <code>G</code>; during a push, edges may transiently be at <code>G</code> or <code>G−1</code> (a query reads one consistent snapshot, never a mix — I-SNAP). A <em>split</em> (some edges at a generation that steers away from a dead region, others still at a generation that steers to it) is bounded by the staleness window and observable via per-edge generation telemetry.</li>
+<li><strong>Why ordered + bounded:</strong> an unordered apply could overwrite fresh health with stale (I-ORDER prevents); an unbounded lag could leave an edge steering to a long-dead region (I-PROP bounds it) — both are the difference between a safe failover and a dangerous one (principle 5).</li>
+</ul>
+<h3 id="sec-8-13">8.13 State machines</h3>
+<ul>
+<li><strong>Endpoint health:</strong> <code>Unknown → (k_pass) Healthy ⇄ Degraded ⇄ (k_fail) Unhealthy</code>; any rapid oscillation → <code>Damped(held)</code> (I-DAMP) → decays back.</li>
+<li><strong>Edge:</strong> <code>Booting → Syncing(catching up to leader gen) → Live(within staleness) → {Stale(flagged) | Quarantined}</code>; <code>Live ↔ Stale</code> by the staleness monitor.</li>
+<li><strong>Control-plane leader:</strong> <code>Follower → Candidate → Leader(epoch e) → {Stepped-down | Fenced(stale epoch)}</code> (I-LEADER).</li>
+<li><strong>Anycast PoP:</strong> <code>Announcing ⇄ Withdrawing(unhealthy) ⇄ Drained</code>.</li>
+</ul>
+<h3 id="sec-8-14">8.14 Edge / failure-path examples</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Case</th>
+<th>Expected</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ECS present</td>
+<td>geo uses subnet, answer echoes SCOPE (I-ECS)</td>
+</tr>
+<tr>
+<td>ECS spoofed / oversized SOURCE</td>
+<td>validated + rejected → resolver-IP fallback (I-ECS-SAFE)</td>
+</tr>
+<tr>
+<td>all endpoints in a pool unhealthy</td>
+<td>I-FAILSAFE → return last-known/all (not empty/NXDOMAIN)</td>
+</tr>
+<tr>
+<td>single vantage reports DOWN, quorum UP</td>
+<td>endpoint stays UP (I-CONS) — no false re-steer</td>
+</tr>
+<tr>
+<td>endpoint oscillating Up/Down</td>
+<td>damped + held (I-DAMP) — no thrash</td>
+</tr>
+<tr>
+<td>edge propagation lagging</td>
+<td>serve last-good snapshot (principle 3); flagged Stale (I-PROP)</td>
+</tr>
+<tr>
+<td>two control-plane leaders (split)</td>
+<td>epoch fencing rejects the stale one (I-LEADER)</td>
+</tr>
+<tr>
+<td>malformed DNS/EDNS packet</td>
+<td>bounds-checked parse → FORMERR/ignore (I-WIRE/I-ARG)</td>
+</tr>
+<tr>
+<td>no latency-map data for a network</td>
+<td>fall back to geoproximity (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/architecture/#sec-8-10">§8.10</a>)</td>
+</tr>
+<tr>
+<td>anycast PoP withdraw overloads neighbor</td>
+<td>gradual withdrawal; catchment-load telemetry (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/architecture/#sec-8-8">§8.8</a>)</td>
+</tr>
+<tr>
+<td>no ECS sent by resolver</td>
+<td>geo from resolver IP, documented inaccuracy (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/blueprint/#sec-2-7">§2.7</a>)</td>
+</tr>
+<tr>
+<td>record type AAAA but only A endpoints</td>
+<td>NODATA with SOA-min TTL (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/architecture/#sec-8-7">§8.7</a>), not NXDOMAIN</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section><section class="prose" aria-labelledby="principles-h"><h2 id="sec-6">Design principles<small class="muted"> (§6)</small></h2><ul><li id="p-1"><strong>Steering is a decision, not a mechanism; mechanisms are pluggable.</strong> The <code>policy</code> engine computes <em>which endpoint</em>; DNS/anycast/redirect are interchangeable ways to <em>deliver</em> it. <em>Violation:</em> policy logic baked into the DNS path → can&#39;t reuse it for anycast/redirect, can&#39;t test it in isolation.</li><li id="p-2"><strong>The data plane is read-mostly and lock-free; the control plane does the stateful work.</strong> Edges answer from an atomically-swapped immutable snapshot (principle 9). <em>Violation:</em> taking a lock per query → tail-latency collapse under QPS, the sub-ms SLO is gone.</li><li id="p-3"><strong>Stale-but-available beats fresh-but-unavailable.</strong> An edge with lagging propagation answers from its last-good snapshot rather than failing. <em>Violation:</em> refusing to answer when behind → a propagation hiccup becomes a global DNS outage (the worst failure mode).</li><li id="p-4"><strong>Health must be stable, not just fast: consensus + flap damping are mandatory.</strong> A single vantage cannot re-steer traffic; an oscillating endpoint is damped. <em>Violation:</em> per-vantage instant re-steer → one broken probe path or a flapping endpoint thrashes global traffic (self-inflicted outage).</li><li id="p-5"><strong>Propagation is ordered and bounded-stale; never split.</strong> Generations apply in order; staleness is bounded + observable; a partial failover is detectable. <em>Violation:</em> unordered/unbounded propagation → some edges steer to a dead region while others don&#39;t (split steering — worse than slow).</li><li id="p-6"><strong>Determinism: same inputs → same decision (modulo a seeded shuffle).</strong> The decision engine is a pure function of (policy, context, health, generation, seed) — the oracle property. <em>Violation:</em> nondeterministic decisions → untestable, undebuggable steering (&quot;why did this client get that endpoint?&quot;).</li><li id="p-7"><strong>The TTL is a first-class, policy-controlled output — and an honest one.</strong> TTL trades reactivity for cache load; it shortens during failover. <em>Violation:</em> a fixed long TTL → failovers take the full TTL; a fixed short TTL → resolver/auth overload. Pretending TTL doesn&#39;t gate reactivity → wrong RTO expectations.</li><li id="p-8"><strong>Fail-safe, not fail-open or fail-closed blindly: a steering failure defaults to the safest available answer.</strong> No health data → return all-configured (last-known) rather than empty. <em>Violation:</em> empty answer on uncertainty → clients get NXDOMAIN/SERVFAIL → total outage from a control-plane wobble.</li><li id="p-9"><strong>The answer hot path is allocation-light and touches no shared mutable state.</strong> Geo/latency/policy lookups read immutable structures; the answer buffer is from a per-task pool. <em>Violation:</em> per-query allocation + shared mutation → GC-like pauses, contention, tail blowup.</li><li id="p-10"><strong>ECS is honored, sanity-checked, and scope-minimized.</strong> Echo the client subnet, validate it (length caps, family), return the coarsest correct <code>SCOPE</code>. <em>Violation:</em> trusting ECS blindly → spoofed-subnet steering abuse + cache poisoning; over-fine scope → cache explosion (<a class="cite" href="/system-design-blueprints/systems/global-traffic-routing-system/numbers/#sec-4-2">§4.2</a>).</li><li id="p-11"><strong>Observability of every steering decision.</strong> Each answer can emit a <code>DecisionTrace</code>: policy path, client location, ECS scope, chosen endpoint, health state, generation, TTL. <em>Violation:</em> opaque steering → &quot;why did this client hit that region?&quot; is unanswerable in an incident.</li><li id="p-12"><strong>The control plane has one writer per generation (leader + epoch).</strong> Only the regional leader advances the propagation generation; epoch fencing rejects a stale leader. <em>Violation:</em> two leaders advancing generations → conflicting global state, split steering (principle 5 broken at the source).</li><li id="p-13"><strong>Probe load on endpoints is bounded and respectful.</strong> A capped probe rate per (endpoint, vantage, interval); shared health, not per-pool re-probing. <em>Violation:</em> unbounded health checks → the GSLB DDoSes its own endpoints (a real outage cause).</li><li id="p-14"><strong>Correctness anchored to the deterministic policy oracle + RFC conformance.</strong> Every decision is checkable against a reference evaluator; every ECS/DNS wire output against the RFC. <em>Violation:</em> no oracle → steering bugs ship silently and manifest as mysterious regional imbalance in production.</li></ul></section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

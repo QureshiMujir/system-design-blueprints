@@ -1,0 +1,522 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>CDC Replication Pipeline End-to-End — Architecture · Engineering Blueprints</title><meta name="description" content="CDC Replication Pipeline End-to-End, hld: §3 overview + §8 domain model. This project builds, from scratch in Rust, a production-grade change-data-capture (CDC) replication pipeline: a connector process that tails one source database's write-ahead log (WAL) or binary-log…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/cdc-replication-pipeline/">CDC Replication Pipeline End-to-End</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>CDC Replication Pipeline End-to-End</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~30 weeks</li> <li>2,794 lines</li> <li>blueprint #215</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/cdc-replication-pipeline/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/cdc-replication-pipeline/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/cdc-replication-pipeline/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/cdc-replication-pipeline/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/cdc-replication-pipeline/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/cdc-replication-pipeline/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/cdc-replication-pipeline/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/cdc-replication-pipeline/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/cdc-replication-pipeline/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:CDC Replication Pipeline End-to-End — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>   +------------------+
+   | Source Database   |  WAL / binlog via a replication slot (trust boundary, TLS)
+   | (Postgres/MySQL)  |------------------------------------+
+   +------------------+                                      |
+                                                               v
+                                              +-----------------------------+
+                                              | capture-postgres/mysql       |  1 task/source
+                                              | (ReplicationSlot handle)     |  at-least-once
+                                              +---------------+---------------+
+                                                              | raw frames
+                                                              v
+                                              +-----------------------------+
+                                              | decode-engine                 |  tx reassembly
+                                              +---------------+---------------+
+                                                              | ChangeEvent (per-tx)
+                                                              v
+                                              +-----------------------------+
+                                              | lsn-tracker                   |  total order (I1,I4)
+                                              +---------------+---------------+
+                                        +--------------------+--------------------+
+                                        v                                          v
+                          +-----------------------+                 +------------------------+
+                          | snapshot-reader         |&lt;---------------&gt;| handoff-coordinator     |
+                          | (chunked table scan)    |  watermarks     | (DBLog state machine)   |
+                          +-----------------------+                 +------------+------------+
+                                                                                  | merged stream
+                                                                                  v
+                                                                    +-----------------------+
+                                                          DDL events--&gt; schema-registry        |
+                                                                    +-----------+-----------+
+                                                                                | gated DML (I9)
+                                                                                v
+                                                                    +-----------------------+
+                                                                    | transform-engine        |
+                                                                    +-----------+-----------+
+                                                                                v
+                                                                    +-----------------------+
+                                                                    | router                   |  table/key
+                                                                    +--+------+------+------+--+
+                                                                       v      v      v      v
+                                                               +------+ +------+ +------+ +------+
+                                                               |sink- | |sink- | |sink- | |sink- |
+                                                               |db    | |search| |wareh.| |log   |
+                                                               +--+---+ +--+---+ +--+---+ +--+---+
+                                                                  +--------+-------+--------+
+                                                                           v
+                                                    +----------------------------------------+
+                                                    | offset-store (Checkpoint, I5/I6/I8)      |
+                                                    | lag-monitor (LagMetric)                   |
+                                                    +----------------------------------------+</code></pre>
+<p>Source Database: external trust boundary; this pipeline never writes to it; the WAL/binlog
+ordering it produces is authoritative and cannot be second-guessed downstream.</p>
+<p><code>capture-postgres</code>/<code>capture-mysql</code>: one task per source, holds the <code>ReplicationSlot</code> handle,
+speaks the source&#39;s native replication protocol over TLS, converts network bytes into raw
+frames; boundary between untrusted network input and this process&#39;s memory (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#t-4">T4</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#sec-24">§24</a>).</p>
+<p><code>decode-engine</code>: reassembles frames into per-transaction <code>ChangeEvent</code> sets, validates frame
+checksums, buffers open transactions bounded by memory quota (P6).</p>
+<p><code>lsn-tracker</code>: assigns the total order <code>(lsn, txid, event_seq)</code> (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/architecture/#sec-8">§8</a>) to every event; the
+single authority resume/dedup/ordering all derive from (P1).</p>
+<p><code>snapshot-reader</code>: chunked, lock-minimal consistent reader of a table&#39;s current rows for
+bootstrap; persistence boundary is the source&#39;s own MVCC/consistent-read mechanism, not this
+pipeline&#39;s.</p>
+<p><code>handoff-coordinator</code>: runs the DBLog watermark algorithm (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/architecture/#sec-8">§8</a>) per table; the concurrency
+boundary between the snapshot path and the stream path; owns <code>HandoffState</code>.</p>
+<p><code>schema-registry</code>: durable, fleet-replicated; gates DML behind DDL application (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-9">I9</a>);
+persistence boundary between in-memory schema cache and the durable registry store.</p>
+<p><code>transform-engine</code>: stateless-by-default per-event transform pipeline (rename/filter/
+mask/derive); a <code>Transform</code> failure routes to the DLQ, never blocks the stream (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-11">I11</a>).</p>
+<p><code>router</code>: maps table/key to a sink-set; the fan-out boundary — one event may address 0..N
+sinks.</p>
+<p><code>sink-db</code>/<code>sink-search</code>/<code>sink-warehouse</code>/<code>sink-log</code>: heterogeneous <code>Sink</code> implementations;
+each owns its own apply protocol boundary (SQL transaction, HTTP bulk API, batched merge,
+append) and idempotency mechanism (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/architecture/#sec-8">§8</a> sequence table).</p>
+<p><code>offset-store</code>: durable persistence boundary for <code>Checkpoint</code>; the atomic-commit boundary
+that makes exactly-once effect possible (P5, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-5">I5</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-6">I6</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-8">I8</a>).</p>
+<p><code>backpressure</code>: cross-cutting credit-based flow-control boundary spanning every queue between
+<code>decode-engine</code> and the sink appliers (P6, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-13">I13</a>).</p>
+<p><code>lag-monitor</code>: read-only observer computing <code>LagMetric</code> from <code>offset-store</code> and slot state;
+the operational-visibility boundary (P11, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/blueprint/#sec-26">§26</a>).</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-change-event-envelope">Change-Event Envelope</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>source_id</td>
+<td><code>SourceId</code></td>
+<td>which source connector produced this event</td>
+</tr>
+<tr>
+<td>lsn</td>
+<td><code>Lsn</code></td>
+<td>source log-sequence-number, the total-order key (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-1">I1</a>, P1)</td>
+</tr>
+<tr>
+<td>txid</td>
+<td><code>Txid</code></td>
+<td>source transaction id the event belongs to</td>
+</tr>
+<tr>
+<td>event_seq</td>
+<td><code>u32</code></td>
+<td>position within the transaction (tie-break at equal LSN)</td>
+</tr>
+<tr>
+<td>op</td>
+<td><code>Op</code></td>
+<td><code>Insert</code> / <code>Update</code> / <code>Delete</code> / <code>Truncate</code> / <code>Ddl</code></td>
+</tr>
+<tr>
+<td>table</td>
+<td><code>TableId</code> (<code>schema.table</code>)</td>
+<td>target table</td>
+</tr>
+<tr>
+<td>schema_version</td>
+<td><code>SchemaVersion</code></td>
+<td>registry version this row conforms to (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-9">I9</a>)</td>
+</tr>
+<tr>
+<td>before</td>
+<td><code>Option&lt;RowImage&gt;</code></td>
+<td>pre-image (<code>Update</code>/<code>Delete</code> only)</td>
+</tr>
+<tr>
+<td>after</td>
+<td><code>Option&lt;RowImage&gt;</code></td>
+<td>post-image (<code>Insert</code>/<code>Update</code> only)</td>
+</tr>
+<tr>
+<td>commit_ts</td>
+<td><code>Timestamp</code></td>
+<td>source commit wall-clock; informational, never ordering (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/trade-offs/#adr-24">ADR-24</a>)</td>
+</tr>
+<tr>
+<td>idempotency_key</td>
+<td><code>IdempotencyKey</code></td>
+<td>primary-key + LSN hash for sink-side dedup (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-2">I2</a>)</td>
+</tr>
+<tr>
+<td>checksum</td>
+<td><code>u64</code></td>
+<td>integrity check over the encoded envelope</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-lsn-offset-model-ordering">LSN/Offset Model &amp; Ordering</h3>
+<pre class="diagram"><code>total_order(e)   = (e.lsn, e.txid, e.event_seq)                 // lexicographic, I1/I4
+resume_point(s)  = max { c.committed_lsn : c in Checkpoints(s) }              // I5
+slot_advance_lsn = min { resume_point(s) : s in AllSinks(connector) }         // I6</code></pre>
+<p>The slowest-committing sink gates the slot advance — the mechanism behind <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-6">I6</a>/<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-10">I10</a>.</p>
+<h3 id="sec-8-snapshot-plus-stream-bootstrap-the-dblog-watermark-handoff">Snapshot-Plus-Stream Bootstrap: the DBLog Watermark Handoff</h3>
+<p>Named steps (per table, per chunk):</p>
+<ol>
+<li><strong>Low Watermark</strong> — before scanning chunk <code>C</code>, <code>handoff-coordinator</code> inserts a low
+watermark <code>W_lo</code> into the <em>stream</em> buffer at the then-current LSN.</li>
+<li><strong>Chunk Select</strong> — <code>snapshot-reader</code> reads chunk <code>C = { pk in [k_start, k_end] }</code> via a
+single consistent-read query, no long-held lock (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/trade-offs/#adr-6">ADR-06</a>).</li>
+<li><strong>High Watermark</strong> — after <code>C</code> is read, <code>handoff-coordinator</code> inserts a high watermark
+<code>W_hi</code> into the stream buffer at the then-current LSN.</li>
+<li><strong>Window Dedup</strong> — any <em>stream</em> event for a row in <code>C</code> with LSN in <code>[W_lo, W_hi]</code> is
+buffered (&quot;the window&quot;). After <code>W_hi</code>, for each row in <code>C</code>: if a window event exists for
+that key, it wins (it postdates the snapshot read); else the snapshot row wins. Exactly
+one image per key is emitted.</li>
+<li><strong>Advance</strong> — repeat 1–4 per chunk until the table is covered; the final chunk&#39;s <code>W_hi</code>
+becomes the table&#39;s handoff LSN; <code>HandoffState</code> flips to <code>Streaming</code> for that table.</li>
+</ol>
+<p>Worked example (chunk of keys <code>{10,11,12}</code>):</p>
+<ul>
+<li>LSN 100: <code>W_lo</code> emitted.</li>
+<li>Snapshot read returns rows for keys 10, 11, 12 as of a consistent read.</li>
+<li>LSN 105: stream <code>UPDATE key=11</code> arrives (falls in the window).</li>
+<li>LSN 108: <code>W_hi</code> emitted.</li>
+<li>Reconciliation: key 10 → snapshot image (no window event). Key 11 → window <code>UPDATE</code>
+image (LSN 105 postdates the read). Key 12 → snapshot image.</li>
+<li>Result: exactly 3 rows emitted, no duplicate, no missing row (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-7">I7</a>).</li>
+</ul>
+<h3 id="sec-8-exactly-once-effect-protocol">Exactly-Once-Effect Protocol</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Actor</th>
+<th>Action</th>
+<th>Crash Here → Effect</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td><code>decode-engine</code></td>
+<td>decode <code>ChangeEvent</code>, assign <code>IdempotencyKey = hash(table, pk, lsn)</code></td>
+<td>event never produced; resume re-decodes from last slot position, no duplicate risk</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>router</code>/<code>transform-engine</code></td>
+<td>route + transform, forward to <code>sink-runtime</code></td>
+<td>event lost pre-sink; resume re-decodes and re-routes from checkpoint (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-5">I5</a>)</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>sink-runtime</code></td>
+<td>look up <code>IdempotencyKey</code> in the sink&#39;s dedup store</td>
+<td>crash before lookup: retry re-does lookup, no side effect yet</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>sink-runtime</code></td>
+<td>if key seen, skip (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-2">I2</a>); else idempotent upsert by primary key into the sink</td>
+<td>crash mid-upsert: the sink&#39;s own transaction atomicity (or an idempotent PUT) guarantees the row is either fully applied or not — never partially</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>sink-runtime</code></td>
+<td>record <code>IdempotencyKey</code> in the sink&#39;s dedup store (same transaction as step 4 where possible, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/trade-offs/#adr-9">ADR-09</a>)</td>
+<td>crash between 4 and 5: retry re-applies step 4 as a no-op upsert (same after-image, safe) and re-records the key</td>
+</tr>
+<tr>
+<td>6</td>
+<td><code>offset-store</code></td>
+<td>atomically commit <code>Checkpoint{sink_id, lsn}</code> only after step 5 acks</td>
+<td>crash before commit: resume redelivers from last committed LSN, replaying 1–5; step 4&#39;s upsert-by-key absorbs the replay (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-5">I5</a>)</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>lsn-tracker</code></td>
+<td>advance the replication slot position to <code>min(committed offset)</code> across sinks (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-6">I6</a>)</td>
+<td>crash before advance: slot retains more WAL than strictly needed, bounded by <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-10">I10</a> — never loses events</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-schema-evolution-model">Schema-Evolution Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Change</th>
+<th>sink-db</th>
+<th>sink-search</th>
+<th>sink-warehouse</th>
+<th>sink-log</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Add column</td>
+<td><code>ALTER TABLE ADD COLUMN</code> (nullable/default), applied immediately</td>
+<td>add field to index mapping, backfill lazily on next write</td>
+<td>add nullable column; historical rows unaffected</td>
+<td>envelope gains an optional field; older consumers ignore it (P14)</td>
+</tr>
+<tr>
+<td>Drop column</td>
+<td><code>ALTER TABLE DROP COLUMN</code> after an N-event grace period, avoiding in-flight-read breakage</td>
+<td>remove field from mapping only after grace period; serve stale field until then</td>
+<td>mark deprecated, do not physically drop (avoids re-partitioning cost)</td>
+<td>field omitted going forward; <code>schema_version</code> bump signals it</td>
+</tr>
+<tr>
+<td>Rename column</td>
+<td>resolved via a <code>SchemaRegistry</code> alias: old name maps to the new physical column</td>
+<td>reindex under the new field name with a read-compatibility alias during transition</td>
+<td>add new column, backfill via batch job, drop old column later</td>
+<td>both old and new field emitted during the transition window</td>
+</tr>
+<tr>
+<td>Type widen (e.g. <code>int32→int64</code>)</td>
+<td><code>ALTER COLUMN TYPE</code> if the sink DB supports safe widening; else new column + backfill + swap</td>
+<td>reindex the field with the new type; dual-field during transition</td>
+<td>new typed column + backfill; old column deprecated</td>
+<td>envelope carries the typed value; <code>schema_version</code> bump makes the type explicit</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-ddl-handling-rules">DDL Handling Rules</h3>
+<ul>
+<li>DDL arrives in the same ordered stream as DML at its true source LSN (P8).</li>
+<li><code>decode-engine</code> emits <code>Op::Ddl</code> carrying the raw statement plus a parsed schema diff.</li>
+<li><code>schema-registry</code> validates the diff against its compatibility mode (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/blueprint/#sec-27">§27</a>) before accepting.</li>
+<li><code>router</code> blocks DML for the affected table until the DDL is applied to <code>schema-registry</code>
+(<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-9">I9</a>), bounded by backpressure (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-13">I13</a>), never indefinitely.</li>
+<li>Each sink independently maps the abstract schema diff to its own DDL dialect (table above)
+— sinks are never required to change in lockstep.</li>
+</ul>
+<h3 id="sec-8-pipeline-lifecycle-state-machine">Pipeline Lifecycle State Machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Trigger</th>
+<th>Next State</th>
+<th>Failure Edge</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Snapshotting</td>
+<td>connector start, no prior checkpoint</td>
+<td>Handoff (all chunks done)</td>
+<td><code>SnapshotReadError</code> → Failed</td>
+</tr>
+<tr>
+<td>Handoff</td>
+<td>last chunk&#39;s high watermark reached</td>
+<td>Streaming (per table)</td>
+<td><code>ReconciliationMismatch</code> → Snapshotting (re-snapshot chunk)</td>
+</tr>
+<tr>
+<td>Streaming</td>
+<td>handoff complete for all tables</td>
+<td>Paused (operator or sustained backpressure)</td>
+<td><code>DecodeError</code>/<code>SlotLost</code> → Failed</td>
+</tr>
+<tr>
+<td>Paused</td>
+<td>operator pause or sustained backpressure breach</td>
+<td>Resuming</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Resuming</td>
+<td>resume signal, checkpoint read</td>
+<td>Streaming</td>
+<td><code>CheckpointCorrupt</code> → Failed</td>
+</tr>
+<tr>
+<td>Failed</td>
+<td>any unrecoverable error above</td>
+<td>Resuming (after remediation)</td>
+<td>— (terminal until remediated)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-dead-letter-poison-event-handling">Dead-Letter / Poison-Event Handling</h3>
+<p>A <code>DeadLetter</code> record captures <code>{event, error, first_seen, retry_count}</code>. <code>sink-runtime</code>
+retries a failing apply with bounded exponential backoff (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/trade-offs/#adr-16">ADR-16</a>) up to a retry ceiling,
+then routes to the <code>sink-log</code>-backed DLQ and continues the stream for unrelated keys (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-11">I11</a>).
+An event that fails schema validation at decode is DLQ&#39;d immediately, no retry
+(unrecoverable-by-retry class).</p>
+<h3 id="sec-8-worked-end-to-end-example">Worked End-to-End Example</h3>
+<p>Source <code>UPDATE orders SET status=&#39;shipped&#39; WHERE id=42</code> commits at LSN 5000, txid 900.
+<code>decode-engine</code> emits <code>ChangeEvent{lsn:5000, txid:900, op:Update, table:orders, before:{status:&quot;pending&quot;}, after:{status:&quot;shipped&quot;}}</code>. <code>lsn-tracker</code> assigns
+<code>total_order=(5000,900,0)</code>. <code>router</code> sends it to <code>sink-db</code> and <code>sink-search</code> per the routing
+rule for <code>orders</code>. <code>sink-db</code> upserts by <code>pk=42</code>; <code>sink-search</code> updates document <code>id=42</code>.
+Both record <code>IdempotencyKey=hash(orders,42,5000)</code>. <code>offset-store</code> commits
+<code>Checkpoint{sink-db,5000}</code> and <code>Checkpoint{sink-search,5000}</code>. <code>lsn-tracker</code> advances the
+slot to LSN 5000 once both checkpoints commit (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-6">I6</a>).</p>
+<h3 id="sec-8-malformed-failure-path-examples">Malformed / Failure-Path Examples</h3>
+<ul>
+<li>Schema change mid-stream without a matching DDL event (e.g. <code>wal2json</code> misconfigured
+without DDL capture): <code>schema-registry</code> detects column drift via a mismatched <code>RowImage</code>
+field set, halts DML for that table, alerts (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-14">I14</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#fm-7">FM-7</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#sec-25">§25</a>).</li>
+<li>Slot falling behind and dropped by the source (retained-WAL breach; admin runs
+<code>pg_drop_replication_slot</code>): <code>capture-postgres</code> sees a &quot;slot does not exist&quot; error on next
+poll, transitions the pipeline to Failed, requires a full re-snapshot (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-10">I10</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#fm-2">FM-2</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#sec-25">§25</a>).</li>
+<li>Sink apply failure (e.g. a unique-constraint violation from a bad transform): retried per
+the DLQ policy above; after the retry ceiling, DLQ&#39;d, pipeline continues (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-11">I11</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#fm-5">FM-5</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#sec-25">§25</a>).</li>
+<li>Duplicate delivery (a connector restart replays an already-applied LSN range):
+<code>sink-runtime</code>&#39;s step-3 <code>IdempotencyKey</code> lookup absorbs it as a no-op (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-2">I2</a>).</li>
+<li>Out-of-order arrival (a transform re-orders within a batch): <code>router</code>&#39;s per-key sequencer
+re-orders before <code>sink-runtime</code> sees it; if it cannot (cross-partition), reject + DLQ +
+alert (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-4">I4</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#fm-6">FM-6</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#sec-25">§25</a>).</li>
+<li>A transaction spanning a chunk boundary during handoff: window dedup (Step 4 above)
+guarantees the newest-LSN image per key wins regardless of which side of the chunk
+boundary its commit lands on — the mechanism is per-key, not per-transaction (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-7">I7</a>).</li>
+<li>Failure-path example: the connector crashes mid-apply (step 4 of the sequence table
+above). On restart, <code>lsn-tracker</code> reads the last committed <code>Checkpoint</code> (LSN 4990),
+<code>decode-engine</code> resumes the replication stream from the corresponding slot position and
+re-decodes LSN 5000&#39;s event; <code>sink-runtime</code>&#39;s dedup lookup (step 3) finds no prior key
+(step 5 never completed) and safely re-applies the idempotent upsert — net effect identical
+to a single apply (<a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-2">I2</a>, <a class="cite" href="/system-design-blueprints/systems/cdc-replication-pipeline/reliability/#inv-5">I5</a>).</li>
+</ul>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

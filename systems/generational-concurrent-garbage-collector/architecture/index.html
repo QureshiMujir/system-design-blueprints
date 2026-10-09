@@ -1,0 +1,429 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Generational / Concurrent Garbage Collector — Architecture · Engineering Blueprints</title><meta name="description" content="Generational / Concurrent Garbage Collector, hld: §3 overview + §8 domain model. Build a from-scratch generational, concurrent, tracing garbage collector in Rust, deployed as a library linked into a managed runtime (host language VM or embedded interpreter) via an explicit…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/">Languages, Compilers &amp; Runtimes</a> </li><li> <a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/">Generational / Concurrent Garbage Collector</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:235"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/languages-compilers-runtimes/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Languages, Compilers &amp; Runtimes</span></a> </p> <h1>Generational / Concurrent Garbage Collector</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>12 phases</li> <li>~20 weeks</li> <li>1,812 lines</li> <li>blueprint #244</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Generational / Concurrent Garbage Collector — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">flowchart TB
+  %% legend rt: the collector&#39;s own main components
+  %% legend ingest: barrier, marker and supporting state
+  %% legend trust: safepoint and root snapshot (STW only)
+  %% legend store: generations, card table, mark state
+  MUT[&quot;&lt;b&gt;MUTATOR&lt;/b&gt;&lt;br/&gt;alloc()&lt;br/&gt;field write&quot;]
+  YG[(&quot;&lt;b&gt;YOUNG GENERATION&lt;/b&gt;&lt;br/&gt;Nursery (Eden) +&lt;br/&gt;Survivor spaces&quot;)]
+  WB[&quot;&lt;b&gt;WRITE BARRIER&lt;/b&gt;&lt;br/&gt;card-mark (old-&amp;gt;young)&lt;br/&gt;SATB / incr-update (mark)&quot;]
+  CT[(&quot;&lt;b&gt;CARD TABLE /&lt;br/&gt;REMEMBERED SET&lt;/b&gt;&quot;)]
+  OG[(&quot;&lt;b&gt;OLD GENERATION&lt;/b&gt;&lt;br/&gt;free-list / regions&quot;)]
+  TC[(&quot;&lt;b&gt;TRI-COLOR MARK STATE&lt;/b&gt;&lt;br/&gt;White | Gray | Black map&quot;)]
+  CM[&quot;&lt;b&gt;CONCURRENT MARKER&lt;/b&gt;&lt;br/&gt;(runs alongside mutator)&quot;]
+  MAJ[&quot;&lt;b&gt;MAJOR GC: concurrent sweep&lt;br/&gt;or mark-compact&lt;/b&gt;&lt;br/&gt;(forwarding pointers if compacting)&quot;]
+  SP[&quot;&lt;b&gt;SAFEPOINT + ROOT SCANNER&lt;/b&gt;&lt;br/&gt;(STW root snapshot only —&lt;br/&gt;not a full-heap trace)&quot;]
+  MUT -- &quot;bump-ptr alloc&quot; --&gt; YG
+  MUT -- &quot;write barrier fires&quot; --&gt; WB
+  YG -- &quot;minor GC (Cheney copy)&lt;br/&gt;promotion (age N)&lt;br/&gt;across CONCURRENCY BOUNDARY&lt;br/&gt;(mutator threads || collector threads)&quot; --&gt; OG
+  WB -- &quot;records into&quot; --&gt; CT
+  CT -- &quot;scanned as extra minor roots&quot; --&gt; OG
+  OG -- &quot;major GC trigger (occupancy threshold)&lt;br/&gt;INTER-GENERATIONAL BOUNDARY:&lt;br/&gt;nursery &amp;lt;-&amp;gt; old, crossed only by&lt;br/&gt;promotion/barrier&quot; --&gt; TC
+  TC &lt;--&gt; CM
+  TC -- &quot;mark complete&quot; --&gt; MAJ
+  CM -- &quot;consumes&lt;br/&gt;SATB log / dirty cards&quot; --&gt; MAJ
+  MAJ --&gt; SP
+  classDef rt stroke-width:1.5px
+  classDef ingest stroke-width:1.5px
+  classDef trust stroke-width:1.5px
+  classDef store stroke-width:1.5px
+  class MUT,MAJ rt
+  class WB,CM ingest
+  class SP trust
+  class YG,CT,OG,TC store</pre><figcaption><ul class="diagram-legend"><li><span class="swatch rt"></span>the collector&#39;s own main components</li><li><span class="swatch ingest"></span>barrier, marker and supporting state</li><li><span class="swatch trust"></span>safepoint and root snapshot (STW only)</li><li><span class="swatch store"></span>generations, card table, mark state</li></ul><p class="diagram-note">Drawn from the text diagram in §3.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>                       +-----------------------------+
+                       |           MUTATOR            |
+                       |  alloc()      field write     |
+                       +--------+-----------+----------+
+              bump-ptr alloc    |           | write barrier fires
+                                v           v
+              +--------------------+   +---------------------------+
+              |  YOUNG GENERATION  |   |      WRITE BARRIER        |
+              |  Nursery (Eden) +  |   | card-mark (old-&gt;young)    |
+              |  Survivor spaces   |   | SATB / incr-update (mark) |
+              +---------+----------+   +-------------+--------------+
+                        | minor GC (Cheney copy)      | records into
+                        v                              v
+   ======== CONCURRENCY BOUNDARY (mutator threads || collector threads) ========
+                        |                    +----------------------------+
+     promotion (age N)  |                    |  CARD TABLE /              |
+                        |                    |  REMEMBERED SET            |
+                        v                    +-------------+--------------+
+              +--------------------+                       | scanned as
+              |   OLD GENERATION   |&lt;----------------------+ extra minor roots
+              | free-list / regions|
+              +---------+----------+
+                        | major GC trigger (occupancy threshold)
+                        v
+   INTER-GENERATIONAL BOUNDARY (nursery &lt;-&gt; old, crossed only by promotion/barrier)
+   +----------------------------+        +-----------------------------+
+   |  TRI-COLOR MARK STATE      |&lt;------&gt;|  CONCURRENT MARKER          |
+   |  White | Gray | Black map  |        |  (runs alongside mutator)   |
+   +-------------+--------------+        +--------------+--------------+
+                 | mark complete                          | consumes
+                 v                                         | SATB log / dirty cards
+   +----------------------------------------------------+ |
+   |  MAJOR GC: concurrent sweep  or  mark-compact        |&lt;+
+   |  (forwarding pointers if compacting)                 |
+   +-------------------------+----------------------------+
+                             v
+                 +-----------------------------+
+                 |  SAFEPOINT + ROOT SCANNER    |
+                 |  (STW root snapshot only —   |
+                 |   not a full-heap trace)     |
+                 +-----------------------------+</code></pre></details>
+<p>Mutator: the application thread(s); the only code paths that allocate (bump-pointer into the nursery via a TLAB) and mutate the object graph (every pointer store passes through the write barrier). Correctness of the whole system depends on the mutator never bypassing the barrier (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-8">I8</a>).</p>
+<p>Write Barrier: the single mechanism serving two masters — recording old→young pointers for the remembered set/card table (generational correctness, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-3">I3</a>) and preserving the tri-color invariant during concurrent marking (SATB or incremental-update, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-2">I2</a>). Runs on the mutator&#39;s hot path; its per-store cost is the collector&#39;s permanent throughput tax (P2, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-7">ADR-07</a>, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-8">ADR-08</a>).</p>
+<p>Young Generation: nursery (Eden) plus survivor spaces, collected by a Cheney-style copying scavenge (minor GC). Bump-pointer allocation is possible only because the young gen is moving — dead space needs no bookkeeping, it is simply not copied forward.</p>
+<p>Card Table / Remembered Set: the coarse-grained record of old→young references so a minor GC need not scan the (much larger) old generation for roots — only dirty cards plus true roots (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/architecture/#sec-8">§8</a>).</p>
+<p>Old Generation: free-list (or region) managed space holding promoted survivors; collected rarely by a major GC (concurrent mark, then sweep or compact).</p>
+<p>Tri-Color Mark State: the White/Gray/Black bitmap (or per-object mark bits) that makes &quot;has this object been found reachable yet&quot; a first-class, incrementally-updatable state instead of an all-or-nothing STW sweep (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/architecture/#sec-8">§8</a>, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-2">I2</a>).</p>
+<p>Concurrent Marker: background thread(s) tracing the old-gen object graph while the mutator continues to run and allocate; correctness rests entirely on the barrier maintaining the tri-color invariant while the marker races the mutator (P3, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-5">I5</a>).</p>
+<p>Major GC (sweep/compact): after mark completes, reclaims white objects (sweep) or additionally relocates survivors to reduce fragmentation (compact, forwarding pointers, optionally a read barrier if compaction is itself concurrent — Phase 10).</p>
+<p>Safepoint + Root Scanner: the brief, unavoidable stop-the-world moment needed to take a consistent root snapshot before/at the start of a marking cycle and before a moving minor GC; the <em>only</em> full-STW component in the steady-state design (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-7">I7</a>, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/architecture/#sec-8">§8</a>).</p>
+<p>Promotion path: an object survives enough minor cycles (age ≥ tenuring threshold) or exceeds a size class, so it is copied from a survivor space into the old generation rather than back into the nursery — the boundary crossing that requires the write barrier&#39;s remembered-set half.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 Object and Heap Layout</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Location</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>mark bits (2)</td>
+<td>object header</td>
+<td>tri-color state: 00=White, 01=Gray, 10=Black</td>
+</tr>
+<tr>
+<td>forwarding pointer</td>
+<td>object header (union with mark bits pre-forward)</td>
+<td>relocation target once copied/compacted</td>
+</tr>
+<tr>
+<td>generation tag</td>
+<td>object header</td>
+<td>Nursery / Survivor(k) / Old</td>
+</tr>
+<tr>
+<td>age counter</td>
+<td>object header (young only)</td>
+<td>minor cycles survived, drives promotion (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-15">ADR-15</a>)</td>
+</tr>
+<tr>
+<td>size class</td>
+<td>object header</td>
+<td>old-gen free-list bucket selection</td>
+</tr>
+<tr>
+<td>type descriptor ptr</td>
+<td>object header</td>
+<td>host-provided field-offset map for precise scanning</td>
+</tr>
+</tbody></table></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Space</th>
+<th>Kind</th>
+<th>Allocation</th>
+<th>Collected by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Nursery (Eden)</td>
+<td>bump-pointer, moving</td>
+<td>TLAB bump</td>
+<td>minor GC (Cheney scavenge)</td>
+</tr>
+<tr>
+<td>Survivor (From/To)</td>
+<td>bump-pointer, moving</td>
+<td>scavenge copy target only</td>
+<td>minor GC</td>
+</tr>
+<tr>
+<td>Old generation</td>
+<td>free-list / regions, non-moving by default</td>
+<td>free-list allocation on promotion</td>
+<td>major GC (concurrent mark + sweep/compact)</td>
+</tr>
+<tr>
+<td>Humongous region</td>
+<td>direct-to-old, size ≥ threshold</td>
+<td>bypasses nursery entirely (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-15">ADR-15</a>)</td>
+<td>major GC only</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Tri-Color Abstraction</h3>
+<p>State diagram:</p>
+<figure class="mermaid-figure"><button type="button" class="diagram-expand" aria-label="Expand diagram" title="Expand diagram">⤢</button><pre class="mermaid">stateDiagram-v2
+  [*] --&gt; WHITE : allocate / reset
+  WHITE --&gt; GRAY : marker visits obj,&lt;br/&gt;pushes to gray stack
+  GRAY --&gt; BLACK : all fields scanned
+  BLACK --&gt; WHITE : new object allocated black&lt;br/&gt;(allocate-black policy, concurrent mark only)</pre><figcaption><p class="diagram-note">Drawn from the text diagram in §8.2.</p></figcaption></figure>
+<details class="diagram-original"><summary>Show the original text diagram</summary><pre class="diagram"><code>      allocate/reset          marker visits obj,          all fields
+            |                 pushes to gray stack          scanned
+            v                       |                          |
+        [ WHITE ] ---------------&gt; [ GRAY ] -----------------&gt; [ BLACK ]
+            ^                                                      |
+            |                new object allocated black            |
+            +------------------------------------------------------+
+                         (allocate-black policy, concurrent mark only)</code></pre></details>
+<p>Formal invariant (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-2">I2</a>): for every edge (a → b) in the object graph observed at any instant during concurrent marking, NOT (color(a) = Black AND color(b) = White) unless a gray object g exists such that the marker has not yet finished scanning g and b remains reachable from g. The write barrier&#39;s entire job is to prevent this forbidden edge from ever existing unobserved: it does so either by graying b before the store is visible (incremental-update/Dijkstra) or by logging the pre-write referent so it is treated as if still reachable from the snapshot (SATB/Yuasa).</p>
+<h3 id="sec-8-3">8.3 Write-Barrier Taxonomy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Card Table (generational)</th>
+<th>Remembered Set (generational, precise)</th>
+<th>SATB (concurrent, Yuasa)</th>
+<th>Incremental-Update (concurrent, Dijkstra)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Records</td>
+<td>&quot;this card is dirty&quot; (coarse)</td>
+<td>exact old→young edges</td>
+<td>pre-write value of overwritten field</td>
+<td>new value being written</td>
+</tr>
+<tr>
+<td>Barrier cost</td>
+<td>1 store, no branch on value (unconditional)</td>
+<td>store + edge insertion, branch</td>
+<td>branch + conditional log-append</td>
+<td>branch + conditional gray-mark</td>
+</tr>
+<tr>
+<td>Space</td>
+<td>O(heap / card size)</td>
+<td>O(old→young edge count)</td>
+<td>O(mutation rate × cycle length)</td>
+<td>O(gray-stack growth)</td>
+</tr>
+<tr>
+<td>Floating garbage</td>
+<td>n/a (not a mark barrier)</td>
+<td>n/a</td>
+<td>higher — dead objects logged as live persist to next cycle</td>
+<td>lower — only newly-stored referents graying</td>
+</tr>
+<tr>
+<td>Used for</td>
+<td><a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-3">I3</a> (minor GC roots)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-3">I3</a>, alternative to card table</td>
+<td><a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-2">I2</a> (concurrent mark)</td>
+<td><a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-2">I2</a> (concurrent mark)</td>
+</tr>
+</tbody></table></div>
+<p>Worked example — card-table barrier firing: mutator executes <code>old_obj.field = young_ref;</code> where <code>old_obj</code> is in the old generation and <code>young_ref</code> points into the nursery. The barrier computes <code>card_index = addr(old_obj) &gt;&gt; CARD_SHIFT</code> and stores <code>dirty</code> into <code>card_table[card_index]</code> unconditionally (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-7">ADR-07</a>&#39;s fast path takes no branch on the <em>value</em>, only on whether the store target is old-gen — precomputed at codegen time by the host). At the next minor GC, the scavenger scans every dirty card as an extra root source alongside true stack/register roots, finds <code>young_ref</code>, and correctly retains/copies it forward. What it protects: the specific young object <code>young_ref</code> — without this barrier firing, the minor GC would see no reference to it from within the nursery/roots and would reclaim it despite <code>old_obj</code> being alive and pointing to it (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-3">I3</a> violation → <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-1">I1</a> violation).</p>
+<p>Worked example — SATB barrier firing: mutator executes <code>some_obj.field = new_ref;</code> overwriting the old value <code>old_ref</code> while concurrent marking is in progress. The SATB barrier intercepts the write <em>before</em> it becomes visible, appends <code>old_ref</code> to the thread-local SATB buffer (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-11">I11</a>), and only then performs the store. When the SATB buffer is flushed to the global mark queue, <code>old_ref</code> is treated as reachable from the marking snapshot even though the live mutator graph no longer points to it after this store. What it protects: <code>old_ref</code> — without the barrier, if <code>old_ref</code> was White and this was its last reference, it would never be grayed, yet it may still be reachable via some other black object not yet rescanned, producing an <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-2">I2</a>/<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-1">I1</a> violation (the classic &quot;lost object&quot; race first solved by Dijkstra 1978, specialized to snapshot semantics by Yuasa 1990).</p>
+<p>Worked example — incremental-update (Dijkstra) barrier firing: <code>black_obj.field = white_ref;</code> where <code>black_obj</code> has already been fully scanned (Black) and <code>white_ref</code> is a not-yet-visited object. The incremental-update barrier intercepts the write and, before or immediately after the store becomes visible, pushes <code>white_ref</code> onto the gray stack (transitioning it White→Gray) rather than logging the old value. What it protects: <code>white_ref</code> — without this barrier, the newly created edge <code>black_obj → white_ref</code> would be exactly the forbidden Black→White edge <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-2">I2</a> disallows, since <code>black_obj</code> will never be rescanned to discover it. Contrast with the SATB worked example directly above: SATB protects the object being <em>overwritten</em> (the old referent), incremental-update protects the object being <em>newly stored</em> (the new referent) — this asymmetry is precisely why <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-8">ADR-08</a> frames the choice as a floating-garbage-vs-barrier-shape tradeoff (P10): SATB conservatively over-retains (both the old and, transitively, anything only reachable through it), while incremental-update only grays what is freshly discovered, at the cost of a barrier that must run even on stores that do not overwrite any previous reference (e.g. initializing a previously-null field).</p>
+<h3 id="sec-8-4">8.4 Minor Collection (Cheney-Style Copying Scavenge)</h3>
+<p>Named steps:</p>
+<ol>
+<li>Safepoint reached, roots snapshotted (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-7">I7</a>).</li>
+<li>Flip roles: current &quot;to-space&quot; survivor becomes scan target; nursery + old &quot;from-space&quot; survivor are the source.</li>
+<li>Copy every root-reachable object from Eden/From-survivor into To-survivor, leaving a forwarding pointer in the original header (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-9">I9</a>).</li>
+<li>Cheney scan: walk the To-survivor space itself with a scan pointer trailing the allocation pointer — every field of a just-copied object is itself followed and copied if not already forwarded, until scan pointer catches allocation pointer (terminates in O(survivors)).</li>
+<li>Consult dirty cards/remembered set (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-3">I3</a>) as additional roots for old→young edges.</li>
+<li>Age every surviving object; if age ≥ tenuring threshold or object is oversized, promote to old gen instead of To-survivor (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-15">ADR-15</a>) — allocate from the old-gen free-list, mark the promotion in the remembered set if it retains old→young edges.</li>
+<li>Reset Eden and From-survivor as available bump-pointer space; resume mutator.</li>
+</ol>
+<p>Worked scavenge: Eden holds objects A(live, referenced by root R), B(dead), C(live, referenced by A). Root scan finds R→A. Copy A to To-survivor at offset 0, leave <code>A.forward = to+0</code>. Cheney scan pointer visits copied-A&#39;s fields: finds A→C, C not yet forwarded, copy C to To-survivor at offset (sizeof A), set <code>C.forward</code>, rewrite A&#39;s copied field to point at new C. Scan pointer advances past copied-A, reaches copied-C, finds no further live fields, scan pointer catches allocation pointer — scavenge complete. B, never visited, is implicitly reclaimed (Eden is simply reset). Total work: O(|{A,C}|), independent of Eden&#39;s total size — this is P1&#39;s mechanism made concrete.</p>
+<h3 id="sec-8-5">8.5 Major Collection (Concurrent Mark, Then Sweep or Compact)</h3>
+<p>Named steps:</p>
+<ol>
+<li>Initial mark (STW, short): snapshot old-gen roots plus every card-table-referenced object as gray.</li>
+<li>Concurrent mark: marker thread(s) drain the gray stack, scanning each object&#39;s fields, transitioning White→Gray→Black, while the mutator runs under the chosen barrier (SATB/incremental-update, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/architecture/#sec-8-3">§8.3</a>).</li>
+<li>Remark (STW, short): drain any residual gray entries accumulated via the barrier during concurrent marking (SATB log flush or incremental-update stragglers) — this is where <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-5">I5</a>&#39;s race is finally settled.</li>
+<li>Concurrent sweep: reclaim White objects in the old generation, rebuild free-list spans, without stopping the mutator (Phase 9).</li>
+<li>Optional compact: if fragmentation exceeds threshold, relocate surviving Black objects using forwarding pointers (Steele 1975, Baker 1978) — STW if non-concurrent compaction, or with a read barrier if concurrent (Phase 10, Tene et al. 2011).</li>
+</ol>
+<p>The sweep-vs-compact decision at step 5 is itself a threshold policy, not a fixed choice each cycle: the sweeper (Phase 9) tracks a per-region fragmentation score (live bytes vs largest contiguous free span); a major cycle triggers compaction only when the fraction of regions above a configured fragmentation-score threshold exceeds a configured proportion of the old generation (default: compact when &gt;20% of regions exceed a 40% fragmentation score) — sweeping alone is cheaper and is the default outcome of most major cycles, with compaction reserved for the minority of cycles where fragmentation has actually accumulated to a problematic degree (P9&#39;s space/cost tradeoff applied at the sweep/compact boundary rather than just the barrier boundary).</p>
+<h3 id="sec-8-6">8.6 Concurrent Marking Algorithm and the Race Constraint</h3>
+<p>The marker drains a work-stealing gray stack (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-16">ADR-16</a>) concurrently with mutator allocation. Let <code>mark_rate</code> = objects traced per second by the marker pool, <code>alloc_rate</code> = bytes allocated per second by the mutator, <code>avg_obj_size</code> = mean object size, and <code>headroom</code> = configured safety factor (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/numbers/#sec-4">§4</a>: ≥1.3). The race constraint (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-5">I5</a>) is:</p>
+<pre class="diagram"><code>mark_rate  &gt;=  headroom * (alloc_rate / avg_obj_size)</code></pre>
+<p>If this inequality is violated, the mark cycle cannot certify termination before the heap fills; the pacing controller responds by throttling mutator allocation (inserting allocation stalls) or by escalating the marker&#39;s CPU share, never by abandoning <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-5">I5</a>.</p>
+<p>A second, coupled equation governs how the pacing controller actually escalates: let <code>w</code> = current marker worker-thread count, <code>per_worker_rate</code> = objects/sec traced by one worker at current cache/memory-bandwidth conditions, so <code>mark_rate = w * per_worker_rate</code>. Solving the race constraint for <code>w</code> gives the minimum worker count to restore headroom:</p>
+<pre class="diagram"><code>w_min  =  ceil( headroom * (alloc_rate / avg_obj_size) / per_worker_rate )</code></pre>
+<p>The pacing controller computes <code>w_min</code> continuously from sampled rates and either scales the live worker pool toward it (bounded by the CPU-topology ceiling, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/blueprint/#sec-31">§31</a>) or, if <code>w_min</code> exceeds that ceiling, falls back to throttling mutator allocation directly — the two levers named in P11 are therefore not alternatives chosen once, but two terms of the same equation applied in priority order (scale workers first, throttle allocation only once worker scaling is exhausted).</p>
+<h3 id="sec-8-7">8.7 Generational Hypothesis and Promotion/Age Policy</h3>
+<p>Empirically (Ungar 1984, reconfirmed across HotSpot/V8/Go workloads) object mortality is heavily front-loaded: a large majority of allocations become unreachable within one or two minor cycles. The age counter (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/architecture/#sec-8-1">§8.1</a>) increments each time an object survives a scavenge; promotion triggers at <code>age &gt;= tenuring_threshold</code> (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-15">ADR-15</a>, default threshold tuned in Phase 11) or immediately for objects at/above the humongous size class. Setting the threshold too low causes premature promotion (old gen fills with objects that would have died in the nursery, driving unnecessary major cycles); too high causes excess copy cost (long-lived objects repeatedly copied survivor-to-survivor, P8).</p>
+<p>Ungar&#39;s original generation-scavenging design (1984) used a fixed, small tenuring threshold (often as low as 1) tuned for the Smalltalk workloads of the era; modern collectors (HotSpot&#39;s default) instead track a per-cycle age-vs-survival-rate histogram (&quot;desired survivor size&quot; policy) and adjust the threshold dynamically each minor cycle so that the survivor space stays within its configured occupancy target — this project&#39;s Phase 11 tuning process adopts the dynamic-histogram approach over Ungar&#39;s fixed threshold specifically because a fixed threshold cannot adapt to a workload&#39;s mortality curve shifting over the process lifetime (e.g. a warmup phase with different allocation behavior than steady state).</p>
+<h3 id="sec-8-8">8.8 Safepoint and Root-Scanning Model</h3>
+<p>A safepoint is a program point at which every mutator thread&#39;s registers/stack are in a GC-legible state. The safepoint coordinator (Phase 8) requests a poll, waits for convergence across the thread registry (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-7">I7</a>), then hands control to the root scanner, which walks each thread&#39;s precise stack map (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-13">ADR-13</a>) plus global/static roots plus any host-registered handle tables. Only after convergence is a root set trusted as a consistent snapshot for either a minor GC&#39;s copy phase or a major GC&#39;s initial mark.</p>
+<h3 id="sec-8-9">8.9 Floating Garbage and Re-Mark Handling</h3>
+<p>Objects marked Black that become unreachable <em>after</em> being scanned (e.g. the last reference is overwritten post-scan) are floating garbage — correctly not reclaimed this cycle (P7), reclaimed next cycle instead. The remark phase (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/architecture/#sec-8-5">§8.5</a> step 3) additionally catches objects grayed <em>during</em> concurrent marking via the barrier log/queue that have not yet been drained, ensuring <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-2">I2</a> holds at the moment marking is declared complete, not merely on average.</p>
+<h3 id="sec-8-10">8.10 Worked Full Example — Nursery to Concurrent Collection</h3>
+<p>Object <code>X</code> is allocated in Eden via bump-pointer (Phase 1). It survives minor cycle 1 (root-reachable, age→1), copied Eden→To-survivor. It survives minor cycle 2 (age→2, still referenced, now by an old-gen object <code>P</code> via a pointer stored earlier — the write barrier already dirtied <code>P</code>&#39;s card, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/architecture/#sec-8-3">§8.3</a>). At minor cycle 3, <code>X</code>&#39;s age reaches the tenuring threshold (3); it is promoted directly into the old-gen free-list rather than copied to survivor space; because <code>P→X</code> is now an intra-old-gen edge (both promoted), no remembered-set entry is needed for it going forward, but the promotion itself is logged. Later, old-gen occupancy crosses the major-GC trigger threshold (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/numbers/#sec-4">§4</a>); initial mark snapshots roots including <code>P</code> (reachable from a stack root), grays <code>P</code>, concurrent mark scans <code>P</code>&#39;s fields, finds <code>P→X</code>, grays then blackens <code>X</code>. <code>X</code> survives the major cycle as live. Months of runtime later, <code>P</code> is dropped by the mutator (its last reference overwritten — write barrier fires, either logging old <code>P</code> value under SATB or graying nothing new under incremental-update since no new reference is created), <code>P</code> and transitively <code>X</code> go White in the next cycle&#39;s initial mark (no root or black object reaches them), and both are reclaimed by concurrent sweep.</p>
+<p>Extending the example one step further into compaction (Phase 10): suppose that, before <code>P</code> and <code>X</code> are dropped, the old generation has accumulated enough fragmentation from unrelated churn (other objects allocated and freed around <code>P</code> and <code>X</code>, leaving small unusable gaps) that a major cycle&#39;s post-sweep fragmentation score crosses the <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/architecture/#sec-8-5">§8.5</a> compaction threshold. <code>P</code> and <code>X</code>, both still live and Black at that point, are relocated: <code>P</code> is copied to a denser region, its old header overwritten with a forwarding pointer (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-9">I9</a>); every reference to <code>P</code> — including any the root set holds directly, and the field inside <code>P</code> pointing to <code>X</code> — is rewritten during the STW relocation pass (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-4">I4</a>) before the mutator resumes. If concurrent-compaction mode (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-11">ADR-11</a>) were active instead, that same rewrite would instead happen lazily: a mutator thread reading <code>P</code> mid-relocation would transparently follow the read barrier to <code>P</code>&#39;s new address without ever observing the stale one. This is the exact seam described in P5 — the same object, the same relocation event, handled by two structurally different mechanisms depending on whether compaction is STW or concurrent.</p>
+<h3 id="sec-8-11">8.11 Malformed / Hard Examples</h3>
+<ul>
+<li>Missing write barrier on <code>old_obj.field = young_ref</code>: the young object is invisible to the next minor GC&#39;s root set and is incorrectly reclaimed while <code>old_obj</code> still holds a now-dangling pointer to it — the catastrophic case, a live-object loss (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-1">I1</a>, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-3">I3</a> violation), manifesting as a use-after-free only when the mutator later dereferences the stale field.</li>
+<li>An old→young pointer created by a card-marking bug that clears the dirty bit before the scavenger scans it (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-12">I12</a> violation): identical symptom to the missing-barrier case, but the root cause is in the refinement worker&#39;s clear-ordering, not the barrier call site.</li>
+<li>A black→white violation during concurrent mark: incremental-update barrier fails to gray a newly-stored white referent because of a barrier-bypass fast path taken incorrectly (e.g. an inlined store the compiler forgot to instrument) — <code>X</code> is reachable only via a black object, never grayed, reclaimed by concurrent sweep while still live (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-2">I2</a> violation cascading to <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-1">I1</a>).</li>
+<li>A mark that loses the race (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-5">I5</a> violated): allocation rate spikes beyond <code>headroom * alloc_rate</code> mid-cycle; the gray stack cannot drain before old-gen free space is exhausted; the pacing controller&#39;s stall was miscalibrated — the fallback is a forced STW full mark rather than an allocation failure (P12, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#fm-3">FM-3</a>).</li>
+<li>A moving-GC reference not updated (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-4">I4</a> violation): a conservative-scan-derived root is a false positive interpreted as a precise pointer, gets &quot;updated&quot; to a forwarding target that is actually unrelated data, corrupting an integer that merely looked like a pointer.</li>
+<li>A finalizer resurrecting an object: a finalizer stores <code>self</code> into a global root during finalization, making an object the collector had already begun reclaiming reachable again — handled by a dedicated finalization reachability pass (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-18">ADR-18</a>) that must run to fixpoint before final sweep, else it is an <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-1">I1</a> violation via resurrection.</li>
+<li>A SATB buffer overflow silently dropping entries instead of flushing (a resource-exhaustion bug rather than a logic bug): under a mutation burst exceeding the local buffer&#39;s capacity, a naive implementation that drops the oldest entries rather than force-flushing violates <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-11">I11</a> exactly as if the barrier had never fired for those dropped entries — indistinguishable in symptom from the missing-barrier case above, but only reproducible under sustained high mutation rate, making it a load-dependent variant of the same root failure class.</li>
+<li>A promotion racing a concurrent old-gen sweep: an object is promoted into a region the sweeper is mid-scan on; if the promotion allocation and the sweeper&#39;s live-bit accounting are not correctly sequenced (region-local locking, Phase 9), the sweeper may treat the newly-promoted object&#39;s memory as still-free space, corrupting the free-list on the very next allocation from that span — an <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#inv-1">I1</a>-adjacent violation rooted in a Phase 3/Phase 9 interaction rather than either phase alone.</li>
+</ul>
+<h3 id="sec-8-12">8.12 Failure-Path Example</h3>
+<p>Concurrent marker thread panics mid-drain (e.g. a corrupted type descriptor pointer causes an out-of-bounds field read). Detection: the marker&#39;s watchdog observes a stalled gray-stack drain rate (feeds <code>gc_mark_race_margin</code> toward violation). Recovery: the collector treats this as P12 — halts promotion and old-gen allocation, quarantines the malformed object&#39;s region, and restarts marking from a fresh initial-mark snapshot using the conservative root scanner as a temporary fallback (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/trade-offs/#adr-13">ADR-13</a>&#39;s rejected-choice-wins case) while the malformed type descriptor is logged for host-runtime-side forensics (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#t-1">T1</a>, <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#fm-6">FM-6</a>).</p>
+<p>A second failure path worth tracing end to end: a host-runtime deploy ships new codegen that inlines a hot pointer-store call site without threading the barrier instrumentation through the inlined copy (the exact <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#t-1">T1</a>/<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/architecture/#sec-8-11">§8.11</a> bug class, but introduced by a compiler change rather than a hand-written bug). In production, the bug is silent for hours — it only manifests once a concurrently-marked object&#39;s last reference happens to be overwritten through that specific inlined path during an active mark window. The reachability oracle&#39;s stress-harness variant (Phase 11) would have caught this pre-release because it exercises every instrumented call site under adversarial concurrent mutation; its absence from a given release&#39;s test matrix (rather than any flaw in the harness itself) is the actual root cause the postmortem (<a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/reliability/#sec-25">§25</a>&#39;s forensics column) must trace back to — illustrating why <a class="cite" href="/system-design-blueprints/systems/generational-concurrent-garbage-collector/blueprint/#sec-29">§29</a>&#39;s CI topology gates every PR touching barrier-adjacent crates through <code>gc-stress.yml</code> specifically, not just <code>ci.yml</code>&#39;s unit tests.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

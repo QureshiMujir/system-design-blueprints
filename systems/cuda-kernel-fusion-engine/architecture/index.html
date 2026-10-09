@@ -1,0 +1,446 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>CUDA Kernel Fusion Engine — Architecture · Engineering Blueprints</title><meta name="description" content="CUDA Kernel Fusion Engine, hld: §3 overview + §8 domain model. The CUDA Kernel Fusion Engine (project 248) is a from-scratch, Rust-hosted kernel-fusion compiler for GPU tensor programs. It ingests a graph of element-wise, broadcast, reduction, and contraction…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/ai-machine-learning/">AI &amp; Machine Learning</a> </li><li> <a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/">CUDA Kernel Fusion Engine</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:215"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/ai-machine-learning/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">AI &amp; Machine Learning</span></a> </p> <h1>CUDA Kernel Fusion Engine</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac (gpu-optional)</li> <li>12 phases</li> <li>~49 weeks</li> <li>1,885 lines</li> <li>blueprint #248</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:CUDA Kernel Fusion Engine — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<pre class="diagram"><code>+------------------------------------------------------------------+
+|                  Tensor-Op Graph Builder                         |
+|  builds OpGraph from caller-supplied ops (elementwise/reduce/     |
+|  contract); assigns TensorId, Shape, DType, Layout                |
++-------------------------------+------------------------------------+
+                                v
++------------------------------------------------------------------+
+|                        Fusion Planner                             |
+|  proposes FusionGroup candidates over adjacent OpGraph nodes       |
++-------------------------------+------------------------------------+
+                                v
++------------------------------------------------------------------+
+|                      Legality Checker                             |
+|  proves iteration-space compatibility; rejects illegal groups      |
++-------------------------------+------------------------------------+
+                                v
++------------------------------------------------------------------+
+|              Memory-Traffic Cost Model (roofline)                 |
+|  estimates bytes moved fused vs unfused; ranks FusionPlans         |
++-------------------------------+------------------------------------+
+                                v
++------------------------------------------------------------------+
+|                Schedule / Tiling Generator                        |
+|  maps FusionPlan -&gt; Tiling + LaunchConfig + SharedMemPlan          |
++-------------------------------+------------------------------------+
+                                v
++------------------------------------------------------------------+
+|                 Codegen Backend (CUDA C / PTX)                    |
+|  lowers Schedule -&gt; Kernel source / PtxModule                      |
++-------------------------------+------------------------------------+
+                                v
++------------------------------------------------------------------+
+|                        Autotuner                                   |
+|  sweeps TileConfig x LaunchConfig; records TuningConfig            |
++-------------------------------+------------------------------------+
+                                v
++------------------------------------------------------------------+
+|                  Correctness Verifier                             |
+|  runs Kernel vs unfused reference executor; checks Tolerance        |
++-------------------------------+------------------------------------+
+                                v
++------------------------------------------------------------------+
+|                Compile Cache / Runtime Handoff                    |
+|  caches Kernel+TuningConfig; emits launch descriptor to 180         |
++------------------------------------------------------------------+</code></pre>
+<p>GPU Memory Hierarchy (what fusion optimizes):</p>
+<pre class="diagram"><code>+------------------------------------------------------------------+
+| Registers      per-thread   fastest, smallest                     |
+| Shared Memory  per-block    fast, tile staging                     |
+| L2 Cache       device-wide  shared, moderate latency                |
+| Global / HBM   device-wide  largest, slowest — the traffic fusion   |
+|                              exists to cut                          |
++------------------------------------------------------------------+</code></pre>
+<p>Tensor-Op Graph Builder: the entry point. Converts a caller-supplied description of tensor operations into the canonical <code>OpGraph</code>, assigning stable <code>TensorId</code>s and resolving <code>Shape</code>/<code>DType</code>/<code>Layout</code> for every edge before any planning begins.</p>
+<p>Fusion Planner: walks the <code>OpGraph</code> and proposes candidate <code>FusionGroup</code>s of adjacent, potentially-compatible ops. It is deliberately permissive — it is the Legality Checker and Cost Model downstream that decide what survives.</p>
+<p>Legality Checker: the correctness gate. Proves, per <a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/#inv-3">I3</a>, that every op inside a proposed <code>FusionGroup</code> has a compatible iteration space with its neighbors, rejecting groups that would require illegal reordering, unsound reduction merging, or racy shared accumulation.</p>
+<p>Memory-Traffic Cost Model (roofline): estimates global-memory bytes moved for a <code>FusionGroup</code> under the fused plan versus the unfused baseline, per the equations in <a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/architecture/#sec-8-4">§8.4</a>, and ranks candidate <code>FusionPlan</code>s by predicted traffic reduction — never by instinct (P1).</p>
+<p>Schedule / Tiling Generator: turns an accepted <code>FusionPlan</code> into a concrete <code>Schedule</code> — a <code>Tiling</code>, a <code>LaunchConfig</code>, and a <code>SharedMemPlan</code> — deciding how the computation is executed without changing what it computes (P3, the Halide split).</p>
+<p>Codegen Backend (CUDA C / PTX): lowers <code>Schedule</code> + <code>FusionGroup</code> into an actual <code>Kernel</code> — CUDA C source or a <code>PtxModule</code> — following the sequence table in <a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/architecture/#sec-8-6">§8.6</a>.</p>
+<p>Autotuner: sweeps <code>TileConfig</code> x <code>LaunchConfig</code> combinations for a compiled <code>Kernel</code>, recording the best-performing <code>TuningConfig</code> reproducibly from a seed and hardware descriptor (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/#inv-6">I6</a>).</p>
+<p>Correctness Verifier: executes the candidate <code>Kernel</code> against the unfused reference executor over a fixture corpus and checks the result is within <code>Tolerance</code> (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/#inv-1">I1</a>) before anything is cached.</p>
+<p>Compile Cache / Runtime Handoff: persists the verified, tuned <code>Kernel</code> keyed by a content hash of graph + schedule + hardware descriptor, and emits the launch descriptor consumed by the runtime (project 180).</p>
+<p>GPU Memory Hierarchy: not a pipeline stage but the resource every upstream stage is optimizing against — registers and shared memory are what a fused kernel uses to avoid round-tripping intermediates through L2/global memory, which is the entire economic case for fusion.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model</h2>
+<h3 id="sec-8-1">8.1 GPU Execution and Memory Hierarchy</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Contains</th>
+<th>SM_80 Limit</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Grid</td>
+<td>Blocks</td>
+<td>up to 2^31-1 blocks in x-dimension</td>
+</tr>
+<tr>
+<td>Block</td>
+<td>Warps / Threads</td>
+<td>max 1,024 threads/block</td>
+</tr>
+<tr>
+<td>Warp</td>
+<td>Threads</td>
+<td>32 threads/warp, SIMT execution</td>
+</tr>
+<tr>
+<td>Thread</td>
+<td>—</td>
+<td>max 255 registers/thread (occupancy usually forces far fewer)</td>
+</tr>
+</tbody></table></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Memory Level</th>
+<th>Scope</th>
+<th>Approx. Bandwidth (A100)</th>
+<th>Approx. Latency</th>
+<th>Capacity</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Registers</td>
+<td>per-thread</td>
+<td>effectively multi-TB/s</td>
+<td>~1 cycle</td>
+<td>65,536 x 32-bit words/SM</td>
+</tr>
+<tr>
+<td>Shared Memory</td>
+<td>per-block</td>
+<td>~19 TB/s aggregate/SM</td>
+<td>~20-30 cycles</td>
+<td>up to 164 KB/SM</td>
+</tr>
+<tr>
+<td>L2 Cache</td>
+<td>device-wide</td>
+<td>several TB/s</td>
+<td>~200 cycles</td>
+<td>40 MB</td>
+</tr>
+<tr>
+<td>Global Memory (HBM2e)</td>
+<td>device-wide</td>
+<td>1,555 GB/s peak (80 GB variant)</td>
+<td>~400-800 cycles</td>
+<td>40/80 GB</td>
+</tr>
+</tbody></table></div>
+<p>Occupancy equation: <code>Occupancy = active_warps_per_SM / max_warps_per_SM</code>, where <code>active_warps_per_SM = min(warp_limit_from_registers, warp_limit_from_shared_mem, warp_limit_from_block_count, hardware_warp_max)</code>.</p>
+<h3 id="sec-8-2">8.2 Tensor-Op IR</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>OpKind</th>
+<th>Iteration Space</th>
+<th>Fusability Class</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Elementwise</td>
+<td>pointwise over output shape</td>
+<td>always fusable with adjacent elementwise (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/#inv-3">I3</a>)</td>
+</tr>
+<tr>
+<td>Broadcast</td>
+<td>pointwise with stride-0 dims</td>
+<td>fusable; changes iteration-space mapping, not legality</td>
+</tr>
+<tr>
+<td>Reduce</td>
+<td>pointwise input to reduced output</td>
+<td>fusable into consumer under a same-axis-order constraint</td>
+</tr>
+<tr>
+<td>Contract (matmul)</td>
+<td>3-nested (M, N, K)</td>
+<td>fusable only at epilogue/prologue, not across the K-reduction (P8)</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Fusion Legality Decision Table</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Producer</th>
+<th>Consumer</th>
+<th>Legal</th>
+<th>Constraint</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Elementwise</td>
+<td>Elementwise</td>
+<td>Always</td>
+<td>iteration spaces identical or broadcast-compatible</td>
+</tr>
+<tr>
+<td>Elementwise</td>
+<td>Reduce</td>
+<td>Yes</td>
+<td>producer&#39;s iteration space must cover the reduce input exactly</td>
+</tr>
+<tr>
+<td>Reduce</td>
+<td>Elementwise</td>
+<td>Yes (epilogue)</td>
+<td>consumer executes once per reduced-output element</td>
+</tr>
+<tr>
+<td>Elementwise</td>
+<td>Contract</td>
+<td>Yes (prologue, e.g. bias-add before matmul)</td>
+<td>applied before the K-loop begins</td>
+</tr>
+<tr>
+<td>Contract</td>
+<td>Elementwise</td>
+<td>Yes (epilogue, e.g. bias+activation after matmul)</td>
+<td>applied after accumulation completes (Phase 7, FlashAttention-style)</td>
+</tr>
+<tr>
+<td>Contract</td>
+<td>Contract</td>
+<td>No (Phase 0-11 scope)</td>
+<td>interleaving two K-reductions&#39; accumulators exceeds the register budget without a dedicated grouped-GEMM strategy; delegate to CUTLASS instead</td>
+</tr>
+<tr>
+<td>Reduce</td>
+<td>Reduce</td>
+<td>Constrained</td>
+<td>legal only if the reduction axes compose under an associative op with matching order</td>
+</tr>
+</tbody></table></div>
+<p>Why fusion is generally not free across a matmul: the K-reduction of a contraction accumulates a full output tile before any epilogue can run correctly, so an op that needs the <em>complete</em> accumulated value cannot be interleaved with the accumulation itself — it can only wrap it (prologue/epilogue). FlashAttention&#39;s resolution is exactly this: it does not fuse softmax <em>into</em> the QK^T and (softmax)V matmuls&#39; K-loops; it tiles the whole attention block so the softmax&#39;s running max/sum are updated incrementally per tile, avoiding ever materializing the full N x N score matrix in global memory — an epilogue-style fusion applied per-tile, not a fusion across the contraction itself.</p>
+<h3 id="sec-8-4">8.4 Memory-Traffic Cost Model</h3>
+<p>Let <code>N</code> = tensor element count, <code>b</code> = dtype byte width, <code>k</code> = number of chained elementwise ops.</p>
+<p>Unfused traffic: <code>T_unfused = 2 * k * N * b</code> (each op independently reads its input and writes its output to global memory).</p>
+<p>Fused traffic: <code>T_fused = 2 * N * b</code> (one read of the true input, one write of the true output; the <code>k-1</code> intermediates never touch global memory).</p>
+<p>Bytes saved: <code>Bytes_saved = T_unfused - T_fused = 2 * (k - 1) * N * b</code>.</p>
+<p>Arithmetic intensity: <code>AI = total_FLOPs / bytes_moved</code>. Fusion holds <code>total_FLOPs</code> constant while reducing <code>bytes_moved</code>, so <code>AI</code> rises — moving the kernel rightward on the roofline curve, toward or past the ridge point where the kernel becomes compute-bound rather than memory-bound.</p>
+<p>Worked example: a chain of <code>k=4</code> elementwise ops over <code>N=16,777,216</code> elements (a 4096x4096 fp32 tensor, <code>b=4</code> bytes).</p>
+<p><code>T_unfused = 2 * 4 * 16,777,216 * 4 = 536,870,912 bytes ≈ 512 MiB</code></p>
+<p><code>T_fused = 2 * 16,777,216 * 4 = 134,217,728 bytes ≈ 128 MiB</code></p>
+<p><code>Bytes_saved = 402,653,184 bytes ≈ 384 MiB</code>, a 75% reduction in traffic for this chain.</p>
+<p>Second worked example, contrasting dtype (Phase 8&#39;s concern): the same <code>k=4</code>, <code>N=16,777,216</code> chain in fp16 (<code>b=2</code> bytes) instead of fp32.</p>
+<p><code>T_unfused = 2 * 4 * 16,777,216 * 2 = 268,435,456 bytes ≈ 256 MiB</code></p>
+<p><code>T_fused = 2 * 16,777,216 * 2 = 67,108,864 bytes ≈ 64 MiB</code></p>
+<p><code>Bytes_saved = 201,326,592 bytes ≈ 192 MiB</code> — half the absolute bytes saved of the fp32 case, but the same 75% <em>proportional</em> reduction, since <code>b</code> is a common factor in both <code>T_unfused</code> and <code>T_fused</code> and cancels out of the savings ratio; this is why <a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/blueprint/#sec-20-7">§20.7</a> states fusion&#39;s traffic-reduction percentage is dtype-independent even though the absolute bytes moved scale with <code>b</code>.</p>
+<p>Fusion-legality decision table (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/architecture/#sec-8-3">§8.3</a>) as a worked classification example over this same chain: each of the four <code>Add -&gt; Mul -&gt; Exp -&gt; Relu</code> op-pairs is <code>Elementwise -&gt; Elementwise</code>, always legal per <a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/architecture/#sec-8-3">§8.3</a>&#39;s first row, so the entire 4-op chain is one candidate <code>FusionGroup</code> under Phase 3&#39;s proposal algorithm (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/blueprint/#sec-15-2">§15.2</a>) with no internal legality rejections — contrast this with a chain ending in a <code>Reduce</code>, where only the final <code>Elementwise -&gt; Reduce</code> pair invokes <a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/architecture/#sec-8-3">§8.3</a>&#39;s second row and its &quot;producer&#39;s iteration space must cover the reduce input exactly&quot; constraint.</p>
+<h3 id="sec-8-5">8.5 Tiling Model</h3>
+<p>Given a shared-memory budget <code>S</code> bytes per block (planner default ceiling: 96 KB, under the 163 KB/block hardware limit to leave headroom for multiple resident blocks), and a staging tile of <code>BLOCK_M x BLOCK_N</code> elements of <code>b</code> bytes:</p>
+<p><code>max_tile_elems = S / b = 98,304 / 4 = 24,576 elements</code></p>
+<p>For a square tile: <code>tile_dim = floor(sqrt(max_tile_elems)) = floor(sqrt(24,576)) ≈ 156</code>, rounded down to a warp-aligned <code>128</code>, giving <code>BLOCK_M = BLOCK_N = 128</code> (<code>128 * 128 * 4 = 65,536 bytes</code>, within the 98,304-byte budget with headroom for double-buffering).</p>
+<p>Second worked example, with double-buffering enabled (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/blueprint/#sec-17-2">§17.2</a>&#39;s halved-budget rule) for the same fp32 dtype: the effective budget is halved before derivation, <code>S_effective = 98,304 / 2 = 49,152</code> bytes, giving <code>max_tile_elems = 49,152 / 4 = 12,288</code>, <code>tile_dim = floor(sqrt(12,288)) ≈ 110</code>, rounded down to the nearest warp-aligned multiple of 32, <code>96</code> — so <code>BLOCK_M = BLOCK_N = 96</code> (<code>96 * 96 * 4 = 36,864 bytes</code> per buffer, <code>73,728 bytes</code> for both buffers together, within the original 98,304-byte budget). This concretely shows why double-buffering trades tile size for latency hiding: the non-double-buffered derivation reaches <code>128 x 128</code>, the double-buffered one only <code>96 x 96</code>, a smaller per-tile working set in exchange for overlapping the next tile&#39;s load with the current tile&#39;s compute (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/blueprint/#sec-17-2">§17.2</a>).</p>
+<p>Bank-conflict padding applied to this second example (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/trade-offs/#adr-13">ADR-13</a>): a <code>96</code>-element row becomes <code>97</code> elements in the shared-memory declaration, adding <code>97 - 96 = 1</code> extra element per row, or <code>96 * 1 * 4 = 384</code> bytes total padding overhead across the tile — negligible relative to the 98,304-byte budget, which is exactly why <a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/trade-offs/#adr-13">ADR-13</a> accepted padding&#39;s small capacity cost over the added complexity of swizzled addressing (the alternative CUTLASS itself uses, per <a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/trade-offs/#adr-13">ADR-13</a>&#39;s &quot;when the rejected choice wins&quot; column).</p>
+<h3 id="sec-8-6">8.6 Schedule Representation and Codegen Mapping</h3>
+<p><code>Schedule = { Tiling, LaunchConfig, SharedMemPlan, register-allocation hints }</code> — the algorithm (<code>OpGraph</code>/<code>FusionGroup</code>) is fixed; the <code>Schedule</code> is how it executes (P3).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Input</th>
+<th>Output</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>FusionGroup + Schedule</td>
+<td>thread/block index expressions</td>
+</tr>
+<tr>
+<td>2</td>
+<td>IterationSpace</td>
+<td>loop bounds mapped to grid/block dimensions</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Tiling</td>
+<td>shared-memory tile load/store instruction sequence</td>
+</tr>
+<tr>
+<td>4</td>
+<td>ordered op sequence in FusionGroup</td>
+<td>per-thread fused instruction sequence</td>
+</tr>
+<tr>
+<td>5</td>
+<td>SharedMemPlan</td>
+<td>sized shared-memory declarations</td>
+</tr>
+<tr>
+<td>6</td>
+<td>LaunchConfig</td>
+<td>kernel launch signature, grid/block dims</td>
+</tr>
+<tr>
+<td>7</td>
+<td>assembled Kernel</td>
+<td>CUDA C source or PtxModule</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-7">8.7 Autotuning Search Space</h3>
+<p>Search dimensions: <code>{tile sizes} x {threads-per-block} x {unroll factor} x {vectorization width}</code>. Strategy: bounded grid search with early-stopping, or evolutionary search over the same dimensions for large spaces (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/trade-offs/#adr-9">ADR-09</a>).</p>
+<h3 id="sec-8-8">8.8 Fused-Kernel Lifecycle</h3>
+<p><code>Planned -&gt; Scheduled -&gt; Generated -&gt; Verified -&gt; Tuned -&gt; Cached</code></p>
+<p>Failure edges: <code>Planned -(legality proof fails)-&gt; Rejected</code>; <code>Scheduled -(exceeds register/shared-mem budget)-&gt; Rejected</code>; <code>Generated -(NVRTC compile error)-&gt; Rejected</code>; <code>Verified -(exceeds Tolerance)-&gt; Rejected</code>; <code>Tuned -(no improving config found within budget)-&gt; Cached</code> (falls back to the default configuration rather than failing).</p>
+<h3 id="sec-8-9">8.9 Malformed / Degenerate Examples</h3>
+<p>Illegal fusion across incompatible iteration spaces (a broadcast mismatch the planner failed to resolve before proposing the group); a <code>TileConfig</code> whose <code>BLOCK_M * BLOCK_N * dtype_bytes</code> exceeds the shared-memory budget; a reduction fused such that two threads write the same accumulator without an atomic or tree-reduce discipline (a race, not a slowdown); a dtype mismatch where an fp16 producer feeds an fp32-only consumer with no explicit cast op (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/#inv-9">I9</a> violation); a numerically-divergent fusion where reassociating a reduction&#39;s summation order changes floating-point rounding beyond <code>Tolerance</code> (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/#inv-1">I1</a> violation).</p>
+<h3 id="sec-8-10">8.10 Failure-Path Example</h3>
+<p>A <code>FusionPlan</code> proposes fusing three elementwise ops and a <code>Reduce</code> with mismatched axis order. The Legality Checker returns <code>LegalityVerdict::Rejected(reason)</code> (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/#inv-10">I10</a>). The Fusion Planner records the rejection reason (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/#inv-12">I12</a>), falls back to a smaller <code>FusionGroup</code> that excludes the reduce, re-evaluates the cost model on the smaller group (<a class="cite" href="/system-design-blueprints/systems/cuda-kernel-fusion-engine/reliability/#inv-5">I5</a>), and proceeds to scheduling only if the smaller group still shows positive traffic savings.</p>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

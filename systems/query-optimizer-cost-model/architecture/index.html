@@ -1,0 +1,315 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Query Optimizer Cost Model from Scratch — Architecture · Engineering Blueprints</title><meta name="description" content="Query Optimizer Cost Model from Scratch, hld: §3 overview + §8 domain model. A query optimizer cost model subsystem is the component of a relational query engine that, given a normalized logical plan and a statistics snapshot, enumerates a bounded space of…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/query-optimizer-cost-model/">Query Optimizer Cost Model from Scratch</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>Query Optimizer Cost Model from Scratch</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>10 phases</li> <li>~24 weeks</li> <li>2,636 lines</li> <li>blueprint #206</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/query-optimizer-cost-model/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/query-optimizer-cost-model/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/query-optimizer-cost-model/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/query-optimizer-cost-model/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/query-optimizer-cost-model/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/query-optimizer-cost-model/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/query-optimizer-cost-model/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/query-optimizer-cost-model/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/query-optimizer-cost-model/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/query-optimizer-cost-model/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Query Optimizer Cost Model from Scratch — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-1">3.1 Canonical Architecture Diagram</h3>
+<p>Top tier — request ingress through canonicalization:</p>
+<pre class="diagram"><code>                         +----------------------------+
+                         |     Host / Client Caller    |
+                         |  (execution engine, CLI,    |
+                         |   optimizer-service gRPC)    |
+                         +---------------+--------------+
+                                         |  AST (external parser boundary)
+                                         v
++-----------------------------------------------------------------------------+
+|  optimizer-core :: OptimizerSession   (request-scoped, trust boundary A)     |
+|  pins statistics snapshot | sequences phases | owns replay-trace id          |
++---------------------------+----------------------+--------------------------+
+                            |                       |
+                            v                       v
+              +-------------------+     +--------------------------+
+              |   sql-ir crate    |     |  telemetry crate         |
+              |  AST -&gt; canonical |----&gt;|  spans, metrics, logs    |
+              |  operator graph   |     |  (async export boundary) |
+              +---------+---------+     +--------------------------+</code></pre>
+<p>Middle tier — memo search substrate through costing:</p>
+<pre class="diagram"><code>                        |
+                        v
+              +-------------------+
+              |    memo crate     |   &lt;-- concurrency boundary: single-writer
+              |  groups, equiv    |       per session, freeze-on-select
+              |  classes, rules   |
+              +----+---------+----+
+                   |         |
+                   v         v
+     +------------------+  +---------------------------+
+     | cardinality crate|&lt;-|  statistics crate          |
+     | selectivity, NDV |  |  histograms, sketches,     |
+     | join estimation  |  |  versioned snapshot store  |  &lt;-- persistence boundary
+     +---------+--------+  +---------------------------+
+               |
+               v
+     +-------------------------------+
+     |     cost-model crate          |
+     | CPU | IO | network | memory   |
+     | spill | vectorization coeffs  |
+     +---------------+---------------+</code></pre>
+<p>Bottom tier — search, physical generation, explainability, and the calibration feedback loop:</p>
+<pre class="diagram"><code>                     |
+                     v
+     +-------------------------------+
+     |   plan-enumerator crate       |   &lt;-- search budget = concurrency + time
+     | DP join search | pruning |    |
+     | bushy enumeration | B&amp;B       |
+     +---------------+---------------+
+                     |
+                     v
+     +-------------------------------+
+     |  optimizer-core :: physical   |
+     |  plan generator (stable tree) |  --&gt; execution engine (external, protocol boundary)
+     +---------------+---------------+
+                     |
+                     v
+     +-------------------------------+      +--------------------------+
+     |     explain crate             |-----&gt;|   replay-engine crate    |
+     |  structured trace, diffs      |      |   append-only archive     |  &lt;-- persistence boundary
+     +-------------------------------+      +------------+-------------+
+                                                          |
+                                                          v
+                                             +--------------------------+
+                                             |    calibration crate     |
+                                             | runtime feedback fitting |
+                                             | drift detection, rollback|
+                                             +------------+-------------+
+                                                          |
+                                                          v  (feeds back into)
+                                             +--------------------------+
+                                             |    statistics crate      |
+                                             +--------------------------+</code></pre>
+<h3 id="sec-3-2">3.2 Box-by-Box</h3>
+<p><strong>Host/Client caller</strong> — external trust boundary A: any AST or RPC payload crossing this edge is
+untrusted input, validated by <code>sql-ir</code> before entering the memo.</p>
+<p><strong><code>optimizer-core :: OptimizerSession</code></strong> — request-scoped orchestrator (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/blueprint/#sec-11-5">§11.5</a>); owns the immutable
+statistics-snapshot pin (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/reliability/#inv-3">I3</a>), the phase sequence (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/architecture/#sec-8-5">§8.5</a>), and the replay-trace id (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/reliability/#inv-2">I2</a>); single point of
+failure containment per request — a session abort never corrupts another session&#39;s memo.</p>
+<p><strong><code>sql-ir</code></strong> — deterministic AST-to-operator-graph compiler; establishes replay-safe canonicalization
+(alias assignment, predicate ordering, expression hashing) before anything else runs.</p>
+<p><strong><code>telemetry</code></strong> — cross-cutting async export boundary; every other crate emits spans/metrics through
+it, never directly to a sink, so it is the one place backpressure on export is handled.</p>
+<p><strong><code>memo</code></strong> — the single-writer, per-session equivalence structure (concurrency boundary: exactly one
+session mutates a given memo instance; freeze-on-select makes it immutable for physical generation).</p>
+<p><strong><code>statistics</code></strong> — persistence boundary: histograms/sketches/snapshots are read through an immutable
+pinned view; writes happen out-of-band from calibration, never inside a live optimization.</p>
+<p><strong><code>cardinality</code></strong> — pure function of memo shape + statistics snapshot; no persistent state of its own.</p>
+<p><strong><code>cost-model</code></strong> — pure function of cardinality estimates + calibration profile; the only crate
+allowed to read calibration coefficients during optimization.</p>
+<p><strong><code>plan-enumerator</code></strong> — the search loop; consumes a time/expression budget (I-invariant bound, <a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/reliability/#sec-7">§7</a>) and
+must terminate inside it even on adversarial join graphs.</p>
+<p><strong>Physical plan generator</strong> (inside <code>optimizer-core</code>) — protocol boundary: emits a stable operator
+tree consumed by an external execution engine; this is the last point at which the optimizer can still
+be wrong for free.</p>
+<p><strong><code>explain</code></strong> — read-only projection over the frozen memo and cost trace; never mutates optimizer
+state.</p>
+<p><strong><code>replay-engine</code></strong> — persistence boundary: append-only trace archive; the only path by which a past
+decision becomes reproducible.</p>
+<p><strong><code>calibration</code></strong> — closed feedback loop: reads <code>replay-engine</code> archives and runtime telemetry, writes
+back into <code>statistics</code>/<code>cost-model</code> coefficient tables out-of-band, never inside a live request.</p>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Relational IR, Memo State Machine &amp; Wire Records</h2>
+<h3 id="sec-8-1">8.1 Relational IR — Core Logical Operators</h3>
+<p>Canonical logical operator set (<code>sql-ir::ast</code>), each a variant of the <code>LogicalOp</code> enum (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/design/#sec-11">§11</a>):
+<code>Scan</code>, <code>Filter</code>, <code>Projection</code>, <code>Aggregate</code>, <code>Join</code>, <code>Sort</code>, <code>Limit</code>, <code>Union</code>, <code>Window</code>, <code>Exchange</code>.
+<code>Exchange</code> is logical-IR-visible (not execution-only) because distributed cost penalties (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/build/#sec-21">§21</a>) attach
+to it during logical-to-physical costing, not after.</p>
+<h3 id="sec-8-2">8.2 Join Candidate State Machine</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Meaning</th>
+<th>Exit Condition</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Unexplored</code></td>
+<td>No physical/logical alternative generated yet for this memo group.</td>
+<td>Rule-based enumeration begins (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/blueprint/#sec-14-2">§14.2</a>).</td>
+</tr>
+<tr>
+<td><code>PartiallyExplored</code></td>
+<td>A strict subset of applicable rules has fired.</td>
+<td>Remaining applicable rules still pending, or budget exhausted (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/reliability/#inv-9">I9</a>).</td>
+</tr>
+<tr>
+<td><code>Costed</code></td>
+<td>All generated candidates for this group carry a <code>CostVector</code>.</td>
+<td>Winner selection runs (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/blueprint/#sec-17-2">§17.2</a>).</td>
+</tr>
+<tr>
+<td><code>Pruned</code></td>
+<td>Candidate dominated by a cheaper alternative under identical physical properties.</td>
+<td>Terminal — candidate retained for <code>explain</code> rationale (P3) but never selected.</td>
+</tr>
+<tr>
+<td><code>Materialized</code></td>
+<td>Winning candidate selected for this group; group frozen.</td>
+<td>Terminal — handed to physical plan generator (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/build/#sec-19">§19</a>).</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Histogram Model</h3>
+<p>Supported histogram kinds (<code>statistics::histogram</code>): <code>EquiDepth</code>, <code>Singleton</code> (exact per-value bucket
+for high-frequency values), <code>TopKFrequency</code>, <code>HybridSkewAware</code> (singleton buckets for detected heavy
+hitters, equi-depth elsewhere — Poosala et al. 1996, <a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/study/#sec-5">§5</a> Papers). One-line bucket signature (no body):</p>
+<pre class="diagram"><code>struct HistogramBucket { lower_bound: ScalarValue, upper_bound: ScalarValue, row_count: u64, distinct_count: u64, frequency: f64 }</code></pre>
+<h3 id="sec-8-4">8.4 Wire / Persisted Record Layouts</h3>
+<pre class="diagram"><code>struct FeedbackMessage { query_hash: QueryHash, plan_hash: PlanHash, operator_id: OperatorId, estimated_rows: u64, actual_rows: u64, cpu_time_ns: u64, spill_bytes: u64, network_bytes: u64, timestamp: Timestamp }
+struct StatisticsSnapshotHeader { snapshot_id: SnapshotId, schema_version: u16, created_at: Timestamp, table_count: u32, content_hash: Blake3Hash }
+struct ReplayTraceRecord { trace_id: TraceId, session_id: SessionId, plan_hash: PlanHash, phase_spans: Vec&lt;PhaseSpan&gt;, cost_breakdown: CostVector }</code></pre>
+<p><code>FeedbackMessage</code> is the wire record <code>optimizer-core</code> receives from the execution engine post-run
+(<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/blueprint/#sec-21-2">§21.2</a>); <code>StatisticsSnapshotHeader</code> prefixes every persisted snapshot (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/reliability/#inv-3">I3</a>, <a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/reliability/#inv-12">I12</a>); <code>ReplayTraceRecord</code> is
+the unit <code>replay-engine</code> appends per optimized query (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/reliability/#inv-10">I10</a>).</p>
+<h3 id="sec-8-5">8.5 Plan Enumeration Pipeline Sequence</h3>
+<pre class="diagram"><code>AST (external) -&gt; sql-ir::build -&gt; memo::seed -&gt; [rule firing] -&gt; cardinality::estimate
+   -&gt; cost-model::cost -&gt; plan-enumerator::enumerate -&gt; memo::freeze -&gt; physical plan</code></pre>
+<h3 id="sec-8-6">8.6 Cost Vector Domain Semantics</h3>
+<p><code>CostVector</code> (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/blueprint/#sec-11-2">§11.2</a>) components are additive within a plan subtree and are never renormalized —
+<code>cost-model</code> sums child <code>CostVector</code>s component-wise before adding the parent operator&#39;s own
+contribution (<a class="cite" href="/system-design-blueprints/systems/query-optimizer-cost-model/reliability/#inv-5">I5</a> non-negativity applies at every level). Cross-component comparison (e.g., trading IO
+for CPU) happens only through the single scalar total used by <code>plan-enumerator</code>&#39;s dominance check;
+<code>explain</code> always renders the five components separately (P7).</p>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

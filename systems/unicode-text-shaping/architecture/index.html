@@ -1,0 +1,984 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>Unicode Text Shaping — Architecture · Engineering Blueprints</title><meta name="description" content="Unicode Text Shaping, hld: §3 overview + §8 domain model. Turn an arbitrary Unicode string plus a font file into a positioned glyph Buffer suitable for immediate rasterization by project #385."><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/graphics-media-games/">Graphics, Media &amp; Games</a> </li><li> <a href="/system-design-blueprints/systems/unicode-text-shaping/">Unicode Text Shaping</a> </li><li> <span aria-current="page">Architecture</span> </li> </ol> </nav>  <article class="system" data-pagefind-body="true"> <header class="sys-head has-hue" style="--h:320"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/graphics-media-games/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Graphics, Media &amp; Games</span></a> </p> <h1>Unicode Text Shaping</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>14 phases</li> <li>~17 weeks</li> <li>3,701 lines</li> <li>blueprint #398</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-ok" title="Plain-words page written and verified against the blueprint">Explainer: checked</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/unicode-text-shaping/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/unicode-text-shaping/architecture/" aria-current="page" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/unicode-text-shaping/design/" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/unicode-text-shaping/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/unicode-text-shaping/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/unicode-text-shaping/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/unicode-text-shaping/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/unicode-text-shaping/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/unicode-text-shaping/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/unicode-text-shaping/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:Unicode Text Shaping — Architecture">  <section class="prose"><h2 id="sec-3">3. Architectural Overview</h2>
+<h3 id="sec-3-pipeline-diagram">Pipeline Diagram</h3>
+<pre class="diagram"><code>Application (ush CLI / layout engine)  -- text: &amp;str, font bytes, script/lang/dir hint
+                   |
+                   v
+    ush-normalize : NFC/NFD/NFKC/NFKD
+                   (canonical order, Hangul, quick-check fast path)
+                   |  normalized &amp;str
+                   v
+    ush-segment   : grapheme / word / line-break boundaries
+                   (UAX #29 GB rules, UAX #29 WB rules, UAX #14 LB rules)
+                   |  runs: Vec&lt;(byte_range, script, dir)&gt;
+                   v
+    ush-bidi      : process_paragraph -&gt; BidiInfo { levels, classes, para_level }
+                   reorder_line -&gt; visual-order index vec; mirror() per glyph
+                   |  directional runs: (Level, script, lang)
+                   v
+    ush-shape     : Face { cmap / GDEF / GSUB / GPOS }
+                   -&gt; map chars to nominal glyph ids (cmap)
+                   -&gt; Shaper { Latin | Arabic | Indic | General }
+                   -&gt; GSUB substitutions (lookup types 1–6)
+                   -&gt; GPOS positioning   (lookup types 1–8)
+                   -&gt; Buffer { Vec&lt;GlyphInfo&gt;, Vec&lt;GlyphPosition&gt;, direction }
+                   |  positioned glyphs: glyph_id, cluster, x/y advance+offset
+                   v
+    TrueType rasterizer (project #385) — draws the glyphs
+
+    ush-tables underlies ALL stages:
+      CodePointTrie -&gt; general_category, combining_class, decomposition,
+                       bidi_class, grapheme_break, word_break, line_break, script</code></pre>
+<h3 id="sec-3-trust-boundary">Trust Boundary</h3>
+<pre class="diagram"><code>UNTRUSTED ---&gt;  font bytes &amp;[u8]  (ush-shape; every table access bounds-checked)
+UNTRUSTED ---&gt;  text &amp;str         (all crates; arbitrary Unicode, no assumption on normalization)
+TRUSTED   ---&gt;  ush-tables data   (generated at build time from UCD; const; immutable)</code></pre>
+<p>Both untrusted inputs are processed with bounds-checked slice access and typed <code>Result</code> errors; no <code>unsafe</code> on the parsing hot path. Malformed font → <code>Err(ShapeError::...)</code> + <code>.notdef</code> glyph fallback; invalid UTF-8 is rejected at the <code>&amp;str</code> type boundary.</p>
+<h3 id="sec-3-data-flow-contracts-between-stages">Data-Flow Contracts Between Stages</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Stage boundary</th>
+<th>Type crossing</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>normalize out</td>
+<td><code>String</code> (NFC/NFD/…); same scalar values, reordered/composed combining marks</td>
+</tr>
+<tr>
+<td>segment out</td>
+<td>Iterator of <code>(Range&lt;usize&gt;, BreakClass)</code>; or <code>Vec&lt;Run { range, script, bidi_level }&gt;</code></td>
+</tr>
+<tr>
+<td>bidi out</td>
+<td><code>BidiInfo { levels: Vec&lt;Level&gt;, classes: Vec&lt;BidiClass&gt;, para_level: Level }</code>; one entry per UTF-16 code unit (UAX #9 convention)</td>
+</tr>
+<tr>
+<td>shape out</td>
+<td><code>Buffer { infos: Vec&lt;GlyphInfo&gt;, positions: Vec&lt;GlyphPosition&gt;, direction }</code></td>
+</tr>
+<tr>
+<td>#385 boundary</td>
+<td><code>Buffer</code> passed by reference; #385 reads <code>glyph_id</code> + <code>cluster</code> + advances + offsets; no ownership transfer of font data</td>
+</tr>
+</tbody></table></div>
+<p>No stage persists state between calls. Generated UCD tables are the single build-time artifact (const static data compiled into <code>ush-tables</code>).</p>
+<h3 id="sec-3-per-box-responsibilities">Per-Box Responsibilities</h3>
+<p><strong><code>ush-tables</code> — CodePointTrie + property accessors</strong></p>
+<ul>
+<li>Owns all per-code-point Unicode properties: <code>general_category</code>, <code>combining_class</code> (ccc), <code>decomposition</code> (canonical + compat + CompatTag), <code>bidi_class</code>, <code>grapheme_break</code> (GCB), <code>word_break</code>, <code>line_break</code>, <code>script</code>.</li>
+<li>Two-stage trie: 9-bit index block size → <code>index[cp &gt;&gt; 9]</code> gives a page offset; <code>data[page + (cp &amp; 0x1FF)]</code> gives the value. Total size target &lt; 1 MB for all properties combined.</li>
+<li>Generated by <code>tools/</code> from UCD text files; output is Rust <code>const</code> arrays. <code>no_std</code>. Invariant: property values are frozen at Unicode 15.1; any UCD bump requires regeneration + full conformance re-run.</li>
+</ul>
+<p><strong><code>ush-normalize</code> — UAX #15 normalization</strong></p>
+<ul>
+<li><code>Normalizer { form: NormForm }</code> + free fn <code>normalize(form, &amp;str) -&gt; String</code>.</li>
+<li>NFD: recursive canonical decomposition via <code>decomposition()</code>, then <code>canonical_order()</code> (stable ccc sort, ccc==0 blockers prevent reordering across starters).</li>
+<li>NFC: NFD then canonical composition — scan left-to-right, pair a starter with a following combining char if primary composite exists AND pair is not blocked AND composite not in composition-exclusion set.</li>
+<li>NFKD/NFKC: same as NFD/NFC but also apply compat decompositions (CompatTag-tagged entries).</li>
+<li>Hangul: algorithmic (SBase=0xAC00, LBase=0x1100, VBase=0x1161, TBase=0x11A7, LCount=19, VCount=21, TCount=28); no table needed.</li>
+<li><code>quick_check(form, &amp;str) -&gt; QuickCheck { Yes, No, Maybe }</code>: Yes-only spans are already normalized → skip entirely (the fast path for already-NFC text).</li>
+<li>Invariant: output is idempotent (<code>normalize(form, normalize(form, s)) == normalize(form, s)</code>).</li>
+</ul>
+<p><strong><code>ush-segment</code> — grapheme clusters, words, line-break opportunities</strong></p>
+<ul>
+<li><code>GraphemeCursor&lt;&#39;a&gt;</code> over a <code>&amp;str</code>: advances one extended grapheme cluster per step using the GB1..GB999 rule state machine over <code>GraphemeBreak</code> properties.</li>
+<li>Emoji ZWJ sequences: ZWJ (U+200D) followed by ExtPict is never a break point (GB11). Regional indicators pair: break after every second RI (GB12/GB13).</li>
+<li><code>WordCursor</code> applies WB rules over <code>word_break</code> properties; yields word/non-word spans.</li>
+<li><code>LineBreaker</code> applies UAX #14 LB rules via the break-class pair table; emits <code>(offset, BreakClass { Mandatory, Allowed, No })</code>.</li>
+<li>Invariant: grapheme cluster boundaries are always valid UTF-8 byte boundaries; cursor never splits a multi-byte sequence.</li>
+</ul>
+<p><strong><code>ush-bidi</code> — UAX #9 bidirectional algorithm</strong></p>
+<ul>
+<li><code>process_paragraph(text, base: Option&lt;Level&gt;) -&gt; BidiInfo</code>: assigns <code>BidiClass</code> per char (via <code>ush-tables</code>), detects paragraph base level (P2/P3; FSI heuristic), runs X1..X8 explicit-level rules via <code>DirectionalStatusStack</code> (push on LRE/RLE/LRO/RLO/LRI/RLI/FSI; pop on PDF/PDI; max depth 125), forms isolating run sequences, resolves weak types (W1..W7), neutral types (N0..N2), implicit levels (I1/I2).</li>
+<li><code>reorder_line(levels, line) -&gt; Vec&lt;usize&gt;</code>: L2 rule — from highest level down to the lowest odd level, reverse each maximal run; returns visual-order index vector.</li>
+<li><code>mirror(c) -&gt; Option&lt;char&gt;</code>: returns the bidi mirroring pair for chars at odd embedding levels (e.g. <code>(</code> → <code>)</code> for RTL display).</li>
+<li>Invariant: <code>Level(0)</code> is LTR, <code>Level(1)</code> is RTL; even = LTR, odd = RTL; max 125.</li>
+</ul>
+<p><strong><code>ush-shape</code> — OpenType font parsing: Face</strong></p>
+<ul>
+<li><code>Face&lt;&#39;a&gt;</code> holds <code>&amp;&#39;a [u8]</code> (zero-copy), the sfnt table-directory offsets, and <code>units_per_em</code> from <code>head</code>.</li>
+<li>Table parsing: <code>head</code>/<code>hhea</code>/<code>maxp</code>/<code>hmtx</code> for metrics; <code>cmap</code> formats 4 (BMP) and 12 (full range) → <code>nominal_glyph(char) -&gt; Option&lt;u32&gt;</code>; <code>GDEF</code> for glyph-class + mark-attach-class + mark-glyph-sets.</li>
+<li>All table access: range-checked <code>get(offset..offset+len)?</code>; never panics on malformed input.</li>
+</ul>
+<p><strong><code>Buffer</code> — the shaping workspace</strong></p>
+<ul>
+<li><code>Buffer { infos: Vec&lt;GlyphInfo&gt;, positions: Vec&lt;GlyphPosition&gt;, direction: Direction }</code>.</li>
+<li><code>GlyphInfo { glyph_id: u32, cluster: u32, flags: u16 }</code> — <code>cluster</code> is monotonically non-decreasing (LTR) or non-increasing (RTL); merges on ligation, splits on multiple-substitution.</li>
+<li><code>GlyphPosition { x_advance, y_advance, x_offset, y_offset: i32 }</code> in font design units.</li>
+<li>Invariant: <code>infos.len() == positions.len()</code> always; cluster values preserve input-char provenance for hit-testing.</li>
+</ul>
+<p><strong>Shaping pipeline + Shapers</strong></p>
+<ul>
+<li><code>shape(face, buf, features)</code> orchestrates: (1) map Unicode chars → nominal glyph IDs via <code>cmap</code>; (2) select script/lang/features from GSUB + GPOS ScriptList; (3) dispatch to the appropriate <code>Shaper</code> impl; (4) run GSUB lookups; (5) run GPOS lookups.</li>
+<li><code>ShaperLatin</code>: applies default GSUB/GPOS features (kern, liga, calt, …); no reorder.</li>
+<li><code>ShaperArabic</code>: joining-type state machine → assigns isol/init/medi/fina contextual forms; applies arab/init/medi/fina/isol/liga/mset features.</li>
+<li><code>ShaperIndic</code>: syllable reorder (base consonant, halant, matra positions) before GSUB; applies the Indic feature set.</li>
+<li><code>ShaperGeneral</code>: script-agnostic fallback; applies default features only.</li>
+<li>RTL <code>Buffer</code>: direction from bidi <code>Level</code> parity; RTL runs have the buffer reversed before GSUB so lookup order is correct; reversed back after GPOS.</li>
+</ul>
+<p><strong>GSUB — glyph substitution</strong></p>
+<ul>
+<li>Lookup types 1 (single), 2 (multiple), 3 (alternate), 4 (ligature), 5 (contextual), 6 (chaining-contextual).</li>
+<li>Feature ordering: mandatory features first, then ordered user feature list, then default features.</li>
+<li>Cluster merging on ligature (type 4): output glyph inherits minimum cluster of all input glyphs.</li>
+</ul>
+<p><strong>GPOS — glyph positioning</strong></p>
+<ul>
+<li>Lookup types 1 (single adjust), 2 (pair/kerning), 3 (cursive attach), 4 (mark-to-base), 5 (mark-to-ligature), 6 (mark-to-mark), 7/8 (contextual).</li>
+<li>Value records: <code>XPlacement</code>, <code>YPlacement</code>, <code>XAdvance</code>, <code>YAdvance</code> deltas applied to <code>GlyphPosition</code>.</li>
+<li>Anchors + device tables for mark attachment; device table delta applied at current ppem.</li>
+</ul>
+<p><strong><code>ush-cli</code> — the <code>ush</code> binary</strong></p>
+<ul>
+<li>Subcommands: <code>normalize [--form NFC|NFD|NFKC|NFKD] &lt;text&gt;</code>, <code>segment [--graphemes|--words|--lines] &lt;text&gt;</code>, <code>bidi &lt;text&gt;</code>, <code>shape --font &lt;file&gt; [--script] [--lang] [--features] &lt;text&gt;</code>.</li>
+<li><code>shape</code> output: JSON or TSV of <code>(glyph_id, cluster, x_advance, y_advance, x_offset, y_offset)</code> per glyph; optionally pipes to #385 rasterizer stdin.</li>
+<li>Depends on all five library crates; the only <code>std</code>-using crate in the workspace.</li>
+</ul>
+<hr>
+</section><section class="prose"><h2 id="sec-8">8. Domain Model — Unicode Algorithms + the OpenType Layout Model</h2>
+<h3 id="sec-8-1">8.1 Character Model</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Definition</th>
+<th>Range / Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Code point</td>
+<td>Integer in 0..=0x10FFFF</td>
+<td>1,114,112 total</td>
+</tr>
+<tr>
+<td>Scalar value</td>
+<td>Code point excluding surrogates (U+D800..U+DFFF)</td>
+<td>Rust <code>char</code> is always a scalar</td>
+</tr>
+<tr>
+<td>Grapheme cluster</td>
+<td>User-perceived character; one or more scalar values</td>
+<td>Extended per UAX #29</td>
+</tr>
+<tr>
+<td>Combining mark</td>
+<td>Scalar with ccc &gt; 0; combines visually with preceding starter</td>
+<td>Not a cluster on its own</td>
+</tr>
+<tr>
+<td>Starter</td>
+<td>Scalar with ccc == 0; anchors a combining sequence</td>
+<td>ccc == 0 but not always a base</td>
+</tr>
+</tbody></table></div>
+<p><strong>Key UCD properties (ush-tables accessors):</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Accessor</th>
+<th>Type</th>
+<th>Usage</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>General Category</td>
+<td><code>general_category(c)</code></td>
+<td><code>GeneralCategory</code></td>
+<td>Script/mark detection</td>
+</tr>
+<tr>
+<td>Canonical Combining Class</td>
+<td><code>combining_class(c)</code></td>
+<td><code>u8</code> (0..=254)</td>
+<td>Canonical ordering + composition blocked check</td>
+</tr>
+<tr>
+<td>Decomposition Mapping</td>
+<td><code>decomposition(c)</code></td>
+<td><code>Option&lt;Decomp&gt;</code></td>
+<td>NFD/NFKD expansion</td>
+</tr>
+<tr>
+<td>NFC / NFKC Quick Check</td>
+<td>embedded in tables</td>
+<td><code>QuickCheck</code></td>
+<td>Fast-path skip</td>
+</tr>
+<tr>
+<td>Bidi Class</td>
+<td><code>bidi_class(c)</code></td>
+<td><code>BidiClass</code></td>
+<td>UAX #9 level resolution</td>
+</tr>
+<tr>
+<td>Script</td>
+<td><code>script(c)</code></td>
+<td><code>Script</code></td>
+<td>Shaper dispatch</td>
+</tr>
+<tr>
+<td>Grapheme Break</td>
+<td><code>grapheme_break(c)</code></td>
+<td><code>GraphemeBreak</code></td>
+<td>GB rule machine</td>
+</tr>
+<tr>
+<td>Word Break</td>
+<td>(parallel accessor)</td>
+<td><code>WordBreak</code></td>
+<td>WB rule machine</td>
+</tr>
+<tr>
+<td>Line Break</td>
+<td><code>line_break(c)</code></td>
+<td><code>LineBreak</code></td>
+<td>LB rule machine</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-2">8.2 Normalization Algorithm</h3>
+<p><strong>Step order:</strong> decompose → canonical order → compose (only for NFC/NFKC).</p>
+<h4 id="sec-8-2-1">8.2.1 Decomposition</h4>
+<ul>
+<li><strong>Canonical:</strong> recursively expand via <code>decomposition(c) = Canonical(chars)</code> until no entry; Hangul LVT -&gt; L,V,T arithmetically.</li>
+<li><strong>Compatibility (NFKD/NFKC):</strong> expand <code>Compat(tag, chars)</code> as well; same recursion.</li>
+<li><strong>Hangul arithmetic</strong> (no table):<pre class="diagram"><code>SBase=0xAC00, LBase=0x1100, VBase=0x1161, TBase=0x11A7
+LCount=19, VCount=21, TCount=28, NCount=VCount*TCount=588
+LV = LBase + (cp-SBase)/NCount
+V  = VBase + ((cp-SBase) % NCount) / TCount
+T  = TBase + (cp-SBase) % TCount   (only if T index &gt; 0)</code></pre>
+</li>
+</ul>
+<h4 id="sec-8-2-2">8.2.2 Canonical Ordering</h4>
+<ul>
+<li>Collect <code>(char, ccc)</code> pairs from decomposed buffer.</li>
+<li>Stable sort every maximal run of ccc &gt; 0; ccc == 0 chars act as blockers — they terminate a run.</li>
+<li>Invariant after step: any two adjacent chars with ccc(a) &gt; ccc(b) have been swapped; starters not moved.</li>
+</ul>
+<h4 id="sec-8-2-3">8.2.3 Canonical Composition (NFC / NFKC)</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Current char ccc</th>
+<th>Condition</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>== 0 (starter)</td>
+<td>always</td>
+<td>record as new <code>starter</code> candidate</td>
+</tr>
+<tr>
+<td>&gt; 0 (combining)</td>
+<td><code>blocked(starter, i)</code> == true</td>
+<td>append char unchanged; update <code>max_ccc_since_starter</code></td>
+</tr>
+<tr>
+<td>&gt; 0 (combining)</td>
+<td>not blocked AND <code>is_primary_composite(buf[starter], buf[i])</code></td>
+<td>replace <code>buf[starter]</code> with composite; delete <code>buf[i]</code> from buffer; continue scan at same <code>i</code> (now pointing to next char)</td>
+</tr>
+<tr>
+<td>&gt; 0 (combining)</td>
+<td>not blocked AND no composite found</td>
+<td>append char unchanged; update <code>max_ccc_since_starter</code></td>
+</tr>
+</tbody></table></div>
+<ul>
+<li><strong>Blocked:</strong> some char at j (starter &lt; j &lt; i) has ccc(j) &gt;= ccc(i); OR j is a starter itself.</li>
+<li><strong>Composition exclusions:</strong> singletons, non-starter decompositions, pre-composed chars listed in <code>CompositionExclusions.txt</code>; also Hangul composed algorithmically (L+V -&gt; LV, LV+T -&gt; LVT).</li>
+</ul>
+<h4 id="sec-8-2-4">8.2.4 Worked Example</h4>
+<p>Input: <code>&quot;q̣̇&quot;</code> (q + combining dot above U+0307 ccc=230 + combining dot below U+0323 ccc=220)</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Buffer</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Decompose (NFD)</td>
+<td><code>q(0), ̣(220), ̇(230)</code></td>
+<td>No canonical decomps; passthrough</td>
+</tr>
+<tr>
+<td>Canonical order</td>
+<td><code>q(0), ̣(220), ̇(230)</code></td>
+<td>220 &lt; 230, already in order after stable sort</td>
+</tr>
+<tr>
+<td>NFC compose</td>
+<td><code>q</code> + U+0323 + U+0307</td>
+<td>No primary composite for q+U+0323; no composite for result+U+0307</td>
+</tr>
+<tr>
+<td>Output NFD</td>
+<td><code>q̣̇</code></td>
+<td>Reordered vs input</td>
+</tr>
+</tbody></table></div>
+<p>Second example: <code>&quot;é&quot;</code> (é U+00E9, precomposed):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Step</th>
+<th>Buffer</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Decompose NFD</td>
+<td><code>e(0), ́(230)</code></td>
+<td>U+00E9 -&gt; U+0065 U+0301 via table</td>
+</tr>
+<tr>
+<td>Canonical order</td>
+<td><code>e(0), ́(230)</code></td>
+<td>Single combiner, unchanged</td>
+</tr>
+<tr>
+<td>NFC compose</td>
+<td><code>é</code></td>
+<td>e + U+0301 -&gt; U+00E9; not excluded; not blocked</td>
+</tr>
+</tbody></table></div>
+<h3 id="sec-8-3">8.3 Segmentation Rule Machines</h3>
+<p><strong>Grapheme Cluster (UAX #29 GB rules), ordered highest-priority first:</strong></p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Rule</th>
+<th>Pattern</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>GB1</td>
+<td>sot ÷</td>
+<td>Always break at start</td>
+</tr>
+<tr>
+<td>GB2</td>
+<td>÷ eot</td>
+<td>Always break at end</td>
+</tr>
+<tr>
+<td>GB3</td>
+<td>CR × LF</td>
+<td>No break</td>
+</tr>
+<tr>
+<td>GB4</td>
+<td>(Control|CR|LF) ÷</td>
+<td>Break after</td>
+</tr>
+<tr>
+<td>GB5</td>
+<td>÷ (Control|CR|LF)</td>
+<td>Break before</td>
+</tr>
+<tr>
+<td>GB6</td>
+<td>L × (L|V|LV|LVT)</td>
+<td>Hangul syllable</td>
+</tr>
+<tr>
+<td>GB7</td>
+<td>(LV|V) × (V|T)</td>
+<td>Hangul</td>
+</tr>
+<tr>
+<td>GB8</td>
+<td>(LVT|T) × T</td>
+<td>Hangul</td>
+</tr>
+<tr>
+<td>GB9</td>
+<td>× (Extend|ZWJ)</td>
+<td>Keep combiners</td>
+</tr>
+<tr>
+<td>GB9a</td>
+<td>× SpacingMark</td>
+<td>Keep spacing marks</td>
+</tr>
+<tr>
+<td>GB9b</td>
+<td>Prepend ×</td>
+<td>Keep prepends</td>
+</tr>
+<tr>
+<td>GB11</td>
+<td>ExtPict Extend* ZWJ × ExtPict</td>
+<td>Emoji ZWJ sequence</td>
+</tr>
+<tr>
+<td>GB12/13</td>
+<td>RI × RI (first pair only)</td>
+<td>Regional indicator pair</td>
+</tr>
+<tr>
+<td>GB999</td>
+<td>÷ (otherwise)</td>
+<td>Default break</td>
+</tr>
+</tbody></table></div>
+<p><strong>Emoji ZWJ + Regional Indicator examples:</strong></p>
+<ul>
+<li><code>👩‍🚀</code> = U+1F469 ZWJ U+1F680: GB11 keeps ExtPict + ZWJ + ExtPict as one cluster.</li>
+<li><code>🇺🇸🇬🇧</code>: GB12/13 pairs: [U+1F1FA U+1F1F8] [U+1F1EC U+1F1E7]; each RI pair is one cluster; stateful — must track if preceding RI count is even.</li>
+</ul>
+<p><strong>Word Break (WB rules, same machine pattern):</strong> WB1/WB2 sot/eot; WB3 CR×LF; WB3a-c controls; WB4 skip Extend/Format/ZWJ; WB5 AHLetter×AHLetter; WB6/7 AHLetter×(MidLetter|MidNumLet)AHLetter; WB8-10 Numeric; WB11/12 Numeric+MidNum; WB13 Katakana; WB13a/b ExtendNumLet; WB15/16 RI pairs; WB999 break.</p>
+<p><strong>Line Break (LB pair table):</strong> LB rules classify each code point into an <code>LbClass</code>; a 50×50 pair table encodes <code>{ B(reak), N(o), ^(prohibited), _ }</code> for (before, after) class pairs; mandatory breaks (BK, NL, CR, LF) always fire; tailoring via rule ordering for spaces + combining marks.</p>
+<h3 id="sec-8-4">8.4 Bidi Algorithm (UAX #9)</h3>
+<h4 id="sec-8-4-1">8.4.1 Bidi Class Table (major classes)</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Class</th>
+<th>Name</th>
+<th>Examples</th>
+<th>Strong/Weak/Neutral</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>L</td>
+<td>Left-to-Right</td>
+<td>Latin, digits in LTR</td>
+<td>Strong</td>
+</tr>
+<tr>
+<td>R</td>
+<td>Right-to-Left</td>
+<td>Hebrew</td>
+<td>Strong</td>
+</tr>
+<tr>
+<td>AL</td>
+<td>Arabic Letter</td>
+<td>Arabic, Thaana</td>
+<td>Strong</td>
+</tr>
+<tr>
+<td>EN</td>
+<td>European Number</td>
+<td>0-9 in context</td>
+<td>Weak</td>
+</tr>
+<tr>
+<td>ES</td>
+<td>European Sep</td>
+<td>+, -</td>
+<td>Weak</td>
+</tr>
+<tr>
+<td>ET</td>
+<td>European Term</td>
+<td>$, %, °</td>
+<td>Weak</td>
+</tr>
+<tr>
+<td>AN</td>
+<td>Arabic Number</td>
+<td>Arabic-Indic digits</td>
+<td>Weak</td>
+</tr>
+<tr>
+<td>CS</td>
+<td>Common Sep</td>
+<td>comma, slash</td>
+<td>Weak</td>
+</tr>
+<tr>
+<td>NSM</td>
+<td>Non-Spacing Mark</td>
+<td>combining diacritics</td>
+<td>Weak</td>
+</tr>
+<tr>
+<td>BN</td>
+<td>Boundary Neutral</td>
+<td>formatting chars</td>
+<td>Weak</td>
+</tr>
+<tr>
+<td>B</td>
+<td>Paragraph Sep</td>
+<td>U+2029</td>
+<td>Neutral</td>
+</tr>
+<tr>
+<td>S</td>
+<td>Segment Sep</td>
+<td>tab</td>
+<td>Neutral</td>
+</tr>
+<tr>
+<td>WS</td>
+<td>Whitespace</td>
+<td>space</td>
+<td>Neutral</td>
+</tr>
+<tr>
+<td>ON</td>
+<td>Other Neutral</td>
+<td>punctuation</td>
+<td>Neutral</td>
+</tr>
+<tr>
+<td>LRE/RLE/LRO/RLO</td>
+<td>Explicit embed/override</td>
+<td>U+202A..U+202D</td>
+<td>Format</td>
+</tr>
+<tr>
+<td>LRI/RLI/FSI/PDI</td>
+<td>Isolate</td>
+<td>U+2066..U+2069</td>
+<td>Format</td>
+</tr>
+</tbody></table></div>
+<h4 id="sec-8-4-2">8.4.2 Paragraph Base Level (P2/P3 + FSI)</h4>
+<ul>
+<li>P2: scan left-to-right in paragraph, skipping chars inside isolates; take first strong (L/R/AL).</li>
+<li>P3: if L -&gt; level 0; if R/AL -&gt; level 1; if no strong found -&gt; level 0.</li>
+<li>FSI: look ahead within the isolate for first strong; resolve its direction the same way.</li>
+</ul>
+<h4 id="sec-8-4-3">8.4.3 Explicit Level Resolution (X Rules) — DirectionalStatusStack</h4>
+<pre class="diagram"><code>struct DirectionalStatusStack {
+    entries: Vec&lt;(Level, Override, Isolate)&gt;,  // max 125 depth
+}
+// X1: push paragraph level.
+// X2 LRE: push(current+1 rounded even, Neutral, false)   if depth &lt; 125
+// X3 RLE: push(current+1 rounded odd,  Neutral, false)   if depth &lt; 125
+// X4 LRO: push(..., Override=L, false)
+// X5 RLO: push(..., Override=R, false)
+// X5a LRI: push(current+1 rounded even, Neutral, true)   isolate
+// X5b RLI: push(current+1 rounded odd,  Neutral, true)   isolate
+// X5c FSI: determine direction, then push as LRI or RLI
+// X6: assign current level/override to every non-format char
+// X6a PDI: pop top isolate entry; assign PDI level from new top
+// X7 PDF: pop top non-isolate entry
+// X8: reset stack to paragraph level at B
+// depth &gt; 125: ignore LRE/RLE/LRO/RLO; overflow isolate counter for LRI/RLI/FSI</code></pre>
+<p><strong>Isolate example:</strong> <code>&quot;hello ⁦Arabic⁩ world&quot;</code> (LRI...PDI):</p>
+<ul>
+<li>Before LRI: level 0. LRI pushes level 1 (even -&gt; LTR override from isolate direction).</li>
+<li>&quot;Arabic&quot; chars assigned level 1 inside isolate.</li>
+<li>PDI pops; &quot;world&quot; back at level 0.</li>
+<li>Isolate is treated as a unit in the enclosing level; no W/N rules cross its boundary.</li>
+</ul>
+<h4 id="sec-8-4-4">8.4.4 W / N / I Rules + L2 Reorder</h4>
+<ul>
+<li><strong>W1-W7 (weak):</strong> W1 NSM inherits preceding class; W2 EN after AL -&gt; AN; W3 AL -&gt; R; W4 ES/CS between EN-&gt;EN; W5 ET adjacent EN; W6 ES/ET/CS -&gt; ON; W7 EN after L context -&gt; L.</li>
+<li><strong>N0-N2 (neutral):</strong> N0 paired brackets (the bracket-matching algorithm); N1 sequence of neutrals between same-direction strongs -&gt; that direction; N2 remaining neutrals -&gt; embedding direction.</li>
+<li><strong>I1/I2 (implicit):</strong> I1 even level: L stays, R +1, AN/EN +2; I2 odd level: R stays, L/AN/EN +1.</li>
+<li><strong>L2 reorder:</strong> reverse every maximal contiguous sequence at the highest level, decrement level, repeat until all levels resolved; yields visual order.</li>
+<li><strong>L3 combining marks:</strong> (handled; marks take preceding level).</li>
+<li><strong>mirror():</strong> at odd levels, replace bracket/quote/arrow with bidi-mirror pair (e.g., U+0028 -&gt; U+0029) using the Bidi_Mirroring_Glyph table.</li>
+</ul>
+<p><strong>Worked mixed example:</strong> logical <code>&quot;car ב→ג&quot;</code> (L:&quot;car &quot; R:&quot;ב→ג&quot;)</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Position</th>
+<th>Char</th>
+<th>BidiClass</th>
+<th>Level (after I rules)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0</td>
+<td>c</td>
+<td>L</td>
+<td>0</td>
+</tr>
+<tr>
+<td>1</td>
+<td>a</td>
+<td>L</td>
+<td>0</td>
+</tr>
+<tr>
+<td>2</td>
+<td>r</td>
+<td>L</td>
+<td>0</td>
+</tr>
+<tr>
+<td>3</td>
+<td>(space)</td>
+<td>WS</td>
+<td>0</td>
+</tr>
+<tr>
+<td>4</td>
+<td>ב</td>
+<td>R</td>
+<td>1</td>
+</tr>
+<tr>
+<td>5</td>
+<td>→</td>
+<td>ON</td>
+<td>1 (N1: between R,R)</td>
+</tr>
+<tr>
+<td>6</td>
+<td>ג</td>
+<td>R</td>
+<td>1</td>
+</tr>
+</tbody></table></div>
+<p>L2 reorder (highest=1): reverse positions 4..6 -&gt; visual: <code>&quot;car גּ←ב&quot;</code> (arrow mirrored at odd level).</p>
+<h3 id="sec-8-5">8.5 OpenType Layout Model</h3>
+<h4 id="sec-8-5-1">8.5.1 sfnt Table Directory</h4>
+<pre class="diagram"><code>sfnt header: sfVersion, numTables, searchRange, entrySelector, rangeShift
+TableRecord[numTables]: tag(4B), checksum(4B), offset(4B), length(4B)
+Required tables parsed: head (unitsPerEm), hhea, maxp, hmtx (advance widths),
+                        cmap, GDEF, GSUB, GPOS</code></pre>
+<h4 id="sec-8-5-2">8.5.2 cmap Formats</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Coverage</th>
+<th>Usage</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>4 (segmented delta)</td>
+<td>BMP U+0000..U+FFFF</td>
+<td>Most common; segment array</td>
+</tr>
+<tr>
+<td>6 (trimmed array)</td>
+<td>Dense BMP range</td>
+<td>Small fonts</td>
+</tr>
+<tr>
+<td>12 (segmented, 32-bit)</td>
+<td>Full Unicode incl. supplementary</td>
+<td>Required for emoji/CJK ext</td>
+</tr>
+</tbody></table></div>
+<p>cmap lookup: binary-search segment table -&gt; <code>glyph_id = (cp - startCode) + idDelta</code> (format 4) or direct index (format 12). Miss -&gt; glyph 0 (.notdef).</p>
+<h4 id="sec-8-5-3">8.5.3 GSUB / GPOS Structure</h4>
+<pre class="diagram"><code>ScriptList  -&gt; Script[tag] -&gt; LangSys[tag] -&gt; Feature indices[]
+FeatureList -&gt; Feature[index] -&gt; LookupList indices[]
+LookupList  -&gt; Lookup[index] -&gt; { LookupType, LookupFlag, SubTable[] }</code></pre>
+<ul>
+<li><strong>Coverage table:</strong> glyph-id set (format 1: sorted glyph array; format 2: ranges) -&gt; coverage index.</li>
+<li><strong>ClassDef:</strong> maps glyph-id -&gt; class integer (format 1: array from startGlyph; format 2: ranges).</li>
+</ul>
+<h4 id="sec-8-5-4">8.5.4 GSUB Lookup Types</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Name</th>
+<th>Mechanism</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Single</td>
+<td>glyph + delta or explicit map</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Multiple</td>
+<td>1 -&gt; N glyphs (decompose)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Alternate</td>
+<td>1 -&gt; 1 of N alternates</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Ligature</td>
+<td>N -&gt; 1 (ligate)</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Context</td>
+<td>rule set / class / coverage-based context</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Chaining Context</td>
+<td>backtrack + input + lookahead</td>
+</tr>
+<tr>
+<td>7/8</td>
+<td>Extension / Reverse Chain</td>
+<td>extension indirection; RTL single</td>
+</tr>
+</tbody></table></div>
+<p><strong>Worked ligature (GSUB type 4):</strong> feature liga, script latn:</p>
+<ul>
+<li>LookupList[2]: LigatureSet for glyph(f): [Ligature { components:[glyph(i)], ligGlyph:glyph(fi) }]</li>
+<li>Buffer before: <code>[GlyphInfo{id:glyph(f), cluster:0}, GlyphInfo{id:glyph(i), cluster:1}]</code></li>
+<li>Match: current=glyph(f), next=glyph(i) -&gt; ligature match.</li>
+<li>Buffer after: <code>[GlyphInfo{id:glyph(fi), cluster:0}]</code> — cluster 0 covers input chars 0..1; cluster monotonic.</li>
+</ul>
+<h4 id="sec-8-5-5">8.5.5 GPOS Lookup Types</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Name</th>
+<th>Mechanism</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>Single Adjust</td>
+<td>value record per glyph</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Pair Adjust</td>
+<td>kerning: (g1,g2) -&gt; (ValueRecord1, ValueRecord2)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Cursive Attach</td>
+<td>entry/exit anchors for cursive scripts</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Mark-to-Base</td>
+<td>mark anchor -&gt; base anchor</td>
+</tr>
+<tr>
+<td>5</td>
+<td>Mark-to-Ligature</td>
+<td>mark -&gt; ligature component anchor</td>
+</tr>
+<tr>
+<td>6</td>
+<td>Mark-to-Mark</td>
+<td>mark -&gt; mark anchor</td>
+</tr>
+<tr>
+<td>7/8</td>
+<td>Context / Chaining</td>
+<td>contextual positioning</td>
+</tr>
+</tbody></table></div>
+<p><strong>Worked kerning pair (GPOS type 2):</strong></p>
+<ul>
+<li>PairSet for glyph(A): [PairValueRecord{ secondGlyph:glyph(V), value1:{XAdvance:-80}, value2:{} }]</li>
+<li>Buffer: <code>[GlyphInfo(A,cluster=0), GlyphInfo(V,cluster=1)]</code></li>
+<li>Apply: positions[0].x_advance += -80; positions[1] unchanged.</li>
+</ul>
+<p><strong>Value record fields:</strong> XPlacement, YPlacement, XAdvance, YAdvance (each i16). Anchors: (x,y) in design units with optional device tables for hinting.</p>
+<h4 id="sec-8-5-6">8.5.6 Buffer / Cluster Invariants</h4>
+<ul>
+<li><code>infos.len() == positions.len()</code> always.</li>
+<li>Cluster values monotonically non-decreasing (LTR) or non-increasing (RTL).</li>
+<li>Ligature merge: all consumed glyphs&#39; clusters collapse to the minimum cluster index.</li>
+<li>Multiple-subst split: new glyphs inherit the source glyph&#39;s cluster value.</li>
+<li>Cluster ties output glyph_id back to input char offset for hit-testing + cursor placement by caller.</li>
+</ul>
+<h4 id="sec-8-5-7">8.5.7 Malformed / Edge-Case Handling</h4>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Input</th>
+<th>Condition</th>
+<th>Handling</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Lone surrogate (e.g., U+D800)</td>
+<td>Not a valid Rust <code>char</code>; can arrive via FFI/bytes</td>
+<td>Reject at API boundary; <code>Err(InvalidScalar)</code> before any pipeline stage</td>
+</tr>
+<tr>
+<td>Unassigned code point (e.g., U+FFFF)</td>
+<td>Valid scalar, GC=Cn, no decomp, bidi=BN</td>
+<td>Pass through as-is; no crash; cmap miss -&gt; .notdef</td>
+</tr>
+<tr>
+<td>Font with truncated GSUB</td>
+<td>SubTable offset past EOF</td>
+<td>Bounds-check on every offset read; return <code>Err(MalformedTable)</code>; skip subtable, continue</td>
+</tr>
+<tr>
+<td>cmap miss</td>
+<td>No glyph for cp in any subtable</td>
+<td>glyph_id = 0 (.notdef); cluster preserved; shaping continues</td>
+</tr>
+<tr>
+<td>Over-deep bidi nesting (&gt;125)</td>
+<td>DirectionalStatusStack overflow</td>
+<td>Overflow LRE/RLE/LRO/RLO silently ignored per spec; overflow isolate counter incremented; no stack growth</td>
+</tr>
+<tr>
+<td>ccc &gt; 254</td>
+<td>Not valid in Unicode</td>
+<td>Table stores u8; values clamped at table generation; flagged in tools/ validation</td>
+</tr>
+<tr>
+<td>Empty font GPOS</td>
+<td>No GPOS table present</td>
+<td><code>gpos</code> field = None in Face; positioning step is a no-op; all positions remain zero</td>
+</tr>
+</tbody></table></div>
+<hr>
+</section>  </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>

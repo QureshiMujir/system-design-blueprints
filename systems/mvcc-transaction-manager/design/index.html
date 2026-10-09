@@ -1,0 +1,405 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>MVCC Transaction Manager — Design · Engineering Blueprints</title><meta name="description" content="MVCC Transaction Manager, lld: core types, repo tree, file inventory. Build a production-grade Multi-Version Concurrency Control (MVCC) transaction manager in Rust: append-only tuple version chains with xmin/xmax/cmin/cmax visibility metadata (Postgres-style), a…"><link rel="icon" href="/system-design-blueprints/favicon.svg" type="image/svg+xml"><script>
+      (function () {
+        var d = document.documentElement;
+        d.classList.add('js');
+        try {
+          var t = localStorage.getItem('theme');
+          if (t === 'light' || t === 'dark') {
+            d.setAttribute('data-theme', t);
+            var m = document.querySelector('meta[name="color-scheme"]');
+            if (m) m.setAttribute('content', t);
+          }
+        } catch (e) {}
+      })();
+    </script><link rel="stylesheet" href="/system-design-blueprints/_astro/architecture.A5h0oPpO.css"></head> <body> <a class="skip" href="#main">Skip to content</a> <header class="site-header" data-pagefind-ignore> <div class="container header-inner"> <a class="brand" href="/system-design-blueprints/"> <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"></rect><path d="M8 10h16M8 16h16M8 22h10" style="stroke:var(--bg)" stroke-width="3" stroke-linecap="round"></path></svg> <span>Engineering Blueprints</span> </a> <nav class="site-nav" aria-label="Site"> <a href="/system-design-blueprints/">Catalogue</a><a href="/system-design-blueprints/systems/">A–Z</a><a href="/system-design-blueprints/domains/">Domains</a><a href="/system-design-blueprints/glossary/">Glossary</a><a href="/system-design-blueprints/about/">About</a> </nav> <div class="header-tools"> <a class="icon-btn" href="/system-design-blueprints/#search" aria-label="Search" title="Search"> <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="2"></circle><path d="M16 16l4.5 4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </a> <button class="icon-btn theme-toggle" type="button" aria-label="Switch theme" title="Switch light / dark theme"> <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="currentColor"></path></svg> <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg> </button> </div> </div> </header> <main id="main" class="container" tabindex="-1"> <nav class="crumbs" aria-label="Breadcrumb" data-pagefind-ignore> <ol> <li> <a href="/system-design-blueprints/">Catalogue</a> </li><li> <a href="/system-design-blueprints/domains/databases-storage/">Databases &amp; Storage</a> </li><li> <a href="/system-design-blueprints/systems/mvcc-transaction-manager/">MVCC Transaction Manager</a> </li><li> <span aria-current="page">Design</span> </li> </ol> </nav>  <article class="system"> <header class="sys-head has-hue" style="--h:130"> <p class="eyebrow sys-meta"> <a href="/system-design-blueprints/domains/databases-storage/"><span class="dot" aria-hidden="true"></span><span data-pagefind-filter="domain">Databases &amp; Storage</span></a> </p> <h1>MVCC Transaction Manager</h1> <ul class="facts" aria-label="Key facts"> <li><span class="badge badge-lang" data-pagefind-filter="language" title="Primary language">Rust</span></li> <li title="Environment class (draft)">native-mac</li> <li>11 phases</li> <li>~24 weeks</li> <li>2,636 lines</li> <li>blueprint #100</li> </ul> <p class="badges" data-pagefind-ignore> <span class="badge badge-muted" title="The plain-words page has not been written">No explainer yet</span> <span class="badge badge-info" title="Build card judgment written, no code yet">Build: judged</span> </p> </header> <nav class="tabs" aria-label="System sections" data-pagefind-ignore> <a href="/system-design-blueprints/systems/mvcc-transaction-manager/" title="Plain words">Explainer</a><a href="/system-design-blueprints/systems/mvcc-transaction-manager/architecture/" title="HLD: §3 overview + §8 domain model">Architecture</a><a href="/system-design-blueprints/systems/mvcc-transaction-manager/design/" aria-current="page" title="LLD: core types, repo tree, file inventory">Design</a><a href="/system-design-blueprints/systems/mvcc-transaction-manager/trade-offs/" title="ADRs, roads not taken, deferred">Trade-offs</a><a href="/system-design-blueprints/systems/mvcc-transaction-manager/reliability/" title="Invariants, threats, failure modes">Reliability</a><a href="/system-design-blueprints/systems/mvcc-transaction-manager/numbers/" title="Constraints, perf targets, capacity">Numbers</a><a href="/system-design-blueprints/systems/mvcc-transaction-manager/compare/" title="Against real systems">Compare</a><a href="/system-design-blueprints/systems/mvcc-transaction-manager/build/" title="Phases, milestones, status">Build</a><a href="/system-design-blueprints/systems/mvcc-transaction-manager/study/" title="Hard questions, reading, glossary">Study</a><a href="/system-design-blueprints/systems/mvcc-transaction-manager/blueprint/" title="The whole document">Blueprint</a> </nav> <div class="tab-body" data-pagefind-meta="title:MVCC Transaction Manager — Design">  <p class="note">Low-level design as the blueprint states it: type and trait signatures, the normative repository tree and the file inventory. Equations and state machines live on the <a href="/system-design-blueprints/systems/mvcc-transaction-manager/architecture/">Architecture</a> tab (§8).</p> <section aria-labelledby="sec-11"> <h2 id="sec-11">Core schema &amp; types (§11)</h2> <pre class="code"><code>pub struct TransactionId(pub u64);          // Copy; INVALID=0, FROZEN=u64::MAX
+pub struct CommitTs(pub u64);               // Copy; high 48b physical µs, low 16b logical
+pub const ABORTED_XMIN: TransactionId;      // = TransactionId(u64::MAX - 1)
+impl TransactionId { pub const INVALID: Self; pub const FROZEN: Self; }
+impl CommitTs { pub const NEVER: Self; pub fn physical_us(self) -&gt; u64; pub fn logical(self) -&gt; u16; }</code></pre><pre class="code"><code>#[repr(C)]
+pub struct TupleHeader { pub xmin: TransactionId, pub xmax: TransactionId,
+    pub cmin: u32, pub cmax: u32, pub xmin_commit_ts: CommitTs, pub next: VersionPtr }
+pub struct VersionPtr(pub u64);             // opaque; backend-interpreted
+pub struct TupleVersion&lt;&#39;a&gt; { pub header: TupleHeader, pub payload: &amp;&#39;a [u8] }</code></pre><pre class="code"><code>pub struct Snapshot { pub xmin_horizon: TransactionId, pub xmax_ceiling: TransactionId,
+    pub in_progress: BTreeSet&lt;TransactionId&gt;, pub snapshot_ts: CommitTs }
+impl Snapshot { pub fn sees_xid(&amp;self, xid: TransactionId) -&gt; bool; }</code></pre><pre class="code"><code>pub enum TransactionState { Active, Committing, Committed { commit_ts: CommitTs }, Aborted }
+pub struct Transaction { pub id: TransactionId, pub snapshot: Snapshot,
+    pub write_set: WriteSet, pub read_set: ReadSet, pub state: TransactionState,
+    pub started_us: u64 }
+pub struct WriteSet { /* entries: Vec&lt;WriteEntry&gt;, cap 10,000 (ADR-29) */ }
+pub struct WriteEntry { pub key: Vec&lt;u8&gt;, pub old_ptr: VersionPtr, pub new_ptr: VersionPtr }
+pub struct ReadSet { /* entries: Vec&lt;ReadEntry&gt;, populated only under SSI */ }
+pub struct ReadEntry { pub key: Vec&lt;u8&gt;, pub seen_xmin: TransactionId, pub predicate: Option&lt;PredicateScope&gt; }</code></pre><pre class="code"><code>pub trait Visibility { fn is_visible(&amp;self, hdr: &amp;TupleHeader, snap: &amp;Snapshot) -&gt; bool; }
+pub struct StandardMvcc;
+pub fn is_visible_full(hdr: &amp;TupleHeader, snap: &amp;Snapshot, my_xid: TransactionId,
+    my_cmd: u32, state_oracle: &amp;dyn TxnStateOracle) -&gt; bool;</code></pre><pre class="code"><code>pub fn find_visible&lt;S: VersionStore, V: Visibility&gt;(store: &amp;S, vis: &amp;V, snap: &amp;Snapshot,
+    key: &amp;[u8]) -&gt; Option&lt;TupleVersion&lt;&#39;_&gt;&gt;;
+pub fn find_visible_hot&lt;S: VersionStore, V: Visibility&gt;(store: &amp;S, vis: &amp;V, snap: &amp;Snapshot,
+    key: &amp;[u8]) -&gt; Option&lt;TupleVersion&lt;&#39;_&gt;&gt;;                 // Phase 10 hot-path variant</code></pre><pre class="code"><code>pub trait VersionStore: Send + Sync {
+    fn chain_head(&amp;self, key: &amp;[u8]) -&gt; Option&lt;VersionPtr&gt;;
+    fn load(&amp;self, ptr: VersionPtr) -&gt; Option&lt;TupleVersion&lt;&#39;_&gt;&gt;;
+    fn append(&amp;self, key: &amp;[u8], header: TupleHeader, payload: &amp;[u8]) -&gt; Result&lt;VersionPtr, AppendError&gt;;
+    fn set_xmax(&amp;self, ptr: VersionPtr, xmax: TransactionId) -&gt; Result&lt;(), SetXmaxError&gt;;
+    unsafe fn reclaim(&amp;self, ptr: VersionPtr);                // GC-only, precondition I10
+}
+pub enum AppendError { OutOfSpace, IndexCorrupt }
+pub enum SetXmaxError { WriteConflict { current_xmax: TransactionId } }</code></pre><pre class="code"><code>pub struct Registry { /* projection: epoch::Atomic&lt;RegistryProjection&gt; (Phase 10) */ }
+pub struct RegistryProjection { pub next_xid: TransactionId, pub active_sorted: Vec&lt;TransactionId&gt; }
+impl Registry {
+    pub fn take_snapshot(&amp;self, oracle: &amp;dyn TimestampOracle) -&gt; Snapshot;
+    pub fn retire(&amp;self, id: TransactionId, final_state: TransactionState);
+    pub fn compute_horizon(&amp;self) -&gt; TransactionId;
+}</code></pre><pre class="code"><code>pub trait TimestampOracle: Send + Sync {
+    fn allocate_xid(&amp;self) -&gt; TransactionId;
+    fn assign_commit_ts(&amp;self) -&gt; CommitTs;
+    fn now_for_snapshot(&amp;self) -&gt; CommitTs;
+}
+pub struct CentralizedOracle;               // AtomicU64-backed
+pub struct HybridLogicalClock { /* state: AtomicU64 */ }
+pub struct CommitRecord { pub xid: TransactionId, pub commit_ts: CommitTs,
+    pub write_count: u32, pub writes: Vec&lt;WriteEntryRecord&gt; }
+pub struct WriteEntryRecord { pub key: Vec&lt;u8&gt;, pub old_ptr: VersionPtr, pub new_ptr: VersionPtr }
+pub trait WalSink: Send + Sync {
+    fn append_commit(&amp;self, xid: TransactionId, ts: CommitTs, writes: &amp;WriteSet) -&gt; Result&lt;CommitHandle, WalError&gt;;
+    fn append_abort(&amp;self, xid: TransactionId) -&gt; Result&lt;(), WalError&gt;;
+    fn append_checkpoint(&amp;self, state: CheckpointState) -&gt; Result&lt;(), WalError&gt;;
+}
+pub struct CommitHandle;                    // opaque
+pub struct DurableToken { /* _seal: () */ } // typestate: only from CommitHandle::wait_durable</code></pre><pre class="code"><code>pub struct SiReadLock { pub holder: TransactionId, pub key_or_predicate: PredicateScope,
+    pub granted_at_xmin: TransactionId }
+pub enum PredicateScope { Key(Vec&lt;u8&gt;), Page { table: u32, page: u32 },
+    Predicate { table: u32, expr: PredicateExpr } }
+pub enum PredicateExpr { Equals { column: u16, value: Vec&lt;u8&gt; },
+    Range { column: u16, lo: Vec&lt;u8&gt;, hi: Vec&lt;u8&gt; } }</code></pre><pre class="code"><code>pub enum IsolationLevel { ReadCommitted, SnapshotIsolation, SerializableSnapshotIsolation }</code></pre> </section><section aria-labelledby="sec-10"> <h2 id="sec-10">Repository layout (§10)</h2> <pre class="diagram"><code>MVCC-Transaction-Manager/
+├── README.md                     # project overview, quickstart
+├── FINAL_BLUEPRINT.md            # this document
+├── BUILD_PLAN.md                 # phase-by-phase execution tracker
+├── CHANGELOG.md                  # Keep-a-Changelog format
+├── BLUEPRINT_LOG.md              # decision log cross-referencing ADRs
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+├── SECURITY.md                   # 90-day coordinated disclosure policy
+├── LICENSE-APACHE
+├── LICENSE-MIT
+├── Makefile                      # bootstrap/build/test/lint/conformance/... targets
+├── Cargo.toml                    # workspace manifest
+├── Dockerfile                    # multi-stage: rust:1.78 builder → distroless (ADR-28)
+├── docker-compose.yml
+├── rust-toolchain.toml           # pins 1.78 (ADR-27 reproducibility)
+├── deny.toml                     # cargo-deny license/advisory policy (ADR-25)
+└── .github/
+    └── workflows/
+        ├── ci.yml
+        ├── conformance.yml
+        ├── anomalies.yml         # Berenson 1995 / Adya 1999 vectors
+        ├── jepsen.yml
+        ├── tla.yml                # TLC model checker
+        ├── loom.yml
+        ├── fuzz.yml               # cargo-fuzz nightly canaries
+        ├── soak.yml               # 30-day mixed-workload soak
+        └── release.yml</code></pre><pre class="diagram"><code>crates/
+├── mvcc-core/                    # no_std-capable (ADR-02)
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── error.rs
+│       ├── tuple.rs              # TupleHeader, VersionPtr, TupleVersion (§11.2)
+│       ├── chain.rs               # find_visible, find_visible_hot (§11.6)
+│       ├── visibility.rs          # Visibility trait, StandardMvcc, is_visible_full (§11.5)
+│       ├── snapshot.rs            # Snapshot, sees_xid (§11.3)
+│       ├── hot.rs                 # HOT-chain primitives shared with mvcc-gc
+│       └── store_trait.rs         # VersionStore trait (§11.7)
+├── mvcc-txn/                     # std
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── id.rs                  # TransactionId, CommitTs, ABORTED_XMIN (§11.1)
+│       ├── state.rs               # TransactionState, Transaction, WriteSet, ReadSet (§11.4)
+│       ├── handle.rs               # TxnHandle public API surface
+│       ├── commit.rs               # commit protocol signature (§14.2)
+│       ├── abort.rs                # abort protocol signature (§14.3)
+│       ├── statement.rs            # statement- vs txn-level snapshot dispatch (§16)
+│       └── registry.rs             # Registry, RegistryProjection (§11.8, §22.1)
+└── mvcc-timestamp/                # std
+    ├── Cargo.toml
+    └── src/
+        ├── lib.rs
+        ├── oracle.rs               # CentralizedOracle (§20.1)
+        ├── hlc.rs                  # HybridLogicalClock (§11.9, §20.2)
+        └── truetime_contrast.rs    # docs-only module; §20.3</code></pre><pre class="diagram"><code>crates/
+├── mvcc-gc/                      # std
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── horizon.rs              # compute_xmin_horizon signature (§18.1)
+│       ├── vacuum.rs               # vacuum_page signature (§18.2)
+│       ├── hot_prune.rs            # hot_prune_chain signature (§18.3)
+│       └── policy.rs               # horizon-pinner detection/pre-emption (§21.2–21.3)
+├── mvcc-ssi/                      # std
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── siread.rs               # SiReadLock, PredicateScope (§11.10)
+│       ├── antidep.rs              # RwAntidepGraph
+│       └── danger.rs               # check_dangerous_at_commit signature (§17.3)
+├── mvcc-storage/                  # std
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── heap.rs                 # HeapStore: VersionStore impl, append-only (§13.2)
+│       ├── inmem.rs                # InMemStore: VersionStore impl, in-place-undo (§18)
+│       ├── page.rs                 # PageHeader, SlotEntry layout (§13.2)
+│       └── index.rs                # bare primary-key index integration trait</code></pre><pre class="diagram"><code>crates/
+├── mvcc-wal/                      # std; shim to blueprint #88
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── commit_record.rs        # CommitRecord, WriteEntryRecord (§11.9)
+│       └── boundary.rs             # WalSink trait, DurableToken typestate (§11.11)
+├── mvcc-cli/                       # `mvccctl` binary
+│   ├── Cargo.toml
+│   └── src/main.rs
+├── mvcc-fuzz/                      # cargo-fuzz harnesses
+│   ├── Cargo.toml
+│   └── fuzz_targets/
+│       ├── visibility_random.rs
+│       ├── chain_traversal.rs
+│       ├── snapshot_construction.rs
+│       ├── commit_abort_interleave.rs
+│       ├── gc_concurrent_reader.rs
+│       └── ssi_antidep.rs
+└── mvcc-bench/                     # criterion benches
+    ├── Cargo.toml
+    └── benches/
+        ├── single_writer.rs
+        ├── readers_dont_block.rs
+        ├── snapshot_construct.rs
+        ├── ssi_overhead.rs
+        └── gc_throughput.rs</code></pre><pre class="diagram"><code>conformance/
+├── README.md
+├── runner/
+│   ├── Cargo.toml
+│   └── src/main.rs                 # emits conformance.report.json (§27)
+├── corpora/
+│   ├── berenson1995/
+│   ├── adya1999/
+│   ├── postgres_isolation/
+│   ├── cockroach_kv_nemesis/
+│   ├── jepsen/
+│   └── elle/
+└── report_schema.json
+jepsen-harness/
+├── README.md
+├── nemesis/                        # partitions, clock skew, kill -9
+├── workloads/                      # bank, register, counter, append
+└── checkers/                       # Elle, Knossos
+tla/
+├── README.md
+├── MvccSI.tla
+├── MvccSSI.tla
+├── MvccHLC.tla
+└── results/
+simulator/
+├── README.md
+├── runner/
+│   ├── Cargo.toml
+│   └── src/main.rs                 # deterministic-simulation harness (§27)
+├── scenarios/
+└── traces/
+benchmarks/
+├── README.md
+├── results/
+└── plots/</code></pre><pre class="diagram"><code>docs/
+├── adr/                            # one file per ADR-## row (§9)
+├── runbooks/
+│   ├── triage.md
+│   ├── bloat-incident.md
+│   ├── idle-in-txn-storm.md
+│   └── ssi-false-positive-spike.md
+├── threat-model/
+│   └── README.md                   # long-form of §23
+├── performance/
+│   └── methodology.md              # long-form of §29
+├── failure-analysis/
+│   └── postmortem-index.md         # index into §24
+├── architecture/
+│   ├── version-chain.md
+│   ├── visibility.md
+│   ├── snapshot-construction.md
+│   ├── commit-protocol.md
+│   ├── ssi.md
+│   ├── gc-horizon.md
+│   └── hlc-vs-oracle-vs-truetime.md
+├── compliance/
+│   ├── isolation-levels.md
+│   └── postgres-parity.md
+└── glossary.md                     # generated from §37</code></pre><pre class="diagram"><code>examples/
+├── two_concurrent_readers.rs
+├── write_skew_demo.rs               # Berenson 1995 A5B reproducer
+├── lost_update_demo.rs
+├── ssi_aborts_write_skew.rs
+├── hot_chain_demo.rs
+├── gc_horizon_demo.rs
+├── hlc_skew_demo.rs
+└── repl_snapshot_demo.rs
+templates/
+├── adr.md
+├── postmortem.md
+└── rfc.md
+scripts/
+├── bootstrap.sh
+├── run-conformance.sh
+└── check-loom.sh
+tools/
+├── report-viewer/                  # renders conformance.report.json
+└── fixture-gen/                    # generates N.5 conformance fixtures
+brand/
+├── voice.md
+├── typography.md
+└── palette.md
+legal/
+├── terms.md
+├── privacy.md
+└── trademark-policy.md
+papers/
+└── whitepaper/
+    └── whitepaper-v1.0.md
+ops/
+├── helm/
+└── k8s/
+notes/
+└── derivations/</code></pre> </section><section aria-labelledby="sec-38"> <h2 id="sec-38">File inventory <small class="muted">(Appendix A · 25 entries)</small></h2> <div class="table-wrap"><table class="data"><caption class="sr-only">File inventory</caption><thead><tr><th scope="col">File</th><th scope="col">Purpose</th></tr></thead><tbody><tr><td><code>README.md</code></td><td>project overview, quickstart</td></tr><tr><td><code>FINAL_BLUEPRINT.md</code></td><td>this document</td></tr><tr><td><code>BUILD_PLAN.md</code></td><td>phase-by-phase execution tracker</td></tr><tr><td><code>CHANGELOG.md</code></td><td>Keep-a-Changelog format release history</td></tr><tr><td><code>BLUEPRINT_LOG.md</code></td><td>decision log cross-referencing ADRs</td></tr><tr><td><code>CONTRIBUTING.md</code></td><td>contribution workflow</td></tr><tr><td><code>CODE_OF_CONDUCT.md</code></td><td>community standards</td></tr><tr><td><code>SECURITY.md</code></td><td>90-day coordinated disclosure policy</td></tr><tr><td><code>LICENSE-APACHE</code></td><td>Apache-2.0 license text</td></tr><tr><td><code>LICENSE-MIT</code></td><td>MIT license text</td></tr><tr><td><code>Makefile</code></td><td>bootstrap/build/test/lint/conformance/anomalies/jepsen/tla/loom/fuzz/soak targets</td></tr><tr><td><code>Cargo.toml</code></td><td>workspace manifest</td></tr><tr><td><code>Dockerfile</code></td><td>multi-stage build → distroless runtime</td></tr><tr><td><code>docker-compose.yml</code></td><td>local dev topology</td></tr><tr><td><code>rust-toolchain.toml</code></td><td>pins Rust 1.78</td></tr><tr><td><code>deny.toml</code></td><td>cargo-deny license/advisory policy</td></tr><tr><td><code>.github/workflows/ci.yml</code></td><td>unit + integration test gate</td></tr><tr><td><code>.github/workflows/conformance.yml</code></td><td>conformance-suite CI job</td></tr><tr><td><code>.github/workflows/anomalies.yml</code></td><td>Berenson/Adya vector CI job</td></tr><tr><td><code>.github/workflows/jepsen.yml</code></td><td>Jepsen chaos-test CI job</td></tr><tr><td><code>.github/workflows/tla.yml</code></td><td>TLC model-checker CI job</td></tr><tr><td><code>.github/workflows/loom.yml</code></td><td>Loom concurrency-model CI job</td></tr><tr><td><code>.github/workflows/fuzz.yml</code></td><td>cargo-fuzz nightly canary job</td></tr><tr><td><code>.github/workflows/soak.yml</code></td><td>30-day soak job</td></tr><tr><td><code>.github/workflows/release.yml</code></td><td>release/signing/SBOM job</td></tr></tbody></table></div> </section> </div> </article> <script>
+    (function () {
+      var strip = document.querySelector('.tabs');
+      var a = strip && strip.querySelector('a[aria-current="page"]');
+      if (strip && a) {
+        var target = a.offsetLeft - (strip.clientWidth - a.offsetWidth) / 2;
+        if (target > 0) strip.scrollLeft = target;
+        var edge = function () {
+          strip.classList.toggle('fade-start', strip.scrollLeft > 4);
+          strip.classList.toggle('fade-end', strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 4);
+        };
+        strip.addEventListener('scroll', edge, { passive: true });
+        window.addEventListener('resize', edge);
+        edge();
+      }
+      // In-page table of contents: collapse long outlines on narrow screens, highlight the current section.
+      var toc = document.querySelector('.doc-toc');
+      if (!toc) return;
+      var det = toc.querySelector('details');
+      var wide = window.matchMedia('(min-width: 64rem)');
+      if (det && det.hasAttribute('data-collapse-narrow') && !wide.matches) det.removeAttribute('open');
+      if (det && wide.matches) det.setAttribute('open', '');
+      var links = Array.prototype.slice.call(toc.querySelectorAll('a[href^="#"]'));
+      if (!links.length) return;
+      var heads = [];
+      links.forEach(function (l) {
+        var el = document.getElementById(decodeURIComponent(l.getAttribute('href').slice(1)));
+        if (el) heads.push({ el: el, link: l });
+      });
+      var cur = null, ticking = false;
+      var list = toc.querySelector('ol');
+      function spy() {
+        ticking = false;
+        if (!wide.matches) return;
+        var line = window.innerHeight * 0.3, pick = null;
+        for (var i = 0; i < heads.length; i++) {
+          if (heads[i].el.getBoundingClientRect().top <= line) pick = heads[i]; else break;
+        }
+        var link = pick ? pick.link : null;
+        if (link === cur) return;
+        if (cur) cur.removeAttribute('aria-current');
+        if (link) link.setAttribute('aria-current', 'location');
+        cur = link;
+        if (link && list && list.scrollHeight > list.clientHeight) {
+          var top = link.offsetTop - list.offsetTop;
+          if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 30) list.scrollTop = top - list.clientHeight / 3;
+        }
+      }
+      window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(spy); } }, { passive: true });
+      spy();
+    })();
+  </script>  </main> <footer class="site-footer" data-pagefind-ignore> <div class="container footer-grid"> <div class="footer-about"> <p class="footer-brand">Engineering Blueprints</p> <p>418 systems specified from scratch — architecture, trade-offs, failure modes and the numbers — with 130 plain-words explainers checked so far.</p> </div> <nav class="footer-nav" aria-label="Footer"> <p class="footer-h">Browse</p> <ul> <li><a href="/system-design-blueprints/">Catalogue</a></li><li><a href="/system-design-blueprints/systems/">All systems A–Z</a></li><li><a href="/system-design-blueprints/domains/">Domains</a></li><li><a href="/system-design-blueprints/glossary/">Glossary</a></li><li><a href="/system-design-blueprints/about/">About</a></li> <li><a href="/system-design-blueprints/#search">Search</a></li> </ul> </nav> <div class="footer-meta"> <p class="footer-h">About this build</p> <p>Generated from <code>blueprints/index</code>, the blueprint markdown and <code>blueprints/explainers</code>. Built 2026-10-09. Static pages, no tracking.</p> </div> </div> </footer> <script>
+      (function () {
+        var b = document.querySelector('.theme-toggle');
+        if (!b) return;
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        var root = document.documentElement;
+        function current() { return root.getAttribute('data-theme') || (mq.matches ? 'dark' : 'light'); }
+        function label() {
+          var next = current() === 'dark' ? 'light' : 'dark';
+          b.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+          b.setAttribute('title', 'Switch to ' + next + ' theme');
+        }
+        b.addEventListener('click', function () {
+          var sys = mq.matches ? 'dark' : 'light';
+          var next = current() === 'dark' ? 'light' : 'dark';
+          root.classList.add('theme-switching');
+          if (next === sys) {
+            root.removeAttribute('data-theme');
+            if (meta) meta.setAttribute('content', 'light dark');
+            try { localStorage.removeItem('theme'); } catch (e) {}
+          } else {
+            root.setAttribute('data-theme', next);
+            if (meta) meta.setAttribute('content', next);
+            try { localStorage.setItem('theme', next); } catch (e) {}
+          }
+          label();
+          setTimeout(function () { root.classList.remove('theme-switching'); }, 300);
+        });
+        if (mq.addEventListener) mq.addEventListener('change', label);
+        label();
+      })();
+    </script> <script type="module">
+      // Drawn diagrams: ```mermaid blocks become <pre class="mermaid">; load mermaid only when a page has one,
+      // colour it from the site's own tokens, and redraw when the light/dark theme changes.
+      const blocks = [...document.querySelectorAll('pre.mermaid')];
+      if (blocks.length) {
+        blocks.forEach((b) => { b.dataset.src = b.textContent; });
+        const [{ default: mermaid }, { default: elk }] = await Promise.all([
+          import('https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs'),
+          import('https://cdn.jsdelivr.net/npm/@mermaid-js/layout-elk@0.2.3/dist/mermaid-layout-elk.esm.min.mjs'),
+        ]);
+        mermaid.registerLayoutLoaders(elk);
+        const root = document.documentElement;
+        const tok = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+        const draw = async () => {
+          const dark = (root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')) === 'dark';
+          mermaid.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: 'base', layout: 'elk',
+            elk: { mergeEdges: false, nodePlacementStrategy: 'NETWORK_SIMPLEX', cycleBreakingStrategy: 'MODEL_ORDER', considerModelOrder: 'NODES_AND_EDGES' },
+            fontFamily: tok('--font-sans') || 'system-ui, sans-serif',
+            flowchart: { htmlLabels: true, curve: 'basis', padding: 14, nodeSpacing: 36, rankSpacing: 46, useMaxWidth: true },
+            sequence: { useMaxWidth: true, mirrorActors: false },
+            themeVariables: {
+              darkMode: dark, fontSize: '14px',
+              background: tok('--bg'), primaryColor: tok('--accent-bg'), primaryTextColor: tok('--fg'),
+              primaryBorderColor: tok('--accent'), secondaryColor: tok('--bg2'), tertiaryColor: tok('--bg3'),
+              lineColor: tok('--fg2'), textColor: tok('--fg'), mainBkg: tok('--accent-bg'), nodeBorder: tok('--accent'),
+              clusterBkg: tok('--bg2'), clusterBorder: tok('--line2'), titleColor: tok('--fg'),
+              edgeLabelBackground: tok('--bg'), noteBkgColor: tok('--warn-bg'), noteTextColor: tok('--fg'),
+              actorBkg: tok('--accent-bg'), actorBorder: tok('--accent'), actorTextColor: tok('--fg'), signalColor: tok('--fg2'),
+            },
+          });
+          blocks.forEach((b) => { b.removeAttribute('data-processed'); b.innerHTML = ''; b.textContent = b.dataset.src; });
+          try { await mermaid.run({ nodes: blocks }); } catch (e) { console.error('diagram render failed', e); }
+        };
+        await draw();
+        document.querySelectorAll('.diagram-expand').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const fig = btn.closest('figure');
+            const on = fig.classList.toggle('expanded');
+            btn.textContent = on ? '✕' : '⤢';
+            btn.setAttribute('aria-label', on ? 'Close diagram' : 'Expand diagram');
+            document.body.style.overflow = on ? 'hidden' : '';
+          });
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          const fig = document.querySelector('figure.mermaid-figure.expanded');
+          if (fig) fig.querySelector('.diagram-expand').click();
+        });
+        new MutationObserver(() => draw()).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => draw());
+      }
+    </script> </body> </html>
